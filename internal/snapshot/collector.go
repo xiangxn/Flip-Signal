@@ -36,6 +36,9 @@ type Collector struct {
 
 	// Market end time
 	marketEndTime int64
+
+	// Market cycle generation (set by feed, stamped on each snapshot)
+	generation int64
 }
 
 // NewCollector creates a new snapshot collector.
@@ -45,6 +48,11 @@ func NewCollector(marketID string, openPrice float64, capacity int) *Collector {
 		marketID:  marketID,
 		openPrice: openPrice,
 	}
+}
+
+// SetGeneration sets the market cycle generation for filtering stale snapshots.
+func (c *Collector) SetGeneration(gen int64) {
+	c.generation = gen
 }
 
 // SetMarketEndTime sets the market end time for remaining seconds calculation.
@@ -89,6 +97,7 @@ func (c *Collector) Tick(now time.Time) *Snapshot {
 		Timestamp:    now.UnixMilli(),
 		MarketID:     c.marketID,
 		RemainingSec: c.calcRemainingSec(now),
+		Generation:   c.generation,
 		OpenPrice:    c.openPrice,
 		Price:        c.latestPrice,
 

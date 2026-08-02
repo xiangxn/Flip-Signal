@@ -43,13 +43,12 @@ func NewSnapshotFeed(
 }
 
 // Reset re-initializes the feed for a new market cycle.
-//   - marketID: new Polymarket market ID
-//   - endTime: new market end time (unix seconds)
-func (f *SnapshotFeed) Reset(marketID string, endTime int64) {
+func (f *SnapshotFeed) Reset(marketID string, endTime int64, generation int64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.collector = snapshot.NewCollector(marketID, 0, 300)
 	f.collector.SetMarketEndTime(endTime)
+	f.collector.SetGeneration(generation)
 }
 
 // Collector returns the internal snapshot collector.

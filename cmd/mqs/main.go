@@ -83,17 +83,22 @@ func main() {
 	// ================================================================
 	// Market Cycle Loop
 	// Polymarket runs 5-minute markets continuously. Each cycle:
-	//   1. Wait for next 5-min aligned window + 2s (kline delay)
-	//   2. Fetch Binance 5m kline open price
-	//   3. Fetch Polymarket market by slug
-	//   4. Subscribe to market tokens
-	//   5. Collect snapshots + compute MQS until market ends
-	//   6. Unsubscribe old tokens, go to 1
+	//   1. Determine next 5-min aligned window
+	//   2. Sleep until window start + 2s (kline delay)
+	//   3. Fetch Binance 5m kline open price
+	//   4. Fetch Polymarket market by slug
+	//   5. Subscribe to market token order books
+	//   6. Reset snapshot collector (new RingBuffer, new endTime)
+	//   7. Drain stale snapshots from channel
+	//   8. Collect snapshots + compute MQS until market ends
+	//   9. Unsubscribe tokens, increment generation, goto 1
 	// ================================================================
 	log.Println("========================================")
 	log.Println("MQS Live — BTC 5-minute tail-trading")
 	log.Println("Data: [Binance BTC/USDT] + [Polymarket order books]")
 	log.Println("========================================")
+
+	var generation int64 // incremented each cycle, used to filter stale snapshots
 
 	for {
 		select {
@@ -109,21 +114,18 @@ func main() {
 		// --- Step 1: Determine next 5-min aligned window ---
 		now := time.Now()
 		alignedTs := now.Unix() / windowSec * windowSec
-		nextStart := time.Unix(alignedTs+windowSec, 0) // start of NEXT window
-
-		// If we're within 2s of the current window starting, use current window
-		if now.Unix()-alignedTs < 2 {
-			nextStart = time.Unix(alignedTs, 0)
-		}
-
+		// The current window is [alignedTs, alignedTs+300). We want the window
+		// that starts at alignedTs (which may already be in progress).
+		nextStart := time.Unix(alignedTs, 0)
 		marketSlug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
 		marketEndTime := nextStart.Unix() + windowSec
 
-		// --- Step 2: Wait until window start + 2s (ensure kline exists) ---
+		// --- Step 2: Sleep until window start + 2s (kline hasn't been generated yet at t=0) ---
 		waitUntil := nextStart.Add(2 * time.Second)
 		waitDur := time.Until(waitUntil)
 		if waitDur > 0 {
-			log.Printf("[Cycle] waiting %v for next window (slug=%s)", waitDur.Round(time.Second), marketSlug)
+			log.Printf("[Cycle] next window at %s, waiting %v (slug=%s)",
+				nextStart.UTC().Format(time.RFC3339), waitDur.Round(time.Second), marketSlug)
 			select {
 			case <-ctx.Done():
 				return
@@ -132,14 +134,14 @@ func main() {
 		}
 
 		// --- Step 3: Fetch kline open price ---
-		log.Printf("[Cycle] fetching kline open price...")
+		log.Printf("[Cycle] fetching %s 5m kline...", *slugPrefix)
 		binanceAdapter.FetchKlineOpenPrice()
 
 		// --- Step 4: Fetch Polymarket market ---
 		log.Printf("[Cycle] fetching market: %s", marketSlug)
 		marketData, err := client.FetchMarketBySlug(marketSlug)
 		if err != nil {
-			log.Printf("[Cycle] ERROR fetching market: %v — retrying in 5s", err)
+			log.Printf("[Cycle] ERROR: %v — retrying in 5s", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -155,24 +157,50 @@ func main() {
 			tokenIDs = append(tokenIDs, t.Get("token_id").String())
 		}
 
-		log.Printf("[Cycle] market=%s tokens=%v ends=%s", marketID, tokenIDs,
+		log.Printf("[Cycle] market=%s tokens=%v ends=%s",
+			marketID, tokenIDs,
 			time.Unix(marketEndTime, 0).UTC().Format(time.RFC3339))
 
 		// --- Step 5: Subscribe & reset ---
 		bookAdapter.SubscribeTokens(tokenIDs...)
-		snapFeed.Reset(marketID, marketEndTime)
+		generation++
+		snapFeed.Reset(marketID, marketEndTime, generation)
+
+		// --- Step 6: Drain stale snapshots from previous cycle ---
+		drained := 0
+	drainLoop:
+		for {
+			select {
+			case snap := <-snapFeed.SnapshotCh:
+				if snap.Generation >= generation {
+					// Current-cycle data reached — stop draining
+					break drainLoop
+				}
+				drained++
+			default:
+				break drainLoop
+			}
+		}
+		if drained > 0 {
+			log.Printf("[Cycle] drained %d stale snapshots", drained)
+		}
 
 		remaining := marketEndTime - time.Now().Unix()
-		log.Printf("[Cycle] running — remaining=%ds (waiting for tail window at 60s)", remaining)
+		log.Printf("[Cycle] running — remaining=%ds", remaining)
 
-		// --- Step 6: Collect snapshots until market ends ---
+		// --- Step 7: Collect snapshots until market ends ---
+		var lastDecision decision.Decision
+		var lastLogRemaining int
 		for {
 			select {
 			case <-ctx.Done():
 				return
 
 			case snap := <-snapFeed.SnapshotCh:
-				// Only process snapshots for current market
+				// Skip snapshots from previous generations
+				if snap.Generation < generation {
+					continue
+				}
 				if snap.RemainingSec <= 0 {
 					log.Printf("[Cycle] market ended, transitioning...")
 					goto nextCycle
@@ -181,9 +209,8 @@ func main() {
 				// Compute MQS
 				mq := engine.ComputeMQS(snapFeed.Collector().Buffer().Window(300))
 
-				// Only evaluate in tail window (last 60s)
+				// Pre-tail: only periodic logs
 				if snap.RemainingSec > 60 {
-					// Pre-tail: log MQS periodically (every 15s)
 					if snap.RemainingSec%15 == 0 {
 						log.Printf("[pre-tail] MQS=%.0f Rem=%ds", mq.Total, snap.RemainingSec)
 					}
@@ -193,23 +220,30 @@ func main() {
 				// Tail window — evaluate trading rules
 				result := decision.Decide(mq, snap.RemainingSec)
 
-				status := "🟢"
-				switch result.Decision {
-				case decision.DecisionForbidden:
-					status = "🔴"
-				case decision.DecisionNoTrade:
-					status = "🟡"
-				case decision.DecisionStrong:
-					status = "🔥"
-				}
+				// Only log/record when decision CHANGES or every 10s
+				changed := result.Decision != lastDecision || snap.RemainingSec-lastLogRemaining >= 10
+				if changed {
+					lastDecision = result.Decision
+					lastLogRemaining = snap.RemainingSec
 
-				log.Printf("[%s] MQS=%.0f | T=%.0f N=%.0f H=%.0f F=%.0f L=%.0f | Rem=%ds | %s",
-					status, mq.Total, mq.TrendScore, mq.NoiseScore, mq.HealthScore,
-					mq.FlowScore, mq.LiquidityScore,
-					snap.RemainingSec, result.Decision.String())
+					status := "🟢"
+					switch result.Decision {
+					case decision.DecisionForbidden:
+						status = "🔴"
+					case decision.DecisionNoTrade:
+						status = "🟡"
+					case decision.DecisionStrong:
+						status = "🔥"
+					}
 
-				if recorder != nil && result.Decision != decision.DecisionNoTrade {
-					_ = recorder.Record(mq, snap.RemainingSec, snap.ReturnFromOpen, result.Decision, "")
+					log.Printf("[%s] MQS=%.0f | T=%.0f N=%.0f H=%.0f F=%.0f L=%.0f | Rem=%ds | %s",
+						status, mq.Total, mq.TrendScore, mq.NoiseScore, mq.HealthScore,
+						mq.FlowScore, mq.LiquidityScore,
+						snap.RemainingSec, result.Decision.String())
+
+					if recorder != nil && result.Decision != decision.DecisionNoTrade {
+						_ = recorder.Record(mq, snap.RemainingSec, snap.ReturnFromOpen, result.Decision, "")
+					}
 				}
 			}
 		}

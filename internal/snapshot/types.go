@@ -6,6 +6,7 @@ type Snapshot struct {
 	Timestamp    int64
 	MarketID     string
 	RemainingSec int
+	Generation   int64 // Market cycle generation — used to filter stale snapshots
 
 	// BTC price
 	OpenPrice float64
