@@ -3,3 +3,6 @@ data
 __pycache__
 venv
 reports
+dist
+
+deploy.sh

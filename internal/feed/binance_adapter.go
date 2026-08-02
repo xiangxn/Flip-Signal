@@ -41,12 +41,14 @@ type BinanceMarketData struct {
 type BinanceConfig struct {
 	Symbol        string // e.g. "BTCUSDT"
 	StreamBaseURL string // e.g. "wss://stream.binance.com:9443"
+	RestBaseURL   string // e.g. "https://data-api.binance.vision"
 }
 
 func DefaultBinanceConfig() BinanceConfig {
 	return BinanceConfig{
 		Symbol:        "BTCUSDT",
 		StreamBaseURL: "wss://stream.binance.com:9443",
+		RestBaseURL:   "https://data-api.binance.vision",
 	}
 }
 
@@ -142,8 +144,8 @@ func (b *BinanceAdapter) Start(ctx context.Context) error {
 // Called at the start of each market cycle (with 1-2s delay after window start).
 // This replaces the previous value so each new 5-minute window gets its own open price.
 func (b *BinanceAdapter) FetchKlineOpenPrice() {
-	url := fmt.Sprintf("https://api.binance.com/api/v3/klines?symbol=%s&interval=5m&limit=1",
-		b.cfg.Symbol)
+	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=5m&limit=1",
+		b.cfg.RestBaseURL, b.cfg.Symbol)
 
 	resp, err := http.Get(url)
 	if err != nil {
@@ -152,7 +154,7 @@ func (b *BinanceAdapter) FetchKlineOpenPrice() {
 	}
 	defer resp.Body.Close()
 
-	var klines [][]interface{}
+	var klines [][]any
 	if err := json.NewDecoder(resp.Body).Decode(&klines); err != nil {
 		log.Printf("[BinanceAdapter] decode kline error: %v", err)
 		return

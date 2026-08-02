@@ -70,8 +70,9 @@ func main() {
 	// Binance adapter
 	// ================================================================
 	binanceCfg := feed.BinanceConfig{
-		Symbol:        *symbol,
-		StreamBaseURL: "wss://stream.binance.com:9443",
+		Symbol: *symbol,
+		// StreamBaseURL: "wss://stream.binance.com:9443",
+		StreamBaseURL: "wss://data-stream.binance.vision",
 	}
 	binance := feed.NewBinanceAdapterWithConfig(binanceCfg)
 	go func() {
