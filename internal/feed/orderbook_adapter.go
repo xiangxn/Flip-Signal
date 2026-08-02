@@ -14,10 +14,20 @@ type OrderBookAdapter struct {
 }
 
 // NewOrderBookAdapter creates a new order book adapter.
-// wsBaseURL is the Polymarket CLOB WebSocket base URL (e.g., "wss://ws-subscriptions-clob.polymarket.com").
+// wsBaseURL: e.g. "wss://ws-subscriptions-clob.polymarket.com"
+// customFeatureEnabled: set to true to receive resolution events via WebSocket
 func NewOrderBookAdapter(wsBaseURL string, client *sdk.PolymarketClient, isStore bool) *OrderBookAdapter {
 	return &OrderBookAdapter{
 		monitor:     sdk.NewMarketMonitor(wsBaseURL, isStore, client, false),
+		orderBookCh: make(chan *sdk.OrderBook, 4096),
+	}
+}
+
+// NewOrderBookAdapterWithResolve is like NewOrderBookAdapter but with
+// customFeatureEnabled=true, which enables market_resolved events on the WebSocket.
+func NewOrderBookAdapterWithResolve(wsBaseURL string, client *sdk.PolymarketClient, isStore bool) *OrderBookAdapter {
+	return &OrderBookAdapter{
+		monitor:     sdk.NewMarketMonitor(wsBaseURL, isStore, client, true),
 		orderBookCh: make(chan *sdk.OrderBook, 4096),
 	}
 }
@@ -30,6 +40,11 @@ func (o *OrderBookAdapter) SubscribeTokens(tokens ...string) {
 // UnsubscribeTokens unsubscribes from order book updates for the given token IDs.
 func (o *OrderBookAdapter) UnsubscribeTokens(tokens ...string) {
 	o.monitor.UnsubscribeTokens(tokens...)
+}
+
+// SubscribeResolved returns a channel that receives market resolution events.
+func (o *OrderBookAdapter) SubscribeResolved() <-chan *sdk.ResolvedInfo {
+	return o.monitor.SubscribeResolved()
 }
 
 // Start begins streaming order book data.

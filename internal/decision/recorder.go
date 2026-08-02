@@ -14,6 +14,7 @@ import (
 // DecisionRecord is the JSON log format (§10).
 type DecisionRecord struct {
 	Time      string  `json:"time"`
+	MarketID  string  `json:"market_id"`
 	Remaining int     `json:"remaining"`
 	MQS       float64 `json:"MQS"`
 	Trend     float64 `json:"trend"`
@@ -23,18 +24,32 @@ type DecisionRecord struct {
 	Liquidity float64 `json:"liquidity"`
 	BTCReturn string  `json:"btc_return"`
 	Decision  string  `json:"decision"`
-	Result    string  `json:"result"` // "WIN", "LOSE", "" (pending)
+	Result    string  `json:"result"` // WIN, LOSE, or "" (pending)
+}
+
+// ResultRecord is written when a market resolves.
+type ResultRecord struct {
+	Type           string `json:"type"` // "resolution"
+	Time           string `json:"time"`
+	MarketID       string `json:"market_id"`
+	WinningOutcome string `json:"winning_outcome"`
+	OurDecision    string `json:"our_decision"`
+	Result         string `json:"result"` // WIN or LOSE
 }
 
 // Recorder writes decision records to a JSONL file.
+// In-progress decisions (pending market resolution) are held in memory
+// and flushed with results when the market resolves.
 type Recorder struct {
 	mu       sync.Mutex
 	file     *os.File
 	filePath string
+
+	// Pending decisions for current cycle, keyed by market ID
+	pending map[string][]DecisionRecord
 }
 
-// NewRecorder creates a new recorder that writes to the given path.
-// If the directory doesn't exist, it will be created.
+// NewRecorder creates a new recorder.
 func NewRecorder(path string) (*Recorder, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -49,13 +64,19 @@ func NewRecorder(path string) (*Recorder, error) {
 	return &Recorder{
 		file:     f,
 		filePath: path,
+		pending:  make(map[string][]DecisionRecord),
 	}, nil
 }
 
-// Record writes a decision record to the log.
-func (r *Recorder) Record(mq mqs.MarketQuality, remainingSec int, btcReturn float64, decision Decision, result string) error {
+// AddDecision queues a decision record. It is NOT written yet — it will be
+// flushed with the result when Resolve() is called for this market.
+func (r *Recorder) AddDecision(marketID string, mq mqs.MarketQuality, remainingSec int, btcReturn float64, decision Decision) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
 	rec := DecisionRecord{
 		Time:      time.Now().UTC().Format(time.RFC3339),
+		MarketID:  marketID,
 		Remaining: remainingSec,
 		MQS:       round2(mq.Total),
 		Trend:     round2(mq.TrendScore),
@@ -65,23 +86,73 @@ func (r *Recorder) Record(mq mqs.MarketQuality, remainingSec int, btcReturn floa
 		Liquidity: round2(mq.LiquidityScore),
 		BTCReturn: fmt.Sprintf("%.2f%%", btcReturn*100),
 		Decision:  decision.String(),
-		Result:    result,
+		Result:    "", // filled in by Resolve()
 	}
 
-	data, err := json.Marshal(rec)
-	if err != nil {
-		return fmt.Errorf("marshal record: %w", err)
-	}
+	r.pending[marketID] = append(r.pending[marketID], rec)
+}
 
+// Resolve is called when a market resolves. It writes all pending decisions
+// for the market with WIN/LOSE results, plus a resolution summary record.
+//   - marketID: the Polymarket market ID
+//   - winningOutcome: "Yes" or "No"
+//   - ourDirection: "BUY_YES" or "BUY_NO" (the direction we bet on)
+func (r *Recorder) Resolve(marketID, winningOutcome, ourDirection string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	_, err = r.file.Write(append(data, '\n'))
-	return err
+	// Determine result
+	var result string
+	switch {
+	case ourDirection == "BUY_YES" && winningOutcome == "Yes":
+		result = "WIN"
+	case ourDirection == "BUY_NO" && winningOutcome == "No":
+		result = "WIN"
+	case ourDirection == "":
+		result = "UNKNOWN"
+	default:
+		result = "LOSE"
+	}
+
+	// Write all pending decisions with result filled in
+	for i := range r.pending[marketID] {
+		r.pending[marketID][i].Result = result
+		data, _ := json.Marshal(r.pending[marketID][i])
+		r.file.Write(append(data, '\n'))
+	}
+
+	// Write resolution summary
+	summary := ResultRecord{
+		Type:           "resolution",
+		Time:           time.Now().UTC().Format(time.RFC3339),
+		MarketID:       marketID,
+		WinningOutcome: winningOutcome,
+		OurDecision:    ourDirection,
+		Result:         result,
+	}
+	data, _ := json.Marshal(summary)
+	r.file.Write(append(data, '\n'))
+
+	delete(r.pending, marketID)
+}
+
+// FlushPending writes all pending decisions with empty results (for crash safety).
+func (r *Recorder) FlushPending() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for _, recs := range r.pending {
+		for _, rec := range recs {
+			data, _ := json.Marshal(rec)
+			r.file.Write(append(data, '\n'))
+		}
+	}
+	r.pending = make(map[string][]DecisionRecord)
 }
 
 // Close closes the underlying file.
 func (r *Recorder) Close() error {
+	r.FlushPending()
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.file.Close()

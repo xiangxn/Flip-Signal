@@ -14,13 +14,19 @@ import (
 
 // SnapshotFeed combines Binance BTC data + Polymarket YES/NO data
 // into 1-second snapshots, computes MQS, and publishes results.
-// It supports Reset() for transitioning between 5-minute market cycles.
 type SnapshotFeed struct {
-	mu           sync.Mutex
-	collector    *snapshot.Collector
-	binance      *BinanceAdapter
-	bookAdapter  *OrderBookAdapter
-	engine       *mqs.Engine
+	mu        sync.Mutex
+	collector *snapshot.Collector
+	binance   *BinanceAdapter
+	bookAdapter *OrderBookAdapter
+	engine    *mqs.Engine
+
+	// Token tracking: which token ID maps to which outcome
+	yesTokenID string
+	noTokenID  string
+	yesBook    *sdk.OrderBook
+	noBook     *sdk.OrderBook
+	bookMu     sync.RWMutex
 
 	SnapshotCh chan *snapshot.Snapshot
 	MQSCh      chan mqs.MarketQuality
@@ -42,6 +48,16 @@ func NewSnapshotFeed(
 	}
 }
 
+// SetTokens configures which token IDs map to YES/NO outcomes.
+func (f *SnapshotFeed) SetTokens(yesTokenID, noTokenID string) {
+	f.bookMu.Lock()
+	defer f.bookMu.Unlock()
+	f.yesTokenID = yesTokenID
+	f.noTokenID = noTokenID
+	f.yesBook = nil
+	f.noBook = nil
+}
+
 // Reset re-initializes the feed for a new market cycle.
 func (f *SnapshotFeed) Reset(marketID string, endTime int64, generation int64) {
 	f.mu.Lock()
@@ -58,16 +74,13 @@ func (f *SnapshotFeed) Collector() *snapshot.Collector {
 	return f.collector
 }
 
-// Start begins the 1-second snapshot collection loop. Runs until ctx is cancelled.
+// Start begins the 1-second snapshot collection loop.
 func (f *SnapshotFeed) Start(ctx context.Context) {
-	// Start data sources (idempotent)
 	go f.binance.Start(ctx)
 	f.bookAdapter.Start(ctx)
 
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
-
-	var latestBook *sdk.OrderBook
 
 	log.Printf("[SnapshotFeed] started")
 
@@ -77,7 +90,15 @@ func (f *SnapshotFeed) Start(ctx context.Context) {
 			return
 
 		case book := <-f.bookAdapter.OrderBook():
-			latestBook = book
+			// Track YES/NO books separately by token ID
+			f.bookMu.Lock()
+			switch book.AssetId {
+			case f.yesTokenID:
+				f.yesBook = book
+			case f.noTokenID:
+				f.noBook = book
+			}
+			f.bookMu.Unlock()
 
 		case now := <-ticker.C:
 			btc := f.binance.LatestData()
@@ -88,7 +109,6 @@ func (f *SnapshotFeed) Start(ctx context.Context) {
 			f.mu.Lock()
 			collector := f.collector
 
-			// Set open price from Binance kline (refreshed each cycle)
 			if btc.OpenPrice > 0 {
 				collector.SetOpenPrice(btc.OpenPrice)
 			}
@@ -100,10 +120,20 @@ func (f *SnapshotFeed) Start(ctx context.Context) {
 			buy1s, sell1s, buy10s, sell10s := f.binance.ConsumeVolume()
 			collector.UpdateVolume(buy1s, sell1s, buy10s, sell10s)
 
-			if latestBook != nil {
-				yesPrice, noPrice := computePolymarketPrices(latestBook)
-				collector.UpdatePolymarket(yesPrice, noPrice)
+			// Compute YES/NO prices from tracked order books
+			f.bookMu.RLock()
+			yesBook := f.yesBook
+			noBook := f.noBook
+			f.bookMu.RUnlock()
+
+			var yesPrice, noPrice float64
+			if yesBook != nil {
+				yesPrice = midPrice(yesBook)
 			}
+			if noBook != nil {
+				noPrice = midPrice(noBook)
+			}
+			collector.UpdatePolymarket(yesPrice, noPrice)
 
 			snap := collector.Tick(now)
 			mq := f.engine.ComputeMQS(collector.Buffer().Window(300))
@@ -121,10 +151,10 @@ func (f *SnapshotFeed) Start(ctx context.Context) {
 	}
 }
 
-func computePolymarketPrices(book *sdk.OrderBook) (yesPrice, noPrice float64) {
-	if len(book.Bids) > 0 && len(book.Asks) > 0 {
-		mid := (book.Bids[0].Price + book.Asks[0].Price) / 2
-		return mid, 1 - mid
+// midPrice returns the mid price from an order book's best bid/ask.
+func midPrice(book *sdk.OrderBook) float64 {
+	if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 {
+		return 0
 	}
-	return 0, 0
+	return (book.Bids[0].Price + book.Asks[0].Price) / 2
 }

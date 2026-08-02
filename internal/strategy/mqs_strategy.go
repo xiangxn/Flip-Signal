@@ -142,7 +142,7 @@ func (s *MQSStrategy) evaluateDecision(mq mqs.MarketQuality, o runtime.Observati
 		btcReturn = r
 	}
 	if s.recorder != nil {
-		_ = s.recorder.Record(mq, int(remainingSec), btcReturn, result.Decision, "")
+		s.recorder.AddDecision(o.MarketID, mq, int(remainingSec), btcReturn, result.Decision)
 	}
 
 	s.mu.Lock()

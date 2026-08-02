@@ -18,6 +18,7 @@ import (
 
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 	"github.com/xiangxn/go-polymarket-sdk/model"
+	"github.com/tidwall/gjson"
 )
 
 const windowSec = 5 * 60 // 5 minutes
@@ -66,7 +67,7 @@ func main() {
 	}()
 
 	// ---- Polymarket order book adapter ----
-	bookAdapter := feed.NewOrderBookAdapter(cfg.SDK.Polymarket.ClobWSBaseURL, client, false)
+	bookAdapter := feed.NewOrderBookAdapterWithResolve(cfg.SDK.Polymarket.ClobWSBaseURL, client, false)
 
 	// ---- Snapshot feed ----
 	snapFeed := feed.NewSnapshotFeed("", binanceAdapter, bookAdapter)
@@ -79,6 +80,70 @@ func main() {
 	}
 
 	engine := mqs.NewEngine()
+
+	// Track our decision direction per market (for result calculation)
+	type pendingMarket struct {
+		marketID  string
+		slug      string
+		endTime   int64
+		direction string // "BUY_YES" or "BUY_NO"
+	}
+	pendingResults := make(map[string]*pendingMarket) // marketID → info
+
+	// ---- Resolution: WS primary + REST fallback ----
+	go func() {
+		resolvedCh := bookAdapter.SubscribeResolved()
+		pollTicker := time.NewTicker(15 * time.Second)
+		defer pollTicker.Stop()
+
+		resolveMarket := func(mid string, winner string) {
+			pm, ok := pendingResults[mid]
+			if !ok {
+				return
+			}
+			log.Printf("[Result] market=%s winner=%s our=%s",
+				pm.marketID, winner, pm.direction)
+			if recorder != nil {
+				recorder.Resolve(pm.marketID, winner, pm.direction)
+			}
+			delete(pendingResults, mid)
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+
+			case info := <-resolvedCh:
+				// Primary: WebSocket market_resolved event
+				resolveMarket(info.Market, info.WinningOutcome)
+
+			case <-pollTicker.C:
+				// Fallback: REST poll after market end time
+				now := time.Now().Unix()
+				for mid, pm := range pendingResults {
+					if now < pm.endTime+15 {
+						continue
+					}
+					data, err := client.FetchMarketBySlug(pm.slug)
+					if err != nil || !data.Get("closed").Bool() {
+						continue
+					}
+					outcomes := gjson.Parse(data.Get("outcomes").String()).Array()
+					prices := gjson.Parse(data.Get("outcomePrices").String()).Array()
+					winner := "Unknown"
+					if len(outcomes) == 2 && len(prices) == 2 {
+						if gjson.Parse(prices[0].Raw).Float() > 0.99 {
+							winner = outcomes[0].String()
+						} else if gjson.Parse(prices[1].Raw).Float() > 0.99 {
+							winner = outcomes[1].String()
+						}
+					}
+					resolveMarket(mid, winner)
+				}
+			}
+		}
+	}()
 
 	// ================================================================
 	// Market Cycle Loop
@@ -151,18 +216,44 @@ func main() {
 		}
 
 		marketID := marketData.Get("id").String()
-		tokens := marketData.Get("tokens").Array()
+
+		// Polymarket returns token IDs in "clobTokenIds" as a JSON string array.
+		// Outcomes in "outcomes" as JSON array: ["Up", "Down"].
 		var tokenIDs []string
-		for _, t := range tokens {
-			tokenIDs = append(tokenIDs, t.Get("token_id").String())
+		var yesTokenID, noTokenID string
+
+		clobRaw := marketData.Get("clobTokenIds").String()
+		// Parse JSON array from string like ["id1", "id2"]
+		parsed := gjson.Parse(clobRaw)
+		for _, v := range parsed.Array() {
+			tokenIDs = append(tokenIDs, v.String())
 		}
 
-		log.Printf("[Cycle] market=%s tokens=%v ends=%s",
-			marketID, tokenIDs,
+		outcomesRaw := marketData.Get("outcomes").String()
+		outcomesParsed := gjson.Parse(outcomesRaw)
+		outcomes := make([]string, 0)
+		for _, v := range outcomesParsed.Array() {
+			outcomes = append(outcomes, v.String())
+		}
+
+		if len(tokenIDs) >= 2 {
+			for i, oc := range outcomes {
+				switch oc {
+				case "Up", "Yes":
+					yesTokenID = tokenIDs[i]
+				case "Down", "No":
+					noTokenID = tokenIDs[i]
+				}
+			}
+		}
+
+		log.Printf("[Cycle] market=%s YES=%s NO=%s ends=%s",
+			marketID, yesTokenID, noTokenID,
 			time.Unix(marketEndTime, 0).UTC().Format(time.RFC3339))
 
 		// --- Step 5: Subscribe & reset ---
 		bookAdapter.SubscribeTokens(tokenIDs...)
+		snapFeed.SetTokens(yesTokenID, noTokenID)
 		generation++
 		snapFeed.Reset(marketID, marketEndTime, generation)
 
@@ -191,13 +282,14 @@ func main() {
 		// --- Step 7: Collect snapshots until market ends ---
 		var lastDecision decision.Decision
 		var lastLogRemaining int
+		var cycleDirection string // BUY_YES or BUY_NO for this cycle
+
 		for {
 			select {
 			case <-ctx.Done():
 				return
 
 			case snap := <-snapFeed.SnapshotCh:
-				// Skip snapshots from previous generations
 				if snap.Generation < generation {
 					continue
 				}
@@ -206,10 +298,8 @@ func main() {
 					goto nextCycle
 				}
 
-				// Compute MQS
 				mq := engine.ComputeMQS(snapFeed.Collector().Buffer().Window(300))
 
-				// Pre-tail: only periodic logs
 				if snap.RemainingSec > 60 {
 					if snap.RemainingSec%15 == 0 {
 						log.Printf("[pre-tail] MQS=%.0f Rem=%ds", mq.Total, snap.RemainingSec)
@@ -217,10 +307,8 @@ func main() {
 					continue
 				}
 
-				// Tail window — evaluate trading rules
 				result := decision.Decide(mq, snap.RemainingSec)
 
-				// Only log/record when decision CHANGES or every 10s
 				changed := result.Decision != lastDecision || snap.RemainingSec-lastLogRemaining >= 10
 				if changed {
 					lastDecision = result.Decision
@@ -236,19 +324,30 @@ func main() {
 						status = "🔥"
 					}
 
+					// Determine direction from BTC price movement
+					if result.Decision == decision.DecisionStandard || result.Decision == decision.DecisionStrong {
+						if snap.ReturnFromOpen >= 0 {
+							cycleDirection = "BUY_YES"
+						} else {
+							cycleDirection = "BUY_NO"
+						}
+						pendingResults[marketID] = &pendingMarket{marketID, marketSlug, marketEndTime, cycleDirection}
+					}
+
 					log.Printf("[%s] MQS=%.0f | T=%.0f N=%.0f H=%.0f F=%.0f L=%.0f | Rem=%ds | %s",
 						status, mq.Total, mq.TrendScore, mq.NoiseScore, mq.HealthScore,
 						mq.FlowScore, mq.LiquidityScore,
 						snap.RemainingSec, result.Decision.String())
 
 					if recorder != nil && result.Decision != decision.DecisionNoTrade {
-						_ = recorder.Record(mq, snap.RemainingSec, snap.ReturnFromOpen, result.Decision, "")
+						recorder.AddDecision(marketID, mq, snap.RemainingSec, snap.ReturnFromOpen, result.Decision)
 					}
 				}
 			}
 		}
 	nextCycle:
-		// Unsubscribe old tokens before next cycle
+		// Keep previous cycle's decisions in pendingResults for resolution polling.
+		// They'll be flushed when the market resolves.
 		bookAdapter.UnsubscribeTokens(tokenIDs...)
 	}
 }
