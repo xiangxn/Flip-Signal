@@ -102,8 +102,8 @@ func NewBinanceAdapterWithConfig(cfg BinanceConfig) *BinanceAdapter {
 	}
 }
 
-func (b *BinanceAdapter) Symbol() string     { return b.cfg.Symbol }
-func (b *BinanceAdapter) Started() bool       { return b.started.Load() }
+func (b *BinanceAdapter) Symbol() string { return b.cfg.Symbol }
+func (b *BinanceAdapter) Started() bool  { return b.started.Load() }
 
 func (b *BinanceAdapter) streamURL() string {
 	symbol := strings.ToLower(b.cfg.Symbol)
@@ -204,7 +204,7 @@ func (b *BinanceAdapter) readLoop(ctx context.Context) {
 	}()
 
 	tradeStream := strings.ToLower(b.cfg.Symbol) + "@trade"
-	depthStream := strings.ToLower(b.cfg.Symbol) + "@depth20"
+	depthStream := strings.ToLower(b.cfg.Symbol) + "@depth20@100ms"
 
 	for {
 		select {
@@ -220,6 +220,7 @@ func (b *BinanceAdapter) readLoop(ctx context.Context) {
 			return
 		}
 
+		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Printf("[BinanceAdapter] read error: %v", err)
@@ -276,8 +277,8 @@ func (b *BinanceAdapter) handleTrade(data json.RawMessage) {
 
 func (b *BinanceAdapter) handleDepth(data json.RawMessage) {
 	var depth struct {
-		Bids [][2]string `json:"b"`
-		Asks [][2]string `json:"a"`
+		Bids [][2]string `json:"bids"`
+		Asks [][2]string `json:"asks"`
 	}
 	if err := json.Unmarshal(data, &depth); err != nil {
 		return
