@@ -73,6 +73,7 @@ func main() {
 		Symbol: *symbol,
 		// StreamBaseURL: "wss://stream.binance.com:9443",
 		StreamBaseURL: "wss://data-stream.binance.vision",
+		RestBaseURL:   "https://data-api.binance.vision",
 	}
 	binance := feed.NewBinanceAdapterWithConfig(binanceCfg)
 	go func() {

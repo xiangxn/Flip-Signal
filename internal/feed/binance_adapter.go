@@ -96,6 +96,9 @@ func NewBinanceAdapterWithConfig(cfg BinanceConfig) *BinanceAdapter {
 	if cfg.StreamBaseURL == "" {
 		cfg.StreamBaseURL = "wss://stream.binance.com:9443"
 	}
+	if cfg.RestBaseURL == "" {
+		cfg.RestBaseURL = "https://api.binance.com"
+	}
 	cfg.Symbol = strings.ToUpper(cfg.Symbol)
 
 	return &BinanceAdapter{
