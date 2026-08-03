@@ -1,0 +1,1 @@
+scp -r -o ProxyCommand="nc -X 5 -x 127.0.0.1:1080 %h %p" root@23.94.67.168:/root/lastrading/data/lab ./data

@@ -18,8 +18,7 @@ from features.base import Feature
 class SafetyRatio(Feature):
     name = "safety_ratio"
     description = (
-        "DistanceInFavor / RecentVolatility — "
-        "how many 'noise units' of advantage we have"
+        "偏离距离 / 近期波动率 — 当前优势相对于市场噪声的显著性，值越大越可靠"
     )
 
     def compute(self, df: pd.DataFrame) -> pd.Series:
@@ -31,10 +30,10 @@ class SafetyRatio(Feature):
         """
         distance = np.abs((df["price"] - df["open"]) / df["open"])
 
-        # Sum of absolute 1s returns over 30s rolling window
+        # Sum of absolute returns over 6-tick rolling window (~30s at 5s ticks)
         recent_vol = (
             df.groupby("condition_id")["ret_1s"]
-            .transform(lambda x: x.rolling(30, min_periods=5).apply(lambda w: np.abs(w).sum(), raw=True))
+            .transform(lambda x: x.rolling(6, min_periods=2).apply(lambda w: np.abs(w).sum(), raw=True))
         )
 
         safety = distance / recent_vol.replace(0, np.nan)

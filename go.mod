@@ -3,7 +3,9 @@ module github.com/necklace/lasttrading
 go 1.25.7
 
 require (
+	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/viper v1.20.1
+	github.com/tidwall/gjson v1.18.0
 	github.com/xiangxn/go-polymarket-sdk v0.6.20
 	github.com/xiangxn/polypilot v0.2.16
 )
@@ -38,7 +40,6 @@ require (
 	github.com/gofrs/flock v0.12.1 // indirect
 	github.com/golang/snappy v1.0.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
 	github.com/holiman/bloomfilter/v2 v2.0.3 // indirect
@@ -68,7 +69,6 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/supranational/blst v0.3.16 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
-	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.0 // indirect
 	github.com/tklauser/go-sysconf v0.3.12 // indirect
@@ -91,9 +91,4 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	resty.dev/v3 v3.0.0-beta.6 // indirect
-)
-
-replace (
-	github.com/xiangxn/go-polymarket-sdk => /tmp/go-polymarket-sdk
-	github.com/xiangxn/polypilot => /tmp/polypilot
 )

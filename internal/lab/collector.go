@@ -7,13 +7,13 @@ import (
 	"github.com/necklace/lasttrading/internal/feed"
 )
 
-const maxPriceHistory = 31 // enough for 30s lookback of 1s returns
+const maxPriceHistory = 15 // enough for 12-tick volatility lookback at 5s intervals
 
-// Collector generates ResearchSnapshots by consuming Binance market data
-// at 1-second intervals within a 5-minute event window.
+// Collector generates ResearchSnapshots at ~5-second intervals
+// within a 5-minute event window.
 //
-// It maintains a rolling price history sufficient for computing
-// Return1s, Volatility10s, and Volatility30s.
+// It maintains a rolling price history for computing
+// Return10s (2-tick), VolatilityShort (6-tick), and VolatilityLong (12-tick).
 type Collector struct {
 	binance *feed.BinanceAdapter
 
@@ -41,37 +41,35 @@ func NewCollector(binance *feed.BinanceAdapter) *Collector {
 }
 
 // UpdatePolymarket sets the latest YES/NO prices from Polymarket order books.
-// Call before each Tick() so prices are included in the snapshot.
 func (c *Collector) UpdatePolymarket(yesPrice, noPrice float64) {
 	c.yesPrice = yesPrice
 	c.noPrice = noPrice
 }
 
 // StartEvent begins a new 5-minute event window.
-// conditionID should be the Polymarket conditionId.
 func (c *Collector) StartEvent(conditionID string, startTime int64, openPrice float64) {
 	c.conditionID = conditionID
 	c.startTime = startTime
 	c.endTime = startTime + WindowSec
 	c.openPrice = openPrice
-	c.snapshots = make([]*ResearchSnapshot, 0, 300)
+	c.snapshots = make([]*ResearchSnapshot, 0, 60) // ~60 snapshots at 5s intervals
 	c.prices = c.prices[:0]
 	c.yesPrice = 0
 	c.noPrice = 0
 }
 
 // Tick generates a ResearchSnapshot for the current moment.
-// Returns nil if Binance data is not yet available (e.g., WS not connected).
+// Returns nil if Binance data is not yet available.
 //
-// Must be called at ~1 second intervals. Consumes accumulated volume
-// from the BinanceAdapter and resets its 1s counters.
+// Called at ~TickIntervalSec intervals. Consumes accumulated volume
+// from the BinanceAdapter since the last call.
 func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 	btc := c.binance.LatestData()
 	if btc.Price == 0 {
 		return nil
 	}
 
-	buy1s, sell1s, _, _ := c.binance.ConsumeVolume()
+	buyVol, sellVol, _, _ := c.binance.ConsumeVolume()
 
 	remaining := int(c.endTime - now.Unix())
 	if remaining < 0 {
@@ -86,12 +84,12 @@ func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 		c.prices = c.prices[1:]
 	}
 
-	// 1-second return
-	ret1s := 0.0
-	if len(c.prices) >= 2 {
-		prev := c.prices[len(c.prices)-2]
+	// 10-second return (2 ticks × 5s)
+	ret := 0.0
+	if len(c.prices) >= 3 {
+		prev := c.prices[len(c.prices)-3] // 2 ticks ago ≈ 10s
 		if prev > 0 {
-			ret1s = (price - prev) / prev
+			ret = (price - prev) / prev
 		}
 	}
 
@@ -100,26 +98,26 @@ func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 		RemainingSec:  remaining,
 		OpenPrice:     c.openPrice,
 		CurrentPrice:  price,
-		Return1s:      ret1s,
-		BuyVolume1s:   buy1s,
-		SellVolume1s:  sell1s,
-		SignedFlow1s:  buy1s - sell1s,
-		Volatility10s: c.computeVolatility(10),
-		Volatility30s: c.computeVolatility(30),
-		BidDepth:      btc.BidDepth5,
-		AskDepth:      btc.AskDepth5,
-		YesPrice:      c.yesPrice,
-		NoPrice:       c.noPrice,
+		Return1s:      ret,
+		BuyVolume1s:   buyVol,
+		SellVolume1s:  sellVol,
+		SignedFlow1s:  buyVol - sellVol,
+		Volatility10s: c.computeVolatilityTicks(2), // 2 ticks = 10s
+		Volatility30s: c.computeVolatilityTicks(6), // 6 ticks = 30s
+		BidDepth:        btc.BidDepth5,
+		AskDepth:        btc.AskDepth5,
+		YesPrice:        c.yesPrice,
+		NoPrice:         c.noPrice,
 	}
 
 	c.snapshots = append(c.snapshots, snap)
 	return snap
 }
 
-// computeVolatility returns the standard deviation of 1s returns
-// over the last lookbackSec seconds. Returns 0 if insufficient history.
-func (c *Collector) computeVolatility(lookbackSec int) float64 {
-	n := lookbackSec + 1
+// computeVolatilityTicks returns the std dev of tick-to-tick returns
+// over the last nTicks data points. Returns 0 if insufficient history.
+func (c *Collector) computeVolatilityTicks(nTicks int) float64 {
+	n := nTicks + 1 // need nTicks+1 prices to get nTicks returns
 	if n > len(c.prices) {
 		n = len(c.prices)
 	}

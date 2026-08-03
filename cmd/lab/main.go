@@ -253,7 +253,7 @@ func main() {
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
 		log.Printf("[Cycle] event=%s open=%.2f collecting...", conditionID, openPrice)
 
-		ticker := time.NewTicker(1 * time.Second)
+		ticker := time.NewTicker(5 * time.Second)
 		snapCount := 0
 		lastLogRemaining := 0
 

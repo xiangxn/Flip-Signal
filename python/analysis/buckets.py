@@ -1,10 +1,10 @@
 """
 Bucket Analysis (PRD2 §8.1)
 
-Splits a feature's values into N equal-width (or equal-count) buckets
-and computes win rate and EV for each bucket.
+Splits a feature's values into N quantile buckets and computes win rate plus
+realised P&L (using Polymarket entry prices) for each bucket.
 
-This answers: "When the feature is in range X, what's the historical outcome?"
+This answers: "When the feature is in range X, what was the actual trading outcome?"
 """
 
 from dataclasses import dataclass
@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import numpy as np
 import pandas as pd
 
+from analysis.pnl import compute_pnl, compute_won
 from features.base import Feature
 
 
@@ -22,7 +23,9 @@ class BucketResult:
     high: float
     samples: int
     win_rate: float
-    ev: float  # expected value: win_rate * 1 + (1-win_rate) * (-1) = 2*win_rate - 1
+    avg_price: float    # average Polymarket entry price in this bucket
+    mean_pnl: float     # average realised P&L per share
+    total_pnl: float    # sum of P&L across all samples in this bucket
 
 
 def analyze_buckets(
@@ -31,21 +34,18 @@ def analyze_buckets(
     feature_values: pd.Series,
     n_buckets: int = 10,
 ) -> list[BucketResult]:
-    """Compute win rate and EV per feature bucket.
+    """Compute win rate and real P&L per feature bucket.
 
-    The bet direction for each row is inferred from price vs open:
-      - price > open → bet YES
-      - price < open → bet NO
-
-    A bet wins when:
-      - bet YES and outcome == 0 (Up won), or bet NO and outcome == 1 (Down won)
+    Bet direction:
+      - price > open → bet YES (buy YES at yes_price)
+      - price < open → bet NO  (buy NO at no_price)
 
     Parameters
     ----------
     df : pd.DataFrame
-        Snapshot-level data with 'price', 'open', 'outcome' columns.
+        Snapshot-level data with price, open, outcome, yes_price, no_price.
     feature : Feature
-        The feature being analyzed.
+        The feature being analysed.
     feature_values : pd.Series
         Pre-computed feature values, same index as df.
     n_buckets : int
@@ -54,26 +54,19 @@ def analyze_buckets(
     Returns
     -------
     list[BucketResult]
-        One result per bucket, sorted by bucket low value.
     """
-    # Determine bet direction and win
     distance = (df["price"] - df["open"]) / df["open"]
-    bet_yes = distance > 0
-    bet_no = distance < 0
+    valid = (distance != 0) & feature_values.notna()
 
-    won = (bet_yes & (df["outcome"] == 0)) | (bet_no & (df["outcome"] == 1))
-
-    # Remove rows where price == open (no bet direction)
-    valid = bet_yes | bet_no
     fv = feature_values[valid]
-    won = won[valid]
+    pnl = compute_pnl(df)[valid]
+    won = compute_won(df)[valid]
 
     if len(fv) == 0:
         return []
 
-    # Create quantile-based buckets
+    # Quantile-based buckets
     bucket_edges = np.percentile(fv, np.linspace(0, 100, n_buckets + 1))
-    # Deduplicate edges (in case of many identical values)
     bucket_edges = np.unique(bucket_edges)
 
     if len(bucket_edges) < 2:
@@ -82,12 +75,27 @@ def analyze_buckets(
     results = []
     for i in range(len(bucket_edges) - 1):
         low, high = bucket_edges[i], bucket_edges[i + 1]
-        mask = (fv >= low) & (fv < high) if i < len(bucket_edges) - 2 else (fv >= low) & (fv <= high)
-        bucket_data = won[mask]
+        if i < len(bucket_edges) - 2:
+            mask = (fv >= low) & (fv < high)
+        else:
+            mask = (fv >= low) & (fv <= high)
 
-        samples = len(bucket_data)
-        wr = float(bucket_data.mean()) if samples > 0 else 0.0
-        ev = 2 * wr - 1  # simplified: win → +1, lose → -1
+        bucket_won = won[mask]
+        bucket_pnl = pnl[mask]
+        samples = len(bucket_pnl)
+
+        wr = float(bucket_won.mean()) if samples > 0 else 0.0
+        mp = float(bucket_pnl.mean()) if samples > 0 else 0.0
+        tp = float(bucket_pnl.sum()) if samples > 0 else 0.0
+
+        # Compute average entry price for this bucket
+        # (direction-dependent: YES bets use yes_price, NO bets use no_price)
+        bucket_dist = distance[valid][mask]
+        bucket_yes_price = df.loc[valid, "yes_price"][mask]
+        bucket_no_price = df.loc[valid, "no_price"][mask]
+        entry_prices = pd.Series(np.where(bucket_dist > 0, bucket_yes_price, bucket_no_price),
+                                 index=bucket_pnl.index)
+        avg_price = float(entry_prices.mean()) if samples > 0 else 0.0
 
         results.append(BucketResult(
             bucket_label=f"[{low:.4g}, {high:.4g}]",
@@ -95,23 +103,26 @@ def analyze_buckets(
             high=float(high),
             samples=samples,
             win_rate=round(wr, 4),
-            ev=round(ev, 4),
+            avg_price=round(avg_price, 4),
+            mean_pnl=round(mp, 4),
+            total_pnl=round(tp, 4),
         ))
 
     return results
 
 
 def bucket_summary_table(results: list[BucketResult]) -> str:
-    """Format bucket results as a markdown table."""
+    """Format bucket results as a markdown table with real P&L."""
     if not results:
         return "_No data_"
 
     lines = [
-        "| Bucket | Samples | Win Rate | EV |",
-        "|--------|---------|----------|-----|",
+        "| 特征值区间 | 样本数 | 胜率 | 均价 | 平均盈亏 | 总盈亏 |",
+        "|-----------|--------|------|------|---------|--------|",
     ]
     for r in results:
         lines.append(
-            f"| {r.bucket_label} | {r.samples} | {r.win_rate:.2%} | {r.ev:+.4f} |"
+            f"| {r.bucket_label} | {r.samples} | {r.win_rate:.2%} | "
+            f"{r.avg_price:.4f} | {r.mean_pnl:+.4f} | {r.total_pnl:+.4f} |"
         )
     return "\n".join(lines)

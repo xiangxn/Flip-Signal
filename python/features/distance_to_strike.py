@@ -14,8 +14,7 @@ from features.base import Feature
 class DistanceToStrike(Feature):
     name = "distance_to_strike"
     description = (
-        "|CurrentPrice - OpenPrice| / OpenPrice — "
-        "direction-normalized distance from strike"
+        "|当前价 - 开盘价| / 开盘价 — 价格偏离开盘价的方向归一化距离"
     )
 
     def compute(self, df: pd.DataFrame) -> pd.Series:

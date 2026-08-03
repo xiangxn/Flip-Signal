@@ -18,8 +18,7 @@ from features.base import Feature
 class ReversalCapacity(Feature):
     name = "reversal_capacity"
     description = (
-        "RecentMaxMove / DistanceInFavor — "
-        "market's recent burst capacity relative to our edge (lower = safer)"
+        "近期最大振幅 / 偏离距离 — 市场逆转能力相对于当前优势的比值（越低越安全）"
     )
 
     def compute(self, df: pd.DataFrame) -> pd.Series:
@@ -30,7 +29,7 @@ class ReversalCapacity(Feature):
         """
         distance = np.abs((df["price"] - df["open"]) / df["open"])
 
-        # Max price range over 30s rolling window, normalized
+        # Max price range over 6-tick rolling window (~30s at 5s ticks)
         def _max_move(window: np.ndarray) -> float:
             if len(window) < 2:
                 return 0.0
@@ -38,7 +37,7 @@ class ReversalCapacity(Feature):
 
         recent_max_move = (
             df.groupby("condition_id")["price"]
-            .transform(lambda x: x.rolling(30, min_periods=5).apply(_max_move, raw=True))
+            .transform(lambda x: x.rolling(6, min_periods=2).apply(_max_move, raw=True))
         )
 
         ratio = recent_max_move / distance.replace(0, np.nan)

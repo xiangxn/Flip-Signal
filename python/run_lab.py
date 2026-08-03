@@ -82,7 +82,8 @@ def main() -> None:
 
     # Generate report
     print("Generating report...")
-    report = generate_report(df)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    report = generate_report(df, str(output_dir))
 
     # Write report
     output_dir.mkdir(parents=True, exist_ok=True)
