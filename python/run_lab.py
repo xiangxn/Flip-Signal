@@ -30,8 +30,8 @@ def main() -> None:
         description="Feature Research Lab — analyze BTC 5-min event data",
     )
     parser.add_argument(
-        "--data", default="../data/lab/",
-        help="Directory containing events_*.jsonl files (default: ../data/lab/)",
+        "--data", default="../data/",
+        help="Directory containing events_*.jsonl files (default: ../data/)",
     )
     parser.add_argument(
         "--output", default="../reports/",

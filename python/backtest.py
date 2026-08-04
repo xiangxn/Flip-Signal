@@ -8,16 +8,15 @@
   必须条件：
     A. distance_to_strike > DIST_THRESHOLD     （趋势已走出来）
 
-  加分条件（至少满足 MIN_BONUS 个）：
-    B. cumulative_buy_pct > 0.5                （累积订单流支持方向）
+  否决条件（任一触发则不下注）：
+    V_vol. volatility_expansion >= 1.0          （波动达到/超过历史水平）
+    F.     distance_to_strike < DIST_LOW AND direction_persistence < PERSIST_LOW
+           （距离小 + 方向模糊）
+
+  加分条件（至少满足 MIN_BONUS 个，3选N）：
     C. safety_ratio > SAFETY_THRESHOLD         （趋势不是噪声）
     D. reversal_capacity < REVERSAL_THRESHOLD  （逆转风险可控）
-    E. volatility_expansion < 1                （波动收敛）
     G. imbalance_trend > 0                     （盘口深度支撑方向）
-
-  否决条件：
-    F. distance_to_strike < DIST_LOW AND direction_persistence < PERSIST_LOW
-       （距离小 + 方向模糊 = 不下注）
 
 Usage:
     python backtest.py --data ../data/lab/
@@ -39,12 +38,8 @@ SAFETY_THRESHOLD = 1.8        # safety_ratio 加分（≈Q3）
 REVERSAL_THRESHOLD = 0.87     # reversal_capacity 加分（≈Q3）
 DIST_LOW = 0.00010            # "距离还很小" 的阈值（≈Q1-Q2 边界）
 PERSIST_LOW = 0.15            # "持续性很低" 的阈值（≈Q1-Q2 边界）
-MIN_BONUS = 2                 # 加分条件至少满足几个（4 个中选 2 个）
-CHECKPOINTS = [60, 30, 15, 5] # 尾盘决策时间点
-TOLERANCE = 3                 # 时间匹配容差（秒）
-VOL_INTENSITY_MIN = 0.5       # 每秒成交量低于此值 = 市场太薄（BTC）
-MIN_BONUS = 3                 # 加分条件至少满足几个（C/D/E/F 四选三）
-CHECKPOINTS = [60, 30, 15, 5] # 尾盘决策时间点
+MIN_BONUS = 2                 # 加分条件至少满足几个（3 个中选 2 个）
+CHECKPOINTS = [60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5]  # 尾盘决策时间点 (每5秒)
 TOLERANCE = 3                 # 时间匹配容差（秒）
 
 
@@ -80,19 +75,23 @@ def backtest(df: pd.DataFrame, fv: dict[str, pd.Series]) -> pd.DataFrame:
     pnl = np.where(won, 1.0 - entry_price, -entry_price)
 
     # ── 策略条件 ──
+    # 必须条件
     A = fv["distance_to_strike"] > DIST_THRESHOLD        # 必须：趋势已走出来
-    B = fv["cumulative_buy_pct"] > 0.5                   # 加分：累积订单流
+
+    # 加分条件 (3个)
     C = fv["safety_ratio"] > SAFETY_THRESHOLD            # 加分：趋势显著
     D = fv["reversal_capacity"] < REVERSAL_THRESHOLD     # 加分：逆转可控
-    E = fv["volatility_expansion"] < 1.0                 # 加分：波动收敛
-    F = (fv["distance_to_strike"] < DIST_LOW) & \
-        (fv["direction_persistence"] < PERSIST_LOW)      # 否决：方向模糊
     G = fv["imbalance_trend"] > 0                        # 加分：盘口支撑
 
+    # 否决条件 (2个)
+    V_vol = fv["volatility_expansion"] >= 1.0            # 否决：波动达到/超过历史水平
+    F = (fv["distance_to_strike"] < DIST_LOW) & \
+        (fv["direction_persistence"] < PERSIST_LOW)      # 否决：方向模糊
+
     must_pass = A
-    bonus_count = B.astype(int) + C.astype(int) + D.astype(int) + E.astype(int) + G.astype(int)
+    bonus_count = C.astype(int) + D.astype(int) + G.astype(int)
     bonus_pass = bonus_count >= MIN_BONUS
-    veto = F
+    veto = F | V_vol
 
     passed = must_pass & bonus_pass & ~veto & valid_dir
 
@@ -113,10 +112,12 @@ def backtest(df: pd.DataFrame, fv: dict[str, pd.Series]) -> pd.DataFrame:
             reason = ""
             if not must_pass.loc[i]:
                 reason = "必须条件未满足"
+            elif V_vol.loc[i]:
+                reason = "否决:波动异常"
+            elif F.loc[i]:
+                reason = "否决:方向模糊"
             elif not bonus_pass.loc[i]:
                 reason = "加分条件不足"
-            elif veto.loc[i]:
-                reason = "否决条件触发"
             elif not valid_dir.loc[i]:
                 reason = "价格未偏离开盘价"
 
@@ -139,12 +140,11 @@ def backtest(df: pd.DataFrame, fv: dict[str, pd.Series]) -> pd.DataFrame:
                 "imbalance_trend": round(float(fv["imbalance_trend"].loc[i]), 6),
                 # 单独的条件标记
                 "cond_A_dist": bool(A.loc[i]),
-                "cond_B_cum_buy": bool(B.loc[i]),
                 "cond_C_safety": bool(C.loc[i]),
                 "cond_D_reversal": bool(D.loc[i]),
-                "cond_E_vol": bool(E.loc[i]),
-                "cond_F_veto": bool(F.loc[i]),
                 "cond_G_imb": bool(G.loc[i]),
+                "cond_V_vol": bool(V_vol.loc[i]),
+                "cond_F_veto": bool(F.loc[i]),
             })
 
     return pd.DataFrame(rows)
@@ -162,7 +162,7 @@ def analyze_results(trades: pd.DataFrame) -> str:
     lines = [
         "# 尾盘扫尾策略回测报告",
         "",
-        f"**尾盘决策点总数**: {total_snaps}（每个事件 4 个时间点）",
+        f"**尾盘决策点总数**: {total_snaps}（每个事件 {len(CHECKPOINTS)} 个时间点）",
         "",
         "---",
         "",
@@ -171,13 +171,12 @@ def analyze_results(trades: pd.DataFrame) -> str:
         f"| 参数 | 值 | 说明 |",
         f"|------|-----|------|",
         f"| distance_to_strike > | {DIST_THRESHOLD} | 趋势已走出来（必须） |",
-        f"| cumulative_buy_pct > | 0.5 | 累积订单流支持方向（加分） |",
         f"| safety_ratio > | {SAFETY_THRESHOLD} | 趋势不是噪声（加分） |",
         f"| reversal_capacity < | {REVERSAL_THRESHOLD} | 逆转风险可控（加分） |",
-        f"| volatility_expansion < | 1.0 | 波动收敛（加分） |",
+        f"| volatility_expansion >= | 1.0 | 波动达到历史水平（否决） |",
         f"| imbalance_trend > | 0 | 盘口深度支撑方向（加分） |",
-        f"| 否决: distance < {DIST_LOW} AND persistence < {PERSIST_LOW} | — | 方向模糊 |",
-        f"| 加分条件最低满足 | {MIN_BONUS}/5 | — |",
+        f"| 否决: distance < {DIST_LOW} AND persistence < {PERSIST_LOW} | — | 方向模糊（否决） |",
+        f"| 加分条件最低满足 | {MIN_BONUS}/3 | — |",
         "",
         "---",
         "",
@@ -237,11 +236,10 @@ def analyze_results(trades: pd.DataFrame) -> str:
 
     feature_checks = [
         ("distance_to_strike", f" > {DIST_THRESHOLD}（必须）", "cond_A_dist"),
-        ("cumulative_buy_pct", " > 0.5（加分）", "cond_B_cum_buy"),
         ("safety_ratio", f" > {SAFETY_THRESHOLD}（加分）", "cond_C_safety"),
         ("reversal_capacity", f" < {REVERSAL_THRESHOLD}（加分）", "cond_D_reversal"),
-        ("volatility_expansion", " < 1.0（加分）", "cond_E_vol"),
         ("imbalance_trend", " > 0（加分）", "cond_G_imb"),
+        ("volatility_expansion", " >= 1.0（否决）", "cond_V_vol"),
         ("direction_persistence",
          f"否决(dist<{DIST_LOW} & pers<{PERSIST_LOW})", "cond_F_veto"),
     ]
@@ -289,7 +287,7 @@ def analyze_results(trades: pd.DataFrame) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="尾盘扫尾策略回测")
-    parser.add_argument("--data", default="../data/lab/",
+    parser.add_argument("--data", default="../data/",
                         help="JSONL 数据目录")
     parser.add_argument("--output", default="../reports/",
                         help="报告输出目录")

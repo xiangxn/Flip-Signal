@@ -18,7 +18,7 @@ from analysis.pnl import compute_pnl, compute_won
 from features.base import Feature
 
 
-CHECKPOINTS = [60, 30, 15, 5]  # remaining seconds to evaluate at
+CHECKPOINTS = [60, 55, 50, 45, 40, 35, 30, 25, 20, 15, 10, 5]  # remaining seconds (every 5s)
 
 
 @dataclass
