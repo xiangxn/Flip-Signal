@@ -92,3 +92,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	resty.dev/v3 v3.0.0-beta.6 // indirect
 )
+

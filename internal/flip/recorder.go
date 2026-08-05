@@ -131,5 +131,8 @@ type resolutionRecord struct {
 }
 
 func round4(v float64) float64 {
+	if v < 0 {
+		return float64(int(v*10000-0.5)) / 10000
+	}
 	return float64(int(v*10000+0.5)) / 10000
 }
