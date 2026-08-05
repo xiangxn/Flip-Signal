@@ -5,13 +5,16 @@
 // lab.Collector, detects >0.7 crossing signals using the flip.Engine
 // state machine, and records signals + P&L to a JSONL file.
 //
+// Optionally also writes full event snapshots as lab data (-lab-output flag),
+// so you don't need to run cmd/lab separately.
+//
 // Read-only by default — generates a temporary wallet key for
 // Polymarket API access (data reading only, no trading).
 //
 // Usage:
 //
-//		go run ./cmd/flip -output data/flip_signals.jsonl
-//	 go run ./cmd/flip -symbol BTCUSDT -output data/flip_signals.jsonl
+//	go run ./cmd/flip -output data/flip_signals.jsonl
+//	go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab
 package main
 
 import (
@@ -41,6 +44,7 @@ func init() {
 
 func main() {
 	outputPath := flag.String("output", "data/flip_signals.jsonl", "Output JSONL path for flip signals")
+	labOutputDir := flag.String("lab-output", "", "Optional lab event output directory (JSONL, same format as cmd/lab)")
 	symbol := flag.String("symbol", "BTCUSDT", "Binance trading pair")
 	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug prefix")
 	flag.Parse()
@@ -96,7 +100,6 @@ func main() {
 		noTok  string
 	)
 
-
 	// ================================================================
 	// Lab Collector (5s ResearchSnapshots)
 	// ================================================================
@@ -129,9 +132,26 @@ func main() {
 		}
 	}()
 
+	// Optional lab data writer (same format as cmd/lab)
+	var labWriter *lab.Writer
+	if *labOutputDir != "" {
+		labWriter, err = lab.NewWriter(*labOutputDir)
+		if err != nil {
+			log.Fatalf("[Flip] lab writer: %v", err)
+		}
+		defer func() {
+			if err := labWriter.Close(); err != nil {
+				log.Printf("[Flip] lab writer close: %v", err)
+			}
+		}()
+	}
+
 	log.Println("========================================")
 	log.Println(" Flip Signal Detection — Paper Trading")
 	log.Printf(" Symbol: %s  |  Slug: %s  |  Output: %s", *symbol, *slugPrefix, *outputPath)
+	if *labOutputDir != "" {
+		log.Printf(" Lab data: %s (events JSONL)", *labOutputDir)
+	}
 	log.Printf(" Config: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d",
 		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
 	log.Println(" Sources: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
@@ -295,9 +315,16 @@ func main() {
 			}
 		}
 
-		// Step 7: Finalize event, update hist range, resolve
+		// Step 7: Finalize event, persist lab data, update hist range, resolve
 		event := collector.FinalizeEvent()
 		histTracker.AddRange(event.OpenPrice, event.ClosePrice)
+
+		// Persist full event snapshots if lab output is enabled
+		if labWriter != nil {
+			if err := labWriter.Write(event); err != nil {
+				log.Printf("[Flip] lab write error: %v", err)
+			}
+		}
 
 		outcomeLabel := "DOWN/FLAT"
 		if event.Outcome == 0 {
