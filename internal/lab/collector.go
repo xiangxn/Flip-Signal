@@ -98,10 +98,10 @@ func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 		RemainingSec:  remaining,
 		OpenPrice:     c.openPrice,
 		CurrentPrice:  price,
-		Return1s:      ret,
-		BuyVolume1s:   buyVol,
-		SellVolume1s:  sellVol,
-		SignedFlow1s:  buyVol - sellVol,
+		Return10s:      ret,
+		BuyVolume5s:   buyVol,
+		SellVolume5s:  sellVol,
+		SignedFlow5s:  buyVol - sellVol,
 		Volatility10s: c.computeVolatilityTicks(2), // 2 ticks = 10s
 		Volatility30s: c.computeVolatilityTicks(6), // 6 ticks = 30s
 		BidDepth:        btc.BidDepth5,

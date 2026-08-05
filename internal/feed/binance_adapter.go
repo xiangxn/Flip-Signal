@@ -257,6 +257,7 @@ func (b *BinanceAdapter) handleTrade(data json.RawMessage) {
 		Quantity  string `json:"q"`
 		TradeTime int64  `json:"T"`
 		IsBuyerMM bool   `json:"m"`
+		BestMatch bool   `json:"M"` // absorbs M (best price match) to prevent Go's case-insensitive fallback from overwriting IsBuyerMM
 	}
 	if err := json.Unmarshal(data, &trade); err != nil {
 		return

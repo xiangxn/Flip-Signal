@@ -39,7 +39,7 @@ class DirectionPersistence(Feature):
         # Apply per event
         results = []
         for condition_id, group in df.groupby("condition_id"):
-            returns = group["ret_1s"].values
+            returns = group["ret_10s"].values
             dirs = direction.loc[group.index].values
 
             persistence = np.full(len(group), 0.5)

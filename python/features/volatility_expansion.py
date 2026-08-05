@@ -5,8 +5,8 @@ Is the market entering an abnormally volatile state?
 
 VolatilityExpansion = CurrentVolatility(10s) / HistoricalVolatility(expanding)
 
-CurrentVolatility = std of 1s returns over last 10s (pre-computed vol_10s)
-HistoricalVolatility = expanding std of 1s returns from event start to now
+CurrentVolatility = std of returns over last 10s (pre-computed vol_10s)
+HistoricalVolatility = expanding std of 10s returns from event start to now
 
 Values > 1 indicate current volatility is ABOVE the event's historical baseline
 — the market is more agitated than usual, tail risk increases.
@@ -37,8 +37,8 @@ class VolatilityExpansion(Feature):
     def compute(self, df: pd.DataFrame) -> pd.Series:
         """Compute VolatilityExpansion.
 
-        Current = vol_10s (pre-computed std of 1s returns over 10s)
-        Historical = expanding std of ret_1s from event start (min 30s)
+        Current = vol_10s (pre-computed std of returns over 10s)
+        Historical = expanding std of ret_10s from event start (min 30s)
         Ratio = current / historical
 
         Values well below 1 = market is calmer than its history → safer tail.
@@ -49,7 +49,7 @@ class VolatilityExpansion(Feature):
         # Expanding historical volatility from event start
         # min_periods=30 ensures we have enough data for a meaningful baseline
         hist_vol = (
-            df.groupby("condition_id")["ret_1s"]
+            df.groupby("condition_id")["ret_10s"]
             .transform(lambda x: x.expanding(min_periods=30).std())
         )
 

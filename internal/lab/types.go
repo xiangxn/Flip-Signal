@@ -16,15 +16,15 @@ type ResearchSnapshot struct {
 	OpenPrice    float64 `json:"open"`
 	CurrentPrice float64 `json:"price"`
 
-	// --- 10-second return (2-tick) ---
-	Return1s float64 `json:"ret_1s"`
+	// --- 10-second return (2-tick × 5s) ---
+	Return10s float64 `json:"ret_10s"`
 
 	// --- Volume since last tick (5s accumulation) ---
-	BuyVolume1s  float64 `json:"buy_vol_1s"`
-	SellVolume1s float64 `json:"sell_vol_1s"`
+	BuyVolume5s  float64 `json:"buy_vol_5s"`
+	SellVolume5s float64 `json:"sell_vol_5s"`
 
-	// --- Raw order flow ---
-	SignedFlow1s float64 `json:"signed_flow_1s"`
+	// --- Raw order flow (5s) ---
+	SignedFlow5s float64 `json:"signed_flow_5s"`
 
 	// --- Volatility aligned to wall-clock time ---
 	Volatility10s float64 `json:"vol_10s"` // 2 ticks = 10s

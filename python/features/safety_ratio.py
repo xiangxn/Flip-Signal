@@ -32,7 +32,7 @@ class SafetyRatio(Feature):
 
         # Sum of absolute returns over 6-tick rolling window (~30s at 5s ticks)
         recent_vol = (
-            df.groupby("condition_id")["ret_1s"]
+            df.groupby("condition_id")["ret_10s"]
             .transform(lambda x: x.rolling(6, min_periods=2).apply(lambda w: np.abs(w).sum(), raw=True))
         )
 

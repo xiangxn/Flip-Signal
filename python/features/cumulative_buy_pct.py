@@ -30,8 +30,8 @@ class CumulativeBuyPct(Feature):
     def compute(self, df: pd.DataFrame) -> pd.Series:
         results = []
         for _condition_id, group in df.groupby("condition_id"):
-            buy_vol = group["buy_vol_1s"]
-            sell_vol = group["sell_vol_1s"]
+            buy_vol = group["buy_vol_5s"]
+            sell_vol = group["sell_vol_5s"]
 
             cum_buy = buy_vol.cumsum()
             cum_sell = sell_vol.cumsum()
