@@ -23,7 +23,6 @@ import (
 	"log"
 	"os"
 	"os/signal"
-	"sync"
 	"syscall"
 	"time"
 
@@ -93,33 +92,10 @@ func main() {
 
 	// Book tracking
 	var (
-		bookMu  sync.RWMutex
-		yesBook *sdk.OrderBook
-		noBook  *sdk.OrderBook
-		yesTok  string
-		noTok   string
+		yesTok string
+		noTok  string
 	)
 
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case book := <-bookAdapter.OrderBook():
-				if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 {
-					continue
-				}
-				bookMu.Lock()
-				switch book.AssetId {
-				case yesTok:
-					yesBook = book
-				case noTok:
-					noBook = book
-				}
-				bookMu.Unlock()
-			}
-		}
-	}()
 
 	// ================================================================
 	// Lab Collector (5s ResearchSnapshots)
@@ -258,12 +234,8 @@ func main() {
 		}
 		bookAdapter.SubscribeTokens(tokenIDs...)
 
-		bookMu.Lock()
 		yesTok = yesTokenID
 		noTok = noTokenID
-		yesBook = nil
-		noBook = nil
-		bookMu.Unlock()
 
 		// Step 6: Start event collection + flip engine
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
@@ -283,11 +255,9 @@ func main() {
 				return
 
 			case tickTime := <-ticker.C:
-				// Read latest Polymarket book prices
-				bookMu.RLock()
-				yb := yesBook
-				nb := noBook
-				bookMu.RUnlock()
+				// Read latest Polymarket book prices (atomic, no channel overhead)
+				yb := bookAdapter.GetLatestBook(yesTok)
+				nb := bookAdapter.GetLatestBook(noTok)
 
 				collector.UpdatePolymarket(bestBid(yb), bestBid(nb))
 

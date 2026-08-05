@@ -24,9 +24,6 @@ type SnapshotFeed struct {
 	// Token tracking: which token ID maps to which outcome
 	yesTokenID string
 	noTokenID  string
-	yesBook    *sdk.OrderBook
-	noBook     *sdk.OrderBook
-	bookMu     sync.RWMutex
 
 	SnapshotCh chan *snapshot.Snapshot
 	MQSCh      chan mqs.MarketQuality
@@ -50,12 +47,8 @@ func NewSnapshotFeed(
 
 // SetTokens configures which token IDs map to YES/NO outcomes.
 func (f *SnapshotFeed) SetTokens(yesTokenID, noTokenID string) {
-	f.bookMu.Lock()
-	defer f.bookMu.Unlock()
 	f.yesTokenID = yesTokenID
 	f.noTokenID = noTokenID
-	f.yesBook = nil
-	f.noBook = nil
 }
 
 // Reset re-initializes the feed for a new market cycle.
@@ -89,17 +82,6 @@ func (f *SnapshotFeed) Start(ctx context.Context) {
 		case <-ctx.Done():
 			return
 
-		case book := <-f.bookAdapter.OrderBook():
-			// Track YES/NO books separately by token ID
-			f.bookMu.Lock()
-			switch book.AssetId {
-			case f.yesTokenID:
-				f.yesBook = book
-			case f.noTokenID:
-				f.noBook = book
-			}
-			f.bookMu.Unlock()
-
 		case now := <-ticker.C:
 			btc := f.binance.LatestData()
 			if btc.Price == 0 {
@@ -120,11 +102,9 @@ func (f *SnapshotFeed) Start(ctx context.Context) {
 			buy1s, sell1s, buy10s, sell10s := f.binance.ConsumeVolume()
 			collector.UpdateVolume(buy1s, sell1s, buy10s, sell10s)
 
-			// Compute YES/NO prices from tracked order books
-			f.bookMu.RLock()
-			yesBook := f.yesBook
-			noBook := f.noBook
-			f.bookMu.RUnlock()
+			// Read latest Polymarket book prices (atomic, no channel overhead)
+			yesBook := f.bookAdapter.GetLatestBook(f.yesTokenID)
+			noBook := f.bookAdapter.GetLatestBook(f.noTokenID)
 
 			var yesPrice, noPrice float64
 			if yesBook != nil {
