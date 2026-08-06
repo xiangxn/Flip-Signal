@@ -49,15 +49,15 @@ func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 		score += params.Cfg.WRangeExpansion
 	}
 
-	// F7: BTC position slightly in PM's direction — weak support, likely flip
+		// F7: BTC direction diverges from PM → flip edge (OPT#2: reversed)
 	if params.HistReady {
 		var extreme bool
-		if params.Side == "yes" {
-			// YES>0.7 (PM bullish): BTC barely up → PM overconfident
-			extreme = params.BTCPosition > 0 && params.BTCPosition < params.Cfg.BTCPosMax
-		} else {
-			// NO>0.7 (PM bearish): BTC barely down → PM overconfident
-			extreme = params.BTCPosition > params.Cfg.BTCPosMin && params.BTCPosition < 0
+			if params.Side == "yes" {
+				// YES>0.7 (PM bullish), BTC slightly down → PM overreacting
+				extreme = params.BTCPosition > params.Cfg.BTCPosMin && params.BTCPosition < 0
+			} else {
+				// NO>0.7 (PM bearish), BTC slightly up → PM overreacting
+				extreme = params.BTCPosition > 0 && params.BTCPosition < params.Cfg.BTCPosMax
 		}
 		if extreme {
 			score += params.Cfg.WBtcExtreme

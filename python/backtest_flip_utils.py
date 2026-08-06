@@ -231,6 +231,16 @@ def check_signal(event: dict, side: str,
     flips_val = compute_flips(pre_prices)
     oscillating = is_oscillating(pre_prices, open_price, cfg)
 
+    # Hard filter: noise_ratio > 3.0 → 不触发
+    # OPT#3: 高噪声信号胜率 0%，noise > 3.0 的 5 笔全亏
+    if noise_ratio_val > 3.0:
+        return None
+
+    # Hard filter: path_eff < 0.4 → 不触发
+    # OPT#7: 极低路径效率 = 趋势不明确，剩余 2 亏中 L1=0.38
+    if path_eff < 0.4:
+        return None
+
     # 振幅扩张 (tick-independent: |price-open|/hist_avg_range)
     range_expansion = compute_range_expansion(cross_snap["price"], open_price,
                                               event.get("hist_avg_range"))
@@ -242,12 +252,15 @@ def check_signal(event: dict, side: str,
     # BTC 位置 (tick-independent: vs Open, 以历史振幅为单位)
     btc_position = compute_btc_position(cross_snap["price"], open_price,
                                         event.get("hist_avg_range", 0))
+    # OPT#2: 反转 btc_extreme 方向 — 奖励 BTC 与 PM 背离
+    # Flip 策略赌 PM 过度反应。BTC 与 PM 同向 = PM 正确，不应加分
+    # BTC 与 PM 反向 = PM 可能错了，这才是 flip 的 edge
     if side == "yes":
-        # YES>0.7: BTC 微涨 (0 ~ btc_pos_max) → PM 过度自信 → +1
-        btc_extreme = (0 < btc_position < cfg.btc_pos_max)
-    else:
-        # NO>0.7: BTC 微跌 (btc_pos_min ~ 0) → PM 过度自信 → +1
+        # YES>0.7 (PM看涨), BTC 微跌 → PM 过度反应，flip edge
         btc_extreme = (cfg.btc_pos_min < btc_position < 0)
+    else:
+        # NO>0.7 (PM看跌), BTC 微涨 → PM 过度反应，flip edge
+        btc_extreme = (0 < btc_position < cfg.btc_pos_max)
 
     # 入场价
     entry_price = cross_snap[other_key]
@@ -255,9 +268,9 @@ def check_signal(event: dict, side: str,
     # ── T+5s 确认特征 ──
     other_delta = compute_other_delta(snaps, cross_idx, other_key, cfg)
 
-    # Hard filter: 对面价格下跌 >0.02 → 不触发 (§2.7)
-    # flip rate 仅 13%, 远低于 baseline 25%
-    if other_delta < -0.02:
+    # Hard filter: 对面涨幅 < 0.03 → 不触发 (§2.7)
+    # OPT#1: 从 -0.02 提高到 0.03。other_delta < 0.03 的 9 笔全亏，零胜率
+    if other_delta < 0.03:
         return None
 
     # ── Step 4: 计算评分 ──

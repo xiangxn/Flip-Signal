@@ -140,6 +140,11 @@ func (e *Engine) onCrossing(snap *lab.ResearchSnapshot, side string) *FlipSignal
 
 	e.pathEff = netMove / preRange
 
+	// OPT#7: path_eff too low → trend unclear, veto
+	if e.pathEff < 0.4 {
+		e.state = stateDone
+		return nil
+	}
 	totalPathVal := TotalPath(prePrices)
 	if netMove > 0 {
 		e.noiseRatio = totalPathVal / netMove
@@ -147,6 +152,11 @@ func (e *Engine) onCrossing(snap *lab.ResearchSnapshot, side string) *FlipSignal
 		e.noiseRatio = totalPathVal // pure oscillation
 	}
 
+	// OPT#3: high noise ratio → PM price unstable, veto
+	if e.noiseRatio > 3.0 {
+		e.state = stateDone
+		return nil
+	}
 	e.flips = CountFlips(prePrices)
 	e.oscillating = IsOscillating(e.pathEff, e.noiseRatio, e.flips, e.cfg)
 
@@ -185,8 +195,8 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		otherDelta = snap.YesPrice - e.crossSnap.YesPrice
 	}
 
-	// Hard filter: opposite side falls >0.02 → flip rate only ~13%, skip
-	if otherDelta < -0.02 {
+	// OPT#1: Hard filter — other_delta < 0.03 never wins
+	if otherDelta < 0.03 {
 		return nil
 	}
 
@@ -202,11 +212,11 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 	e.btcPosition = 0.0
 	e.btcExtreme = false
 	if e.histRange.IsReady() {
-		e.btcPosition = BTCPosition(e.crossSnap.CurrentPrice, e.crossSnap.OpenPrice, e.histRange.AvgRange())
+			// OPT#2: BTC divergence from PM = flip edge. PM&BTC agree = real trend.
 		if e.crossSide == "yes" {
-			e.btcExtreme = e.btcPosition > 0 && e.btcPosition < e.cfg.BTCPosMax
+				e.btcExtreme = e.btcPosition > e.cfg.BTCPosMin && e.btcPosition < 0  // BTC微跌 vs PM看涨 = 背离
 		} else {
-			e.btcExtreme = e.btcPosition > e.cfg.BTCPosMin && e.btcPosition < 0
+				e.btcExtreme = e.btcPosition > 0 && e.btcPosition < e.cfg.BTCPosMax  // BTC微涨 vs PM看跌 = 背离
 		}
 	}
 

@@ -54,7 +54,7 @@ class FlipBacktestConfig:
     w_other_d5_strong: int = 4           # 对面大涨
     w_other_d5_weak: int = 2             # 对面小涨
     w_oscillating: int = 1               # 来回振荡
-    w_cheap_entry_strong: int = 2        # 极低价入场
+    w_cheap_entry_strong: int = 0        # OPT#5: 极低价入场加分移除 (entry<0.20 全亏)
     w_cheap_entry_weak: int = 1          # 低价入场
     w_range_expansion: int = 2           # 振幅扩张
     w_btc_extreme: int = 1               # BTC 极端位置

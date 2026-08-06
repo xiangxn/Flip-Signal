@@ -170,12 +170,12 @@ func TestBTCPosition_ZeroHist(t *testing.T) {
 func TestComputeFlipScore_MaxScore(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
-		Side:           "yes",
+		Side:           "no",
 		OtherDelta:     0.05,  // >0.03 → +4
 		IsOscillating:  true,  // +1
-		EntryPrice:     0.15,  // <0.20 → +2
+		EntryPrice:     0.22,  // <0.25 (weak) → +1 (OPT#5: strong bonus removed)
 		RangeExpansion: 0.3,   // <0.5 → +2
-		BTCPosition:    0.25,  // 0<0.25<0.5 → +1
+		BTCPosition:    0.25,  // OPT#2: no side, 0<0.25<0.5 → BTC divergence → +1
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -183,7 +183,7 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 10 // 4+1+2+2+1 = 10
+	expected := 9 // 4+1+1+2+1 = 9 (max after OPT#5 removes strong entry bonus)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -195,9 +195,9 @@ func TestComputeFlipScore_MinTrigger(t *testing.T) {
 		Side:           "no",
 		OtherDelta:     0.02,  // >0.01 → +2
 		IsOscillating:  false, // 0
-		EntryPrice:     0.22,  // <0.25 → +1
+		EntryPrice:     0.22,  // <0.25 → +1 (OPT#5: strong threshold=0, falls through)
 		RangeExpansion: 0.8,   // not <0.5 → 0
-		BTCPosition:    0.25,  // no side: 0.25 not in (-0.5,0) → 0
+		BTCPosition:    0.25,  // OPT#2: no side, 0<0.25<0.5 → divergence → +1
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -205,7 +205,7 @@ func TestComputeFlipScore_MinTrigger(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 3 // 2+0+1+0+0 = 3
+	expected := 4 // 2+1+1 = 4 (OPT#2 adds F7 since BTC diverges from PM)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -245,7 +245,7 @@ func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 	if vetoed {
 		t.Error("F0 should not veto when hist not ready")
 	}
-	expected := 7 // 4+1+2 = 7 (no F6, F7)
+	expected := 6 // 4+1+1 = 6 (OPT#5: strong→weak, no F6, F7)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -271,12 +271,12 @@ func TestComputeFlipScore_EntryPriceExclusive(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:       "yes",
-		EntryPrice: 0.18, // <0.20 → +2, doesn't also get +1
+		EntryPrice: 0.18, // OPT#5: EntryCheapStrong=0, falls through to weak <0.25 → +1
 		Cfg:        cfg,
 	}
 	score, _ := ComputeFlipScore(params)
-	if score != 2 {
-		t.Errorf("expected 2, got %d", score)
+	if score != 1 {
+		t.Errorf("expected 1, got %d", score)
 	}
 }
 
@@ -396,11 +396,11 @@ func TestEngine_CrossingWithConfirm(t *testing.T) {
 	if sig.OtherDelta < 0.03 {
 		t.Errorf("other_delta expected >=0.03, got %.4f", sig.OtherDelta)
 	}
-	// entry = NO price = 0.15 → <0.20 → +2
+	// entry = NO price = 0.15 → <0.25 (weak) → +1 (OPT#5: strong removed)
 	if sig.EntryPrice != 0.15 {
 		t.Errorf("entry expected 0.15, got %.4f", sig.EntryPrice)
 	}
-	// At least 4+2+other = ≥6 score
+	// At least 4+1 = 5 score
 	if sig.Score < 5 {
 		t.Errorf("score expected >=5, got %d", sig.Score)
 	}
@@ -439,7 +439,7 @@ func TestEngine_CrossingWithUnfavorableOtherDelta(t *testing.T) {
 	confSnap := makeTestSnap(0.78, 0.17, 50050, 50000, 225)
 	sig := eng.ProcessSnapshot(confSnap, 1)
 	if sig != nil {
-		t.Errorf("expected nil when other_delta < -0.02, got sig with other_delta=%.4f", sig.OtherDelta)
+		t.Errorf("expected nil when other_delta < 0.03 (OPT#1), got sig with other_delta=%.4f", sig.OtherDelta)
 	}
 }
 
