@@ -6,8 +6,8 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/viper v1.20.1
 	github.com/tidwall/gjson v1.18.0
-	github.com/xiangxn/go-polymarket-sdk v0.6.20
-	github.com/xiangxn/polypilot v0.2.16
+	github.com/xiangxn/go-polymarket-sdk v0.6.21
+	github.com/xiangxn/polypilot v0.2.17
 )
 
 require (
@@ -49,6 +49,7 @@ require (
 	github.com/ivanzzeth/ethsig v0.5.2 // indirect
 	github.com/ivanzzeth/polymarket-go-contracts/v2 v2.0.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
+	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
 	github.com/mitchellh/mapstructure v1.4.1 // indirect
@@ -92,4 +93,3 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 	resty.dev/v3 v3.0.0-beta.6 // indirect
 )
-
