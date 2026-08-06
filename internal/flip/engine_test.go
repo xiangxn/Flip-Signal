@@ -171,11 +171,11 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:           "no",
-		OtherDelta:     0.05,  // >0.03 → +4
-		IsOscillating:  true,  // +1
-		EntryPrice:     0.22,  // <0.25 (weak) → +1 (OPT#5: strong bonus removed)
-		RangeExpansion: 0.3,   // <0.5 → +2
-		BTCPosition:    0.25,  // OPT#2: no side, 0<0.25<0.5 → BTC divergence → +1
+		OtherDelta:     0.05, // >0.03 → +4
+		IsOscillating:  true, // +1
+		EntryPrice:     0.22, // <0.25 (weak) → +1 (OPT#5: strong bonus removed)
+		RangeExpansion: 0.3,  // <0.5 → +2
+		BTCPosition:    0.25, // OPT#2: no side, 0<0.25<0.5 → BTC divergence → +1
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -255,10 +255,10 @@ func TestComputeFlipScore_OtherDeltaExclusive(t *testing.T) {
 	cfg := DefaultConfig()
 	// OtherDelta=0.04 matches both strong and weak → only strong applies
 	params := ScoreParams{
-		Side:  "yes",
+		Side:       "yes",
 		OtherDelta: 0.04, // >0.03 → +4, doesn't also get +2
 		EntryPrice: 1.0,  // too high for cheap entry
-		Cfg:       cfg,
+		Cfg:        cfg,
 	}
 	score, _ := ComputeFlipScore(params)
 	// Only F1 should trigger

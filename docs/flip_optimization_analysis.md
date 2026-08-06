@@ -335,6 +335,6 @@ path_eff=0.46 在阈值之上，noise=3.0 刚好踩线。需要更多数据才�
 
 | 文件 | 修改 |
 |---|---|
-| [engine.go](internal/flip/engine.go) | onCrossing: 加 `if other_delta < 0.03 → stateDone`, `if noise_ratio > 3.0 → stateDone`, `if path_eff < 0.4 → stateDone` |
+| [engine.go](internal/flip/engine.go) | onCrossing: 加 `if path_eff < 0.4 → stateDone`, `if noise_ratio > 3.0 → stateDone`<br>onConfirmed: 加 `if other_delta < 0.03 → return nil` |
 | [scoring.go](internal/flip/scoring.go) | F7: 反转 btc_extreme 判断方向；F4: w_cheap_entry_strong 设为 0 |
 | [types.go](internal/flip/types.go) | DefaultConfig: OtherDeltaWeak 从 0.01 → 0.03，WCheapEntryStr 从 2 → 0 |

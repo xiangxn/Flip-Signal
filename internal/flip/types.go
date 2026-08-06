@@ -67,17 +67,17 @@ func DefaultConfig() FlipConfig {
 		HistWindowN:           18,
 		RangeExpThreshold:     0.5,
 		RangeExpMax:           2.0,
-		ConfirmDelayTicks:     1,  // 1 tick = 5s
+		ConfirmDelayTicks:     1, // 1 tick = 5s
 		OtherDeltaStrong:      0.03,
 		OtherDeltaWeak:        0.01,
 		BTCPosMax:             0.5,
 		BTCPosMin:             -0.5,
-			EntryCheapStrong:      0,    // OPT#5: disabled, entry<0.20 bonus removed
+		EntryCheapStrong:      0, // OPT#5: disabled, entry<0.20 bonus removed
 		EntryCheapWeak:        0.25,
 		WOtherD5Strong:        4,
 		WOtherD5Weak:          2,
 		WOscillating:          1,
-			WCheapEntryStr:        2,
+		WCheapEntryStr:        2,
 		WCheapEntryWeak:       1,
 		WRangeExpansion:       2,
 		WBtcExtreme:           1,

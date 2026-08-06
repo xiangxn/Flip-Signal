@@ -212,11 +212,14 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 	e.btcPosition = 0.0
 	e.btcExtreme = false
 	if e.histRange.IsReady() {
-			// OPT#2: BTC divergence from PM = flip edge. PM&BTC agree = real trend.
+		e.btcPosition = BTCPosition(e.crossSnap.CurrentPrice, e.crossSnap.OpenPrice, e.histRange.AvgRange())
+		// OPT#2: BTC divergence from PM = flip edge. PM and BTC agree = real trend.
 		if e.crossSide == "yes" {
-				e.btcExtreme = e.btcPosition > e.cfg.BTCPosMin && e.btcPosition < 0  // BTC微跌 vs PM看涨 = 背离
+			// YES>0.7 (PM bullish), BTC slightly down → PM overreacting
+			e.btcExtreme = e.btcPosition > e.cfg.BTCPosMin && e.btcPosition < 0
 		} else {
-				e.btcExtreme = e.btcPosition > 0 && e.btcPosition < e.cfg.BTCPosMax  // BTC微涨 vs PM看跌 = 背离
+			// NO>0.7 (PM bearish), BTC slightly up → PM overreacting
+			e.btcExtreme = e.btcPosition > 0 && e.btcPosition < e.cfg.BTCPosMax
 		}
 	}
 

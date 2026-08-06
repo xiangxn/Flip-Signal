@@ -7,15 +7,15 @@ package flip
 // ComputeFlipScore computes the 7-feature composite score.
 // Returns (score, vetoed). vetoed=true means F0 veto (real breakout, don't trade).
 //
-// Max score: 13 points (4+2+1+2+1+2+1).
+// Max achievable score: 9 points (4+1+1+2+1). F4 is disabled (OPT#5).
 //
 //	F1: OtherDelta > 0.03 → +4
-//	F2: OtherDelta > 0.01 → +2
+//	F2: OtherDelta > 0.01 → +2 (exclusive with F1)
 //	F3: IsOscillating    → +1
-//	F4: EntryPrice < 0.20 → +2
+//	F4: EntryPrice < 0.20 → +2 (DISABLED — OPT#5: EntryCheapStrong=0)
 //	F5: EntryPrice < 0.25 → +1
 //	F6: RangeExpansion < 0.5 → +2 (hist ready only)
-//	F7: BTC extreme position  → +1 (hist ready only)
+//	F7: BTC divergence from PM → +1 (hist ready only, OPT#2: reversed)
 //	F0: RangeExpansion ≥ 2.0 → veto   (hist ready only)
 func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 	// F0: Range expansion too large — real breakout, PM is right, don't bet against.
@@ -49,15 +49,15 @@ func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 		score += params.Cfg.WRangeExpansion
 	}
 
-		// F7: BTC direction diverges from PM → flip edge (OPT#2: reversed)
+	// F7: BTC direction diverges from PM → flip edge (OPT#2: reversed)
 	if params.HistReady {
 		var extreme bool
-			if params.Side == "yes" {
-				// YES>0.7 (PM bullish), BTC slightly down → PM overreacting
-				extreme = params.BTCPosition > params.Cfg.BTCPosMin && params.BTCPosition < 0
-			} else {
-				// NO>0.7 (PM bearish), BTC slightly up → PM overreacting
-				extreme = params.BTCPosition > 0 && params.BTCPosition < params.Cfg.BTCPosMax
+		if params.Side == "yes" {
+			// YES>0.7 (PM bullish), BTC slightly down → PM overreacting
+			extreme = params.BTCPosition > params.Cfg.BTCPosMin && params.BTCPosition < 0
+		} else {
+			// NO>0.7 (PM bearish), BTC slightly up → PM overreacting
+			extreme = params.BTCPosition > 0 && params.BTCPosition < params.Cfg.BTCPosMax
 		}
 		if extreme {
 			score += params.Cfg.WBtcExtreme
