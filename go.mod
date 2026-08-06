@@ -49,7 +49,6 @@ require (
 	github.com/ivanzzeth/ethsig v0.5.2 // indirect
 	github.com/ivanzzeth/polymarket-go-contracts/v2 v2.0.0 // indirect
 	github.com/jackpal/go-nat-pmp v1.0.2 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.7 // indirect
 	github.com/minio/sha256-simd v1.0.0 // indirect
 	github.com/mitchellh/mapstructure v1.4.1 // indirect
