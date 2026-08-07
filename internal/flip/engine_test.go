@@ -102,34 +102,37 @@ func TestCountFlips_TooShort(t *testing.T) {
 
 func TestIsOscillating_Yes(t *testing.T) {
 	cfg := DefaultConfig()
-	// path_eff=0.3, noise=8.0, flips=5 → should be oscillating
+	// Formula A: path_eff=0.3≤0.8, noise=8.0>1.5, flips=5>1 → oscillating
 	osc := IsOscillating(0.3, 8.0, 5, cfg)
 	if !osc {
-		t.Error("expected oscillating=true")
+		t.Error("expected oscillating=true (Formula A thresholds)")
 	}
 }
 
 func TestIsOscillating_No_PathEff(t *testing.T) {
 	cfg := DefaultConfig()
-	osc := IsOscillating(0.6, 8.0, 5, cfg) // path_eff > 0.5
+	// Formula A: path_eff=0.9 > 0.8 → not oscillating
+	osc := IsOscillating(0.9, 8.0, 5, cfg)
 	if osc {
-		t.Error("expected oscillating=false (path_eff too high)")
+		t.Error("expected oscillating=false (path_eff=0.9 > 0.8)")
 	}
 }
 
 func TestIsOscillating_No_Noise(t *testing.T) {
 	cfg := DefaultConfig()
-	osc := IsOscillating(0.3, 3.0, 5, cfg) // noise_ratio <= 5
+	// Formula A: noise_ratio=1.0 ≤ 1.5 → not oscillating
+	osc := IsOscillating(0.3, 1.0, 5, cfg)
 	if osc {
-		t.Error("expected oscillating=false (noise_ratio too low)")
+		t.Error("expected oscillating=false (noise_ratio=1.0 ≤ 1.5)")
 	}
 }
 
 func TestIsOscillating_No_Flips(t *testing.T) {
 	cfg := DefaultConfig()
-	osc := IsOscillating(0.3, 8.0, 2, cfg) // flips <= 2
+	// Formula A: flips=1 ≤ 1 → not oscillating (>1 means ≥2)
+	osc := IsOscillating(0.3, 8.0, 1, cfg)
 	if osc {
-		t.Error("expected oscillating=false (flips too few)")
+		t.Error("expected oscillating=false (flips=1 ≤ 1)")
 	}
 }
 
@@ -171,11 +174,11 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:           "no",
-		OtherDelta:     0.05, // >0.03 → +4
-		IsOscillating:  true, // +1
-		EntryPrice:     0.22, // <0.25 (weak) → +1 (OPT#5: strong bonus removed)
+		OtherDelta:     0.06, // >0.05 → +3 (Formula A top tier)
+		IsOscillating:  true, // +2 (Formula A)
+		EntryPrice:     0.15, // <0.20 → +1 (elif, no stacking)
 		RangeExpansion: 0.3,  // <0.5 → +2
-		BTCPosition:    0.25, // OPT#2: no side, 0<0.25<0.5 → BTC divergence → +1
+		BTCPosition:    0.25, // NO side, >0.1 → BTC diverges → +1
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -183,7 +186,7 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 9 // 4+1+1+2+1 = 9 (max after OPT#5 removes strong entry bonus)
+	expected := 9 // 3+2+1+2+1 = 9 (Formula A max with these inputs)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -193,11 +196,11 @@ func TestComputeFlipScore_MinTrigger(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:           "no",
-		OtherDelta:     0.02,  // >0.01 → +2
-		IsOscillating:  false, // 0
-		EntryPrice:     0.22,  // <0.25 → +1 (OPT#5: strong threshold=0, falls through)
-		RangeExpansion: 0.8,   // not <0.5 → 0
-		BTCPosition:    0.25,  // OPT#2: no side, 0<0.25<0.5 → divergence → +1
+		OtherDelta:     0.015,  // >0.01 → +1 (Formula A weak)
+		IsOscillating:  false,  // 0
+		EntryPrice:     0.22,   // <0.25 → +1 (elif)
+		RangeExpansion: 0.8,    // not <0.5 → 0
+		BTCPosition:    0.25,   // NO side, >0.1 → BTC diverges → +1
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -205,7 +208,7 @@ func TestComputeFlipScore_MinTrigger(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 4 // 2+1+1 = 4 (OPT#2 adds F7 since BTC diverges from PM)
+	expected := 3 // 1+1+1 = 3 (Formula A: weak od + entry + btc divergence)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -233,9 +236,9 @@ func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:           "yes",
-		OtherDelta:     0.05,
-		IsOscillating:  true,
-		EntryPrice:     0.15,
+		OtherDelta:     0.05,   // >0.02 → +2 (Formula A: not >0.05 so falls to strong)
+		IsOscillating:  true,   // +2 (Formula A)
+		EntryPrice:     0.15,   // <0.20 → +1
 		RangeExpansion: 2.5,
 		BTCPosition:    0,
 		HistReady:      false, // hist not ready → skip F0, F6, F7
@@ -245,7 +248,7 @@ func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 	if vetoed {
 		t.Error("F0 should not veto when hist not ready")
 	}
-	expected := 6 // 4+1+1 = 6 (OPT#5: strong→weak, no F6, F7)
+	expected := 5 // 2+2+1 = 5 (Formula A: strong od + osc + entry, no F6/F7)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -253,17 +256,16 @@ func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 
 func TestComputeFlipScore_OtherDeltaExclusive(t *testing.T) {
 	cfg := DefaultConfig()
-	// OtherDelta=0.04 matches both strong and weak → only strong applies
+	// Formula A: OtherDelta=0.04 > 0.02 (strong) → +2, doesn't also get weak +1
 	params := ScoreParams{
 		Side:       "yes",
-		OtherDelta: 0.04, // >0.03 → +4, doesn't also get +2
+		OtherDelta: 0.04, // >0.02 → +2, NOT >0.05
 		EntryPrice: 1.0,  // too high for cheap entry
 		Cfg:        cfg,
 	}
 	score, _ := ComputeFlipScore(params)
-	// Only F1 should trigger
-	if score != 4 {
-		t.Errorf("expected 4, got %d", score)
+	if score != 2 {
+		t.Errorf("expected 2 (Formula A strong tier), got %d", score)
 	}
 }
 
@@ -271,12 +273,12 @@ func TestComputeFlipScore_EntryPriceExclusive(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:       "yes",
-		EntryPrice: 0.18, // OPT#5: EntryCheapStrong=0, falls through to weak <0.25 → +1
+		EntryPrice: 0.18, // Formula A: <0.20 (strong) → +1, elif skips weak
 		Cfg:        cfg,
 	}
 	score, _ := ComputeFlipScore(params)
 	if score != 1 {
-		t.Errorf("expected 1, got %d", score)
+		t.Errorf("expected 1 (Formula A: strong entry, no stacking), got %d", score)
 	}
 }
 
@@ -341,8 +343,9 @@ func TestEngine_TooFewPreSnaps(t *testing.T) {
 	if sig != nil {
 		t.Error("expected nil when too few pre-snapshots")
 	}
-	if eng.state != stateDone {
-		t.Errorf("expected stateDone after failing MinPreSnaps, got %d", eng.state)
+	// After veto, engine falls back to WATCHING (other side may still cross)
+	if eng.state != stateWatching {
+		t.Errorf("expected stateWatching after failing MinPreSnaps (fallback), got %d", eng.state)
 	}
 }
 
@@ -358,21 +361,22 @@ func TestEngine_CrossingWithConfirm(t *testing.T) {
 	eng := NewEngine(cfg, ht)
 	eng.Reset(1)
 
-	// Feed 5 snapshots with gentle uptrend
-	// Price goes: 50000, 50010, 50020, 50030, 50040
-	// Open=50000, path_eff = abs(50040-50000)/(50040-50000) = 1.0 (trending)
-	// noise_ratio will be low
+	// Feed 5 snapshots: BTC dips slightly below open (to trigger btc_extreme Formula A)
+	// Open=50010, prices trending down: 50010, 50009, 50008, 50007, 50006
+	// path_eff ≈ 1.0 (trending), noise_ratio ≈ 1.0 (low noise) → oscillating=false
+	openPrice := 50010.0
 	for i := 0; i < 5; i++ {
-		price := 50000.0 + float64(i)*10
-		snap := makeTestSnap(0.5+float64(i)*0.05, 0.3, price, 50000, 250-i*5)
+		price := openPrice - float64(i)*1 // 50010, 50009, 50008, 50007, 50006
+		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
 		sig := eng.ProcessSnapshot(snap, 1)
 		if sig != nil {
 			t.Fatalf("unexpected signal at snap %d", i)
 		}
 	}
 
-	// Now crossing: YES=0.75 > 0.7
-	crossSnap := makeTestSnap(0.75, 0.15, 50050, 50000, 230)
+	// Crossing: YES>0.7, BTC at 50005 (below open → btc_pos=-5/40=-0.125 < -0.1 → btc_extreme)
+	// range_exp = |50005-50010|/40 = 5/40 = 0.125 < 0.5 → F6 +2
+	crossSnap := makeTestSnap(0.75, 0.15, 50005, openPrice, 230)
 	sig := eng.ProcessSnapshot(crossSnap, 1)
 	if sig != nil {
 		t.Fatal("expected nil after crossing (should be in CONFIRMING)")
@@ -381,32 +385,28 @@ func TestEngine_CrossingWithConfirm(t *testing.T) {
 		t.Fatalf("expected stateConfirming, got %d", eng.state)
 	}
 
-	// Confirmation snapshot: YES stayed high, NO moved up (favorable)
-	confSnap := makeTestSnap(0.78, 0.20, 50050, 50000, 225)
+	// Confirmation: NO moved up → other_delta=0.07 > 0.05 → +3 (Formula A top tier)
+	confSnap := makeTestSnap(0.78, 0.22, 50005, openPrice, 225)
 	sig = eng.ProcessSnapshot(confSnap, 1)
 	if sig == nil {
-		t.Fatal("expected signal after confirmation")
+		t.Fatal("expected signal after confirmation (Formula A)")
 	}
 
 	// Verify signal
 	if sig.Side != "yes" {
 		t.Errorf("expected side=yes, got %s", sig.Side)
 	}
-	// other_delta = 0.20 - 0.15 = 0.05 > 0.03 → +4
-	if sig.OtherDelta < 0.03 {
-		t.Errorf("other_delta expected >=0.03, got %.4f", sig.OtherDelta)
+	// other_delta = 0.22 - 0.15 = 0.07 > 0.05 → Formula A top tier +3
+	if sig.OtherDelta < 0.05 {
+		t.Errorf("other_delta expected >=0.05, got %.4f", sig.OtherDelta)
 	}
-	// entry = NO price = 0.15 → <0.25 (weak) → +1 (OPT#5: strong removed)
+	// entry = NO price = 0.15 → <0.20 → +1 (Formula A: re-activated)
 	if sig.EntryPrice != 0.15 {
 		t.Errorf("entry expected 0.15, got %.4f", sig.EntryPrice)
 	}
-	// At least 4+1 = 5 score
+	// Score: od>0.05(+3) + osc=false(0) + entry<0.20(+1) + range_exp<0.5(+2) + btc_ext(+1) = 7 ≥ 5
 	if sig.Score < 5 {
 		t.Errorf("score expected >=5, got %d", sig.Score)
-	}
-	// Not trending (path_eff=1.0 > 0.5) → oscillating=false
-	if sig.IsOscillating {
-		t.Error("not oscillating (trending)")
 	}
 	if sig.Shares != 1 {
 		t.Errorf("expected 1 share, got %d", sig.Shares)
@@ -424,7 +424,7 @@ func TestEngine_CrossingWithUnfavorableOtherDelta(t *testing.T) {
 	eng := NewEngine(cfg, ht)
 	eng.Reset(1)
 
-	// Feed pre-cross snapshots
+	// Feed pre-cross snapshots (trending → oscillating=false)
 	for i := 0; i < 5; i++ {
 		price := 50000.0 + float64(i)*10
 		snap := makeTestSnap(0.5, 0.3, price, 50000, 250-i*5)
@@ -435,11 +435,14 @@ func TestEngine_CrossingWithUnfavorableOtherDelta(t *testing.T) {
 	crossSnap := makeTestSnap(0.75, 0.20, 50050, 50000, 230)
 	eng.ProcessSnapshot(crossSnap, 1)
 
-	// Confirmation with opposing side dropping → hard filter
+	// Confirmation with opposing side dropping: other_delta=-0.03
+	// Formula A: od hard filter disabled (ODHardFilter=-999)
+	// Score: od≤0.01(0) + osc(0) + entry=0.20<0.25(+1) + range_exp=50/40=1.25(0) + btc(0) = 1 < 5
+	// → signal should still be nil (fails by score)
 	confSnap := makeTestSnap(0.78, 0.17, 50050, 50000, 225)
 	sig := eng.ProcessSnapshot(confSnap, 1)
 	if sig != nil {
-		t.Errorf("expected nil when other_delta < 0.03 (OPT#1), got sig with other_delta=%.4f", sig.OtherDelta)
+		t.Errorf("expected nil (Formula A: score too low with negative other_delta), got sig with other_delta=%.4f score=%d", sig.OtherDelta, sig.Score)
 	}
 }
 
@@ -467,8 +470,9 @@ func TestEngine_F0Veto_RealBreakout(t *testing.T) {
 	if sig != nil {
 		t.Error("expected F0 veto for range_expansion >= 2.0")
 	}
-	if eng.state != stateDone {
-		t.Errorf("expected stateDone after F0 veto, got %d", eng.state)
+	// After F0 veto, engine falls back to WATCHING (other side may still cross)
+	if eng.state != stateWatching {
+		t.Errorf("expected stateWatching after F0 veto (fallback), got %d", eng.state)
 	}
 }
 

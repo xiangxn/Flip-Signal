@@ -10,9 +10,7 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
-from typing import Any
 
 from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG
 
@@ -116,12 +114,21 @@ def compute_flips(pre_prices: list[float]) -> int:
 
 
 def is_oscillating(pre_prices: list[float], open_price: float,
-                 cfg: FlipBacktestConfig) -> bool:
-    """§2.5 来回振荡综合判定: 三个条件需同时满足。"""
-    path_eff = compute_path_efficiency(pre_prices, open_price)
-    net_move = abs(pre_prices[-1] - open_price)
-    noise_ratio = compute_noise_ratio(pre_prices, net_move)
-    flips = compute_flips(pre_prices)
+                 cfg: FlipBacktestConfig,
+                 path_eff: float | None = None,
+                 noise_ratio: float | None = None,
+                 flips: int | None = None) -> bool:
+    """§2.5 来回振荡综合判定: 三个条件需同时满足。
+
+    可传入预计算值避免重复遍历 pre_prices。
+    """
+    if path_eff is None:
+        path_eff = compute_path_efficiency(pre_prices, open_price)
+    if noise_ratio is None:
+        net_move = abs(pre_prices[-1] - open_price)
+        noise_ratio = compute_noise_ratio(pre_prices, net_move)
+    if flips is None:
+        flips = compute_flips(pre_prices)
 
     return (
         path_eff <= cfg.path_eff_oscillating
@@ -220,16 +227,22 @@ def check_signal(event: dict, side: str,
 
     # ── T=0 实时特征 ──
 
-    # 路径效率 + 子特征
+    # 一次遍历算出 pre_high/pre_low/pre_range (避免 compute_path_efficiency 重复 max/min)
     net_move = abs(cross_snap["price"] - open_price)
-    pre_high, pre_low, pre_range = compute_pre_range(pre_prices)
+    pre_high = max(pre_prices)
+    pre_low = min(pre_prices)
+    pre_range = pre_high - pre_low
     if pre_range == 0:
         return None
 
-    path_eff = compute_path_efficiency(pre_prices, open_price)
+    path_eff = net_move / pre_range
     noise_ratio_val = compute_noise_ratio(pre_prices, net_move)
     flips_val = compute_flips(pre_prices)
-    oscillating = is_oscillating(pre_prices, open_price, cfg)
+    # 传入预计算值，避免 is_oscillating 内部重复遍历
+    oscillating = is_oscillating(pre_prices, open_price, cfg,
+                                 path_eff=path_eff,
+                                 noise_ratio=noise_ratio_val,
+                                 flips=flips_val)
 
     # Hard filter: noise_ratio > 3.0 → 不触发
     # OPT#3: 高噪声信号胜率 0%，noise > 3.0 的 5 笔全亏
@@ -252,15 +265,15 @@ def check_signal(event: dict, side: str,
     # BTC 位置 (tick-independent: vs Open, 以历史振幅为单位)
     btc_position = compute_btc_position(cross_snap["price"], open_price,
                                         event.get("hist_avg_range", 0))
-    # OPT#2: 反转 btc_extreme 方向 — 奖励 BTC 与 PM 背离
+    # Formula A: BTC 与 PM 背离 — 放宽条件
     # Flip 策略赌 PM 过度反应。BTC 与 PM 同向 = PM 正确，不应加分
     # BTC 与 PM 反向 = PM 可能错了，这才是 flip 的 edge
     if side == "yes":
-        # YES>0.7 (PM看涨), BTC 微跌 → PM 过度反应，flip edge
-        btc_extreme = (cfg.btc_pos_min < btc_position < 0)
+        # YES>0.7 (PM看涨), BTC 跌 → PM 过度反应，flip edge
+        btc_extreme = (btc_position < cfg.btc_pos_min)  # btc_pos < -0.1
     else:
-        # NO>0.7 (PM看跌), BTC 微涨 → PM 过度反应，flip edge
-        btc_extreme = (0 < btc_position < cfg.btc_pos_max)
+        # NO>0.7 (PM看跌), BTC 涨 → PM 过度反应，flip edge
+        btc_extreme = (btc_position > cfg.btc_pos_max)  # btc_pos > 0.1
 
     # 入场价
     entry_price = cross_snap[other_key]
@@ -268,16 +281,17 @@ def check_signal(event: dict, side: str,
     # ── T+5s 确认特征 ──
     other_delta = compute_other_delta(snaps, cross_idx, other_key, cfg)
 
-    # Hard filter: 对面涨幅 < 0.03 → 不触发 (§2.7)
-    # OPT#1: 从 -0.02 提高到 0.03。other_delta < 0.03 的 9 笔全亏，零胜率
-    if other_delta < 0.03:
+    # Hard filter: other_delta 下限 (Formula A: 默认禁用, 由评分权重处理)
+    if other_delta < cfg.od_hard_filter:
         return None
 
     # ── Step 4: 计算评分 ──
     score = 0
 
-    # F1/F2: 对面价格变化
-    if other_delta > cfg.other_delta_strong:
+    # F1/F2/F2.5: 对面价格变化 — Formula A 三档评分
+    if other_delta > cfg.other_delta_vstrong:
+        score += cfg.w_other_d5_vstrong
+    elif other_delta > cfg.other_delta_strong:
         score += cfg.w_other_d5_strong
     elif other_delta > cfg.other_delta_weak:
         score += cfg.w_other_d5_weak
@@ -286,7 +300,7 @@ def check_signal(event: dict, side: str,
     if oscillating:
         score += cfg.w_oscillating
 
-    # F4/F5: 低价入场
+    # F4/F5: 低价入场 (entry < 0.25 → +1, 不叠加 — 极端低价 <0.15 胜率仅 7%)
     if entry_price < cfg.entry_cheap_strong:
         score += cfg.w_cheap_entry_strong
     elif entry_price < cfg.entry_cheap_weak:

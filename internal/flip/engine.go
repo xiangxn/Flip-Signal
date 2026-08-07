@@ -8,7 +8,8 @@ import (
 )
 
 // Engine detects flip signals from a stream of ResearchSnapshots.
-// It implements a state machine: WATCHING → CONFIRMING → DONE.
+// It implements the Python backtest first_crossing_only logic exactly:
+// check YES first → if signal, done; else check NO → if signal, done.
 //
 // Usage per market cycle:
 //
@@ -21,12 +22,20 @@ type Engine struct {
 	histRange *HistRangeTracker
 	state     flipState
 
-	snapBuffer   []*lab.ResearchSnapshot // snapshots up to and including crossing
-	crossSnap    *lab.ResearchSnapshot   // snapshot at crossing moment
-	crossSide    string                  // "yes" or "no"
-	confirmCount int                     // ticks waited in CONFIRMING state
+	snapBuffer []*lab.ResearchSnapshot // all snapshots in this cycle (always appended)
+	crossSnap  *lab.ResearchSnapshot   // snapshot at current crossing moment
+	crossSide  string                  // "yes" or "no"
+	crossIdx   int                     // index in snapBuffer of current crossing
+
+	confirmCount int  // ticks waited in CONFIRMING state
 	generation   int64
 	doneThisGen  bool
+
+	// first_crossing_only tracking (matches Python: try YES, then NO)
+	yesFirstCrossIdx int  // index in snapBuffer of first YES >0.7, -1 if none
+	noFirstCrossIdx  int  // index in snapBuffer of first NO >0.7, -1 if none
+	yesTried         bool // YES side was attempted & failed this generation
+	noTried          bool // NO side was attempted & failed this generation
 
 	// T=0 features (computed in onCrossing, read in onConfirmed)
 	pathEff        float64
@@ -41,9 +50,11 @@ type Engine struct {
 // NewEngine creates a new flip detection engine.
 func NewEngine(cfg FlipConfig, histRange *HistRangeTracker) *Engine {
 	return &Engine{
-		cfg:       cfg,
-		histRange: histRange,
-		state:     stateIdle,
+		cfg:               cfg,
+		histRange:         histRange,
+		state:             stateIdle,
+		yesFirstCrossIdx:  -1,
+		noFirstCrossIdx:   -1,
 	}
 }
 
@@ -53,9 +64,15 @@ func (e *Engine) Reset(generation int64) {
 	e.snapBuffer = e.snapBuffer[:0]
 	e.crossSnap = nil
 	e.crossSide = ""
+	e.crossIdx = 0
 	e.confirmCount = 0
 	e.generation = generation
 	e.doneThisGen = false
+
+	e.yesFirstCrossIdx = -1
+	e.noFirstCrossIdx = -1
+	e.yesTried = false
+	e.noTried = false
 
 	e.pathEff = 0
 	e.noiseRatio = 0
@@ -68,9 +85,29 @@ func (e *Engine) Reset(generation int64) {
 
 // ProcessSnapshot processes one ResearchSnapshot. Returns a FlipSignal if
 // all conditions are met, nil otherwise.
+//
+// Matches Python backtest first_crossing_only:
+//   - YES checked first, if signal produced → done
+//   - If YES fails, NO is checked (including past crossings in buffer)
+//   - If NO also fails → resume watching for new crossings
 func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSignal {
 	if gen != e.generation || e.doneThisGen {
 		return nil
+	}
+
+	// Always append to buffer so it reflects full cycle history.
+	// When falling back from a failed confirmation, the buffer already
+	// contains the confirmation tick and earlier crossings.
+	bufIdx := len(e.snapBuffer)
+	e.snapBuffer = append(e.snapBuffer, snap)
+
+	// Track first crossing per side regardless of state (so crossings
+	// during CONFIRMING are not lost for later fallback).
+	if e.yesFirstCrossIdx < 0 && snap.YesPrice > e.cfg.TriggerThreshold {
+		e.yesFirstCrossIdx = bufIdx
+	}
+	if e.noFirstCrossIdx < 0 && snap.NoPrice > e.cfg.TriggerThreshold {
+		e.noFirstCrossIdx = bufIdx
 	}
 
 	switch e.state {
@@ -78,23 +115,28 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 		return nil
 
 	case stateWatching:
-		// Append first, then check — so snapBuffer includes the crossing snap.
-		e.snapBuffer = append(e.snapBuffer, snap)
-
-		if snap.YesPrice > e.cfg.TriggerThreshold {
-			return e.onCrossing(snap, "yes")
+		// Try YES first (match Python order), then NO.
+		// enterConfirming may return a signal synchronously if the confirmation
+		// tick is already buffered (happens after fallback).
+		if !e.yesTried && e.yesFirstCrossIdx >= 0 {
+			return e.enterConfirming(e.yesFirstCrossIdx, "yes")
 		}
-		if snap.NoPrice > e.cfg.TriggerThreshold {
-			return e.onCrossing(snap, "no")
+		if !e.noTried && e.noFirstCrossIdx >= 0 {
+			return e.enterConfirming(e.noFirstCrossIdx, "no")
 		}
 		return nil
 
 	case stateConfirming:
-		// Do NOT append to snapBuffer here — post-cross snapshots are only
-		// used for other_delta computation.
 		e.confirmCount++
 		if e.confirmCount >= e.cfg.ConfirmDelayTicks {
-			return e.onConfirmed(snap)
+			sig := e.onConfirmed(snap)
+			if sig != nil {
+				e.state = stateDone
+				e.doneThisGen = true
+				return sig
+			}
+			// Confirmation failed — try the other side (Python fallback)
+			return e.fallbackAfterFailedConfirm()
 		}
 		return nil
 
@@ -104,22 +146,32 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 	return nil
 }
 
-// onCrossing is called when a >0.7 crossing is detected.
-// It computes all T=0 features and either vetoes (F0) or transitions to CONFIRMING.
-func (e *Engine) onCrossing(snap *lab.ResearchSnapshot, side string) *FlipSignal {
-	// Check minimum pre-snapshots
-	if len(e.snapBuffer) < e.cfg.MinPreSnaps {
-		e.state = stateDone
-		return nil
+// enterConfirming transitions to CONFIRMING state using the crossing at the
+// given buffer index. Computes all T=0 features from snapshots up to crossIdx.
+func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
+	// Mark this side as tried
+	if side == "yes" {
+		e.yesTried = true
+	} else {
+		e.noTried = true
 	}
 
-	// Extract pre-prices from snapBuffer (includes crossing snap at end)
-	prePrices := make([]float64, len(e.snapBuffer))
-	for i, s := range e.snapBuffer {
-		prePrices[i] = s.CurrentPrice
+	crossSnap := e.snapBuffer[crossIdx]
+
+	// Check minimum pre-snapshots (including crossing snap)
+	nPre := crossIdx + 1 // snapshots up to and including crossing
+	if nPre < e.cfg.MinPreSnaps {
+		// Not enough history — try other side instead
+		return e.fallbackAfterFailedConfirm()
 	}
 
-	openPrice := snap.OpenPrice
+	// Extract pre-prices from snap buffer up to crossing
+	prePrices := make([]float64, nPre)
+	for i := 0; i < nPre; i++ {
+		prePrices[i] = e.snapBuffer[i].CurrentPrice
+	}
+
+	openPrice := crossSnap.OpenPrice
 
 	// Compute T=0 features
 	netMove := math.Abs(prePrices[len(prePrices)-1] - openPrice)
@@ -134,17 +186,16 @@ func (e *Engine) onCrossing(snap *lab.ResearchSnapshot, side string) *FlipSignal
 	}
 	preRange := preHigh - preLow
 	if preRange == 0 {
-		e.state = stateDone
-		return nil
+		return e.fallbackAfterFailedConfirm()
 	}
 
 	e.pathEff = netMove / preRange
 
-	// OPT#7: path_eff too low → trend unclear, veto
+	// path_eff too low → trend unclear, veto
 	if e.pathEff < 0.4 {
-		e.state = stateDone
-		return nil
+		return e.fallbackAfterFailedConfirm()
 	}
+
 	totalPathVal := TotalPath(prePrices)
 	if netMove > 0 {
 		e.noiseRatio = totalPathVal / netMove
@@ -152,39 +203,74 @@ func (e *Engine) onCrossing(snap *lab.ResearchSnapshot, side string) *FlipSignal
 		e.noiseRatio = totalPathVal // pure oscillation
 	}
 
-	// OPT#3: high noise ratio → PM price unstable, veto
+	// high noise ratio → PM price unstable, veto
 	if e.noiseRatio > 3.0 {
-		e.state = stateDone
-		return nil
+		return e.fallbackAfterFailedConfirm()
 	}
+
 	e.flips = CountFlips(prePrices)
 	e.oscillating = IsOscillating(e.pathEff, e.noiseRatio, e.flips, e.cfg)
 
 	// Range expansion (only when hist is ready)
 	if e.histRange.IsReady() {
-		e.rangeExpansion = RangeExpansion(snap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		e.rangeExpansion = RangeExpansion(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
 	}
 
 	// F0: Range expansion too large — real breakout, PM is right, veto
 	if e.histRange.IsReady() && e.rangeExpansion >= e.cfg.RangeExpMax {
-		e.state = stateDone
-		return nil
+		return e.fallbackAfterFailedConfirm()
 	}
 
-	// Save crossing state and enter confirmation phase
-	e.crossSnap = snap
+	// Save crossing state
+	e.crossSnap = crossSnap
 	e.crossSide = side
+	e.crossIdx = crossIdx
 	e.confirmCount = 0
+
+	// If the confirmation tick is already in the buffer (happens when
+	// falling back to a crossing that occurred before the failed side's
+	// confirmation), evaluate synchronously — matching Python's
+	// check_signal which has all data available at once.
+	if confIdx := crossIdx + e.cfg.ConfirmDelayTicks; confIdx < len(e.snapBuffer) {
+		sig := e.onConfirmed(e.snapBuffer[confIdx])
+		if sig != nil {
+			e.state = stateDone
+			e.doneThisGen = true
+			return sig
+		}
+		// This side failed too — try fallback again
+		return e.fallbackAfterFailedConfirm()
+	}
+
+	// Normal path: wait for the confirmation tick to arrive
 	e.state = stateConfirming
+	return nil
+}
+
+// fallbackAfterFailedConfirm implements the Python first_crossing_only fallback:
+// after one side fails, try the other side's first crossing from the buffer.
+// If the other side hasn't crossed yet, resume WATCHING to catch future crossings.
+func (e *Engine) fallbackAfterFailedConfirm() *FlipSignal {
+	// Check if the other side has also crossed (earlier or at current tick)
+	if !e.yesTried && e.yesFirstCrossIdx >= 0 {
+		return e.enterConfirming(e.yesFirstCrossIdx, "yes")
+	}
+	if !e.noTried && e.noFirstCrossIdx >= 0 {
+		return e.enterConfirming(e.noFirstCrossIdx, "no")
+	}
+
+	// Both sides tried or neither crossed → resume watching for future crossings
+	e.state = stateWatching
+	e.crossSnap = nil
+	e.crossSide = ""
+	e.crossIdx = 0
+	e.confirmCount = 0
 	return nil
 }
 
 // onConfirmed is called after the confirmation delay (ConfirmDelayTicks).
 // It computes the T+5s confirmation signal and the final score.
 func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
-	e.state = stateDone
-	e.doneThisGen = true
-
 	// Compute other_delta — opposite-side price change
 	var otherDelta float64
 	if e.crossSide == "yes" {
@@ -195,8 +281,8 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		otherDelta = snap.YesPrice - e.crossSnap.YesPrice
 	}
 
-	// OPT#1: Hard filter — other_delta < 0.03 never wins
-	if otherDelta < 0.03 {
+	// Formula A: other_delta hard filter (default -999 = disabled, scoring handles it)
+	if otherDelta < e.cfg.ODHardFilter {
 		return nil
 	}
 
@@ -213,13 +299,13 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 	e.btcExtreme = false
 	if e.histRange.IsReady() {
 		e.btcPosition = BTCPosition(e.crossSnap.CurrentPrice, e.crossSnap.OpenPrice, e.histRange.AvgRange())
-		// OPT#2: BTC divergence from PM = flip edge. PM and BTC agree = real trend.
+		// Formula A: BTC divergence from PM = flip edge. PM and BTC agree = real trend.
 		if e.crossSide == "yes" {
-			// YES>0.7 (PM bullish), BTC slightly down → PM overreacting
-			e.btcExtreme = e.btcPosition > e.cfg.BTCPosMin && e.btcPosition < 0
+			// YES>0.7 (PM bullish), BTC down → PM overreacting
+			e.btcExtreme = e.btcPosition < e.cfg.BTCPosMin // btc_pos < -0.1
 		} else {
-			// NO>0.7 (PM bearish), BTC slightly up → PM overreacting
-			e.btcExtreme = e.btcPosition > 0 && e.btcPosition < e.cfg.BTCPosMax
+			// NO>0.7 (PM bearish), BTC up → PM overreacting
+			e.btcExtreme = e.btcPosition > e.cfg.BTCPosMax // btc_pos > 0.1
 		}
 	}
 

@@ -6,7 +6,7 @@
 参数说明对应 docs/flip_backtest_plan.md §2 和 §4。
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 @dataclass
@@ -19,13 +19,13 @@ class FlipBacktestConfig:
     # ── T+0 实时特征 ──
 
     # §2.2 路径效率 — 振荡判定核心
-    path_eff_oscillating: float = 0.5      # path_eff ≤ 此值 → 判定为来回振荡 (5s数据校准)
+    path_eff_oscillating: float = 0.8      # Formula A: 放宽到 0.8 (原 0.5 过严)
 
     # §2.3 噪声比
-    noise_ratio_oscillating: float = 5.0   # noise_ratio > 此值 → 加强振荡判定
+    noise_ratio_oscillating: float = 1.5   # Formula A: 放宽到 1.5 (原 5.0 从不触发)
 
     # §2.4 翻转次数
-    flips_oscillating: int = 2             # flips > 此值 → 加强振荡判定 (5s数据校准)
+    flips_oscillating: int = 1             # Formula A: 放宽到 >1 (原 >2)
 
     # §2.5 来回振荡综合判定: 三个条件需同时满足
     #   path_eff <= path_eff_oscillating AND
@@ -37,24 +37,28 @@ class FlipBacktestConfig:
     range_exp_threshold: float = 0.5     # 振幅 < 此值 → BTC没动, PM过度自信 → +2
     range_exp_max: float = 2.0           # F0: 振幅 ≥ 此值 → 真突破, 一票否决
 
-    # §2.7 对面价格确认 (T+5s 特征)
+    # §2.7 对面价格确认 (T+5s 特征) — Formula A: 三档评分
     confirm_delay_ticks: int = 1         # 确认等待 tick 数 (5s 数据下 1 tick = 5s)
-    other_delta_strong: float = 0.03     # 对面涨幅 > 此值 → +4 分
-    other_delta_weak: float = 0.01       # 对面涨幅 > 此值 → +2 分
+    od_hard_filter: float = -999.0       # other_delta 硬过滤下限, -999 = 禁用 (Formula A: 由评分权重处理)
+    other_delta_vstrong: float = 0.05    # 对面涨幅 > 此值 → +3 分 (原 +4)
+    other_delta_strong: float = 0.02     # 对面涨幅 > 此值 → +2 分 (原 0.03, +4)
+    other_delta_weak: float = 0.01       # 对面涨幅 > 此值 → +1 分 (原 +2)
 
     # §2.8 BTC 位置 (tick-independent: vs Open, 以 hist_avg_range 为单位)
-    btc_pos_max: float = 0.5             # YES>0.7: 0 < btc_pos < 此值 → +1
-    btc_pos_min: float = -0.5            # NO>0.7:  此值 < btc_pos < 0 → +1
+    # Formula A: 放宽 — YES侧 btc_pos < -0.1, NO侧 btc_pos > 0.1
+    btc_pos_max: float = 0.1             # NO>0.7: btc_pos > 此值 → BTC与PM背离 → +1
+    btc_pos_min: float = -0.1            # YES>0.7: btc_pos < 此值 → BTC与PM背离 → +1
 
     # §2.9 入场价格
-    entry_cheap_strong: float = 0.20     # entry < 此值 → +2 分
+    entry_cheap_strong: float = 0.20     # entry < 此值 → +1 分 (Formula A: 重新激活)
     entry_cheap_weak: float = 0.25       # entry < 此值 → +1 分
 
-    # ── 评分权重 (§2.10) ──
-    w_other_d5_strong: int = 4           # 对面大涨
-    w_other_d5_weak: int = 2             # 对面小涨
-    w_oscillating: int = 1               # 来回振荡
-    w_cheap_entry_strong: int = 0        # OPT#5: 极低价入场加分移除 (entry<0.20 全亏)
+    # ── 评分权重 (§2.10) — Formula A ──
+    w_other_d5_vstrong: int = 3          # 对面大涨 (od > 0.05)
+    w_other_d5_strong: int = 2           # 对面中涨 (od > 0.02)
+    w_other_d5_weak: int = 1             # 对面小涨 (od > 0.01)
+    w_oscillating: int = 2               # 来回振荡 (Formula A: +2)
+    w_cheap_entry_strong: int = 1        # 极低价入场 (Formula A: 重新激活)
     w_cheap_entry_weak: int = 1          # 低价入场
     w_range_expansion: int = 2           # 振幅扩张
     w_btc_extreme: int = 1               # BTC 极端位置

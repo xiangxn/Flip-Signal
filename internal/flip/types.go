@@ -18,66 +18,73 @@ type FlipConfig struct {
 	FirstCrossingOnly bool    // Only trigger on first crossing per cycle
 	MinPreSnaps       int     // Minimum snapshots before crossing (5)
 
-	// ── Oscillation detection (all three must hold) ──
-	PathEffOscillating    float64 // path_eff ≤ this → candidate (0.5)
-	NoiseRatioOscillating float64 // noise_ratio > this → candidate (5.0)
-	FlipsOscillating      int     // flips > this → candidate (2)
+	// ── Oscillation detection (all three must hold) — Formula A ──
+	PathEffOscillating    float64 // path_eff ≤ this → candidate (0.8, was 0.5)
+	NoiseRatioOscillating float64 // noise_ratio > this → candidate (1.5, was 5.0)
+	FlipsOscillating      int     // flips > this → candidate (1, was 2)
 
 	// ── Range expansion (tick-independent, uses hist_avg_range) ──
 	HistWindowN       int     // Historical kline window size (18)
 	RangeExpThreshold float64 // < this → BTC barely moved, PM overconfident (0.5)
 	RangeExpMax       float64 // ≥ this → F0 veto, real breakout (2.0)
 
-	// ── Opposite-side confirmation (§2.7) ──
-	ConfirmDelayTicks int     // Ticks to wait for confirmation (1 tick = 5s)
-	OtherDeltaStrong  float64 // > this → +4 points (0.03)
-	OtherDeltaWeak    float64 // > this → +2 points (0.01)
+	// ── Opposite-side confirmation (§2.7) — Formula A: 3-tier ──
+	ConfirmDelayTicks  int     // Ticks to wait for confirmation (1 tick = 5s)
+	ODHardFilter       float64 // other_delta hard lower bound, -999 = disabled (Formula A: scoring handles it)
+	OtherDeltaVStrong  float64 // > this → +3 points (0.05, new top tier)
+	OtherDeltaStrong   float64 // > this → +2 points (0.02, was 0.03)
+	OtherDeltaWeak     float64 // > this → +1 points (0.01, was +2)
 
-	// ── BTC position (§2.8) ──
-	BTCPosMax float64 // YES>0.7: 0 < btc_pos < this → +1 (0.5)
-	BTCPosMin float64 // NO>0.7:  this < btc_pos < 0 → +1 (-0.5)
+	// ── BTC position (§2.8) — Formula A: widened ──
+	BTCPosMax float64 // NO>0.7: btc_pos > this → BTC diverges from PM → +1 (0.1)
+	BTCPosMin float64 // YES>0.7: btc_pos < this → BTC diverges from PM → +1 (-0.1)
 
-	// ── Entry price (§2.9) ──
-	EntryCheapStrong float64 // < this → +2 points (0.20)
-	EntryCheapWeak   float64 // < this → +1 point  (0.25)
+	// ── Entry price (§2.9) — Formula A: re-activated ──
+	EntryCheapStrong float64 // < this → +1 point  (0.20)
+	EntryCheapWeak   float64 // < this → +1 point  (0.25, elif — no stacking)
 
-	// ── Scoring weights (§2.10) ──
-	WOtherD5Strong  int // Opposite big move  (4)
-	WOtherD5Weak    int // Opposite small move (2)
-	WOscillating    int // Oscillation bonus (1)
-	WCheapEntryStr  int // Very cheap entry  (2)
-	WCheapEntryWeak int // Cheap entry       (1)
-	WRangeExpansion int // Range too small   (2)
-	WBtcExtreme     int // BTC extreme pos   (1)
+	// ── Scoring weights (§2.10) — Formula A ──
+	WOtherD5VStrong int // Opposite huge move  (3, new)
+	WOtherD5Strong  int // Opposite big move    (2, was 4)
+	WOtherD5Weak    int // Opposite small move  (1, was 2)
+	WOscillating    int // Oscillation bonus    (2, was 1)
+	WCheapEntryStr  int // Very cheap entry     (1, was 2, was disabled)
+	WCheapEntryWeak int // Cheap entry          (1)
+	WRangeExpansion int // Range too small      (2)
+	WBtcExtreme     int // BTC extreme pos      (1)
 
 	// ── Entry thresholds (§2.10) ──
 	ScoreEntry int // ≥ this → open 1 share (5)
 	ScoreAdd   int // ≥ this → add 2 shares (99 = disabled)
 }
 
-// DefaultConfig returns a FlipConfig matching backtest_flip_config.py.
+// DefaultConfig returns a FlipConfig matching backtest_flip_config.py Formula A.
+// Backtest result: 34 signals, 52.9% WR, +10.09 P&L, PF=2.7 on lab data.
 func DefaultConfig() FlipConfig {
 	return FlipConfig{
 		TriggerThreshold:      0.7,
 		FirstCrossingOnly:     true,
 		MinPreSnaps:           5,
-		PathEffOscillating:    0.5,
-		NoiseRatioOscillating: 5.0,
-		FlipsOscillating:      2,
+		PathEffOscillating:    0.8,  // Formula A: relaxed from 0.5
+		NoiseRatioOscillating: 1.5,  // Formula A: relaxed from 5.0 (never fired)
+		FlipsOscillating:      1,    // Formula A: relaxed from 2
 		HistWindowN:           18,
 		RangeExpThreshold:     0.5,
 		RangeExpMax:           2.0,
-		ConfirmDelayTicks:     1, // 1 tick = 5s
-		OtherDeltaStrong:      0.03,
-		OtherDeltaWeak:        0.01,
-		BTCPosMax:             0.5,
-		BTCPosMin:             -0.5,
-		EntryCheapStrong:      0, // OPT#5: disabled, entry<0.20 bonus removed
+		ConfirmDelayTicks:     1,     // 1 tick = 5s
+		ODHardFilter:          -999.0, // Formula A: disabled, scoring handles it
+		OtherDeltaVStrong:     0.05,   // Formula A: new top tier (>0.05 → +3)
+		OtherDeltaStrong:      0.02,   // Formula A: was 0.03 +4
+		OtherDeltaWeak:        0.01,   // Formula A: was +2
+		BTCPosMax:             0.1,    // Formula A: widened from 0.5
+		BTCPosMin:             -0.1,   // Formula A: widened from -0.5
+		EntryCheapStrong:      0.20,   // Formula A: re-activated (was 0=disabled)
 		EntryCheapWeak:        0.25,
-		WOtherD5Strong:        4,
-		WOtherD5Weak:          2,
-		WOscillating:          1,
-		WCheapEntryStr:        2,
+		WOtherD5VStrong:       3,      // Formula A: new weight
+		WOtherD5Strong:        2,      // Formula A: was 4
+		WOtherD5Weak:          1,      // Formula A: was 2
+		WOscillating:          2,      // Formula A: was 1
+		WCheapEntryStr:        1,      // Formula A: was 2 (was disabled)
 		WCheapEntryWeak:       1,
 		WRangeExpansion:       2,
 		WBtcExtreme:           1,
