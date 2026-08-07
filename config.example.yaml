@@ -1,5 +1,4 @@
-# MQS (Market Quality Specification) Configuration
-# BTC 5-minute Polymarket Last-Trading System
+# LastTrading Configuration
 
 # Polymarket SDK configuration
 sdk:
@@ -37,25 +36,3 @@ sdk:
     # Funder / proxy wallet address (optional)
     # Can also be set via POLYMARKET_FUNDER env var
     # funder_address: ""
-
-# Logging configuration
-logging:
-  # Where to write MQS decision logs (JSONL format)
-  decision_log_path: "data/mqs_decisions.jsonl"
-  # Log level: debug, info, warn, error
-  level: "info"
-
-# MQS Strategy configuration (for polypilot integration)
-strategies:
-  mqs:
-    # Base position size in USDC
-    base_size: 5.0
-    # Position size for strong signals (MQS >= 85)
-    strong_size: 10.0
-    # Decision log path
-    log_path: "data/mqs_decisions.jsonl"
-
-# Polypilot runtime configuration (when running inside polypilot)
-runtime:
-  strategy_tick_interval: 1s
-  metrics_interval: 5m

@@ -19,13 +19,14 @@ type BinanceMarketData struct {
 	Price     float64 // Latest trade price
 	OpenPrice float64 // Current 5-minute kline open price (refreshed per cycle)
 
-	// Volume since last snapshot (reset on each ConsumeVolume call)
-	BuyVolume1s  float64
-	SellVolume1s float64
+	// Volume accumulated since last ConsumeVolume call.
+	// Consumption interval depends on caller (e.g. 5s for Flip/Lab).
+	BuyVolume  float64 `json:"buy_vol"`
+	SellVolume float64 `json:"sell_vol"`
 
-	// Cumulative volume for the window
-	BuyVolume10s  float64
-	SellVolume10s float64
+	// Cumulative volume since last ConsumeVolume call (same reset cycle as BuyVolume).
+	BuyVolume10s  float64 `json:"buy_vol_10s"`
+	SellVolume10s float64 `json:"sell_vol_10s"`
 
 	// Order book depth
 	BidDepth5  float64
@@ -59,6 +60,11 @@ func DefaultBinanceConfig() BinanceConfig {
 //
 // The WS connection persists across market cycles. OpenPrice is refreshed
 // per cycle via FetchKlineOpenPrice().
+//
+// On disconnect, the adapter automatically reconnects with exponential
+// backoff (1s → 30s max). The connection is re-established transparently;
+// callers continue to read LatestData() which returns the last-known values
+// during the gap.
 type BinanceAdapter struct {
 	cfg BinanceConfig
 
@@ -69,20 +75,15 @@ type BinanceAdapter struct {
 	dataMu sync.RWMutex
 
 	volMu       sync.Mutex
-	buyVol1s    float64
-	sellVol1s   float64
+	buyVol5s    float64
+	sellVol5s   float64
 	buyVol10s   float64
 	sellVol10s  float64
-	volSnapshot [10]volBucket
-	volIdx      int
-
-	dataCh chan BinanceMarketData
 
 	started atomic.Bool
-}
 
-type volBucket struct {
-	buy, sell float64
+	// Reconnection tracking
+	reconnecting atomic.Bool
 }
 
 func NewBinanceAdapter() *BinanceAdapter {
@@ -102,8 +103,7 @@ func NewBinanceAdapterWithConfig(cfg BinanceConfig) *BinanceAdapter {
 	cfg.Symbol = strings.ToUpper(cfg.Symbol)
 
 	return &BinanceAdapter{
-		cfg:    cfg,
-		dataCh: make(chan BinanceMarketData, 128),
+		cfg: cfg,
 	}
 }
 
@@ -117,29 +117,34 @@ func (b *BinanceAdapter) streamURL() string {
 }
 
 // Start connects to Binance WS. Idempotent — safe to call multiple times.
+// Launches a persistent read loop that automatically reconnects on disconnect
+// with exponential backoff (1s → 30s max). Returns when ctx is cancelled.
 func (b *BinanceAdapter) Start(ctx context.Context) error {
 	if b.started.Swap(true) {
 		return nil
 	}
 
-	url := b.streamURL()
-	log.Printf("[BinanceAdapter] connecting to %s", url)
-
-	dialer := websocket.DefaultDialer
-	conn, _, err := dialer.Dial(url, nil)
-	if err != nil {
+	if err := b.dialAndSet(); err != nil {
 		b.started.Store(false)
-		return fmt.Errorf("binance ws dial: %w", err)
+		return err
 	}
-
-	b.connMu.Lock()
-	b.conn = conn
-	b.connMu.Unlock()
 
 	log.Printf("[BinanceAdapter] connected — symbol=%s", b.cfg.Symbol)
 
-	go b.readLoop(ctx)
-	go b.volumeWindowLoop(ctx)
+	go b.runReadLoop(ctx)
+	return nil
+}
+
+// dialAndSet dials a new WS connection and stores it in b.conn.
+func (b *BinanceAdapter) dialAndSet() error {
+	url := b.streamURL()
+	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		return fmt.Errorf("binance ws dial: %w", err)
+	}
+	b.connMu.Lock()
+	b.conn = conn
+	b.connMu.Unlock()
 	return nil
 }
 
@@ -181,35 +186,44 @@ func (b *BinanceAdapter) FetchKlineOpenPrice() {
 	log.Printf("[BinanceAdapter] %s 5m kline open: %.2f", b.cfg.Symbol, openPrice)
 }
 
-func (b *BinanceAdapter) MarketData() <-chan BinanceMarketData { return b.dataCh }
-
 func (b *BinanceAdapter) LatestData() BinanceMarketData {
 	b.dataMu.RLock()
-	defer b.dataMu.RUnlock()
-	return b.data
+	d := b.data
+	b.dataMu.RUnlock()
+
+	b.volMu.Lock()
+	d.BuyVolume = b.buyVol5s
+	d.SellVolume = b.sellVol5s
+	d.BuyVolume10s = b.buyVol10s
+	d.SellVolume10s = b.sellVol10s
+	b.volMu.Unlock()
+
+	return d
 }
 
-func (b *BinanceAdapter) ConsumeVolume() (buy1s, sell1s, buy10s, sell10s float64) {
+func (b *BinanceAdapter) ConsumeVolume() (buyAcc, sellAcc, buy10s, sell10s float64) {
 	b.volMu.Lock()
 	defer b.volMu.Unlock()
-	buy1s, sell1s = b.buyVol1s, b.sellVol1s
+	buyAcc, sellAcc = b.buyVol5s, b.sellVol5s
 	buy10s, sell10s = b.buyVol10s, b.sellVol10s
-	b.buyVol1s = 0
-	b.sellVol1s = 0
+	b.buyVol5s = 0
+	b.sellVol5s = 0
+	b.buyVol10s = 0
+	b.sellVol10s = 0
 	return
 }
 
-func (b *BinanceAdapter) readLoop(ctx context.Context) {
-	defer func() {
-		b.connMu.Lock()
-		if b.conn != nil {
-			b.conn.Close()
-		}
-		b.connMu.Unlock()
-	}()
+// runReadLoop is the persistent read loop that handles reconnection.
+// It reads from the current connection until error, then reconnects with
+// exponential backoff. Only returns when ctx is cancelled.
+func (b *BinanceAdapter) runReadLoop(ctx context.Context) {
+	defer b.closeConn()
 
 	tradeStream := strings.ToLower(b.cfg.Symbol) + "@trade"
 	depthStream := strings.ToLower(b.cfg.Symbol) + "@depth20@100ms"
+
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
 
 	for {
 		select {
@@ -221,19 +235,77 @@ func (b *BinanceAdapter) readLoop(ctx context.Context) {
 		b.connMu.Lock()
 		conn := b.conn
 		b.connMu.Unlock()
+
 		if conn == nil {
 			return
+		}
+
+		// Read from current connection until error or ctx cancel
+		err := b.readFromConn(ctx, conn, tradeStream, depthStream)
+		if err == nil {
+			return // ctx cancelled (clean exit)
+		}
+
+		// Connection lost — close and reconnect
+		log.Printf("[BinanceAdapter] ⚠️ read error: %v — reconnecting in %v", err, backoff.Round(time.Millisecond))
+		b.closeConn()
+		b.reconnecting.Store(true)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+
+		// Exponential backoff
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+
+		if err := b.dialAndSet(); err != nil {
+			log.Printf("[BinanceAdapter] reconnect dial failed: %v", err)
+			continue // retry with same backoff
+		}
+
+		// Reset backoff on successful connection
+		backoff = time.Second
+		b.reconnecting.Store(false)
+		log.Printf("[BinanceAdapter] 🔄 reconnected — symbol=%s", b.cfg.Symbol)
+	}
+}
+
+// readFromConn reads messages from a single connection. Returns nil on ctx
+// cancellation, or the error that caused the read to fail.
+func (b *BinanceAdapter) readFromConn(ctx context.Context, conn *websocket.Conn, tradeStream, depthStream string) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
 		}
 
 		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
-			log.Printf("[BinanceAdapter] read error: %v", err)
-			return
+			return err
 		}
 		b.handleMessage(msg, tradeStream, depthStream)
 	}
 }
+
+// closeConn closes the current WS connection (if any).
+func (b *BinanceAdapter) closeConn() {
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	if b.conn != nil {
+		b.conn.Close()
+		b.conn = nil
+	}
+}
+
+// IsReconnecting returns true when the adapter is between connections.
+func (b *BinanceAdapter) IsReconnecting() bool { return b.reconnecting.Load() }
 
 func (b *BinanceAdapter) handleMessage(msg []byte, tradeStream, depthStream string) {
 	var envelope struct {
@@ -272,10 +344,10 @@ func (b *BinanceAdapter) handleTrade(data json.RawMessage) {
 
 	b.volMu.Lock()
 	if trade.IsBuyerMM {
-		b.sellVol1s += qty
+		b.sellVol5s += qty
 		b.sellVol10s += qty
 	} else {
-		b.buyVol1s += qty
+		b.buyVol5s += qty
 		b.buyVol10s += qty
 	}
 	b.volMu.Unlock()
@@ -312,23 +384,6 @@ func (b *BinanceAdapter) handleDepth(data json.RawMessage) {
 	b.data.BidDepth10 = bid10
 	b.data.AskDepth10 = ask10
 	b.dataMu.Unlock()
-}
-
-func (b *BinanceAdapter) volumeWindowLoop(ctx context.Context) {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			b.volMu.Lock()
-			b.volIdx = (b.volIdx + 1) % 10
-			b.volSnapshot[b.volIdx].buy = 0
-			b.volSnapshot[b.volIdx].sell = 0
-			b.volMu.Unlock()
-		}
-	}
 }
 
 func parseFloat(s string) float64 {

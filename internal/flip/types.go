@@ -4,8 +4,8 @@
 // Detects when Polymarket YES/NO prices cross 0.7 and evaluates whether
 // the crossing is likely to reverse (flip) using a 7-feature composite score.
 //
-// Architecture mirrors internal/mqs: pure computation layer with zero external
-// dependencies, plus an engine with a state machine for real-time operation.
+// Pure computation layer with zero external dependencies, plus an engine
+// with a state machine for real-time operation.
 package flip
 
 import "time"
