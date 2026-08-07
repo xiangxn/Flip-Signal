@@ -33,6 +33,7 @@ import (
 	"github.com/xiangxn/go-polymarket-sdk/model"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
+	"github.com/necklace/lasttrading/internal/dashboard"
 	"github.com/necklace/lasttrading/internal/feed"
 	"github.com/necklace/lasttrading/internal/flip"
 	"github.com/necklace/lasttrading/internal/lab"
@@ -45,6 +46,7 @@ func init() {
 func main() {
 	outputPath := flag.String("output", "data/flip_signals.jsonl", "Output JSONL path for flip signals")
 	labOutputDir := flag.String("lab-output", "", "Optional lab event output directory (JSONL, same format as cmd/lab)")
+	dashboardAddr := flag.String("dashboard", "", "HTTP dashboard address (e.g. :8090)")
 	symbol := flag.String("symbol", "BTCUSDT", "Binance trading pair")
 	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug prefix")
 	flag.Parse()
@@ -113,11 +115,25 @@ func main() {
 
 	// Wait for initial Binance data before warming up hist range
 	log.Println("[Flip] Waiting for initial Binance data...")
-	time.Sleep(3 * time.Second)
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(3 * time.Second):
+	}
 
 	// Warmup: fetch historical 5m klines for instant hist_avg_range
-	if err := histTracker.Warmup(binanceCfg.RestBaseURL, *symbol); err != nil {
-		log.Printf("[Flip] hist warmup failed: %v (F6/F7 will be degraded until enough cycles)", err)
+	histErr := make(chan error, 1)
+	go func() {
+		histErr <- histTracker.Warmup(binanceCfg.RestBaseURL, *symbol)
+	}()
+	select {
+	case <-ctx.Done():
+		log.Println("[Flip] hist warmup interrupted")
+		return
+	case err := <-histErr:
+		if err != nil {
+			log.Printf("[Flip] hist warmup failed: %v (F6/F7 will be degraded until enough cycles)", err)
+		}
 	}
 
 	flipEngine := flip.NewEngine(flipCfg, histTracker)
@@ -144,6 +160,13 @@ func main() {
 				log.Printf("[Flip] lab writer close: %v", err)
 			}
 		}()
+	}
+
+	// Optional HTTP dashboard
+	if *dashboardAddr != "" {
+		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, *symbol)
+		go dash.ListenAndServe(*dashboardAddr)
+		log.Printf("[Flip] Dashboard: http://localhost%s", *dashboardAddr)
 	}
 
 	log.Println("========================================")
@@ -200,9 +223,26 @@ func main() {
 
 		// Step 4: Fetch Polymarket market → conditionId + token IDs
 		log.Printf("[Cycle] fetching market: %s", marketSlug)
-		marketData, err := client.FetchMarketBySlug(marketSlug)
-		if err != nil {
-			log.Printf("[Cycle] ERROR fetching market: %v — retrying in 5s", err)
+		type marketResult struct {
+			data *gjson.Result
+			err  error
+		}
+		marketCh := make(chan marketResult, 1)
+		go func() {
+			d, err := client.FetchMarketBySlug(marketSlug)
+			marketCh <- marketResult{d, err}
+		}()
+		var marketData *gjson.Result
+		var fetchErr error
+		select {
+		case <-ctx.Done():
+			log.Println("[Cycle] market fetch interrupted")
+			return
+		case mr := <-marketCh:
+			marketData, fetchErr = mr.data, mr.err
+		}
+		if fetchErr != nil {
+			log.Printf("[Cycle] ERROR fetching market: %v — retrying in 5s", fetchErr)
 			select {
 			case <-ctx.Done():
 				return

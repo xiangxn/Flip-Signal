@@ -1,0 +1,109 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Flip Signal Detection — Dashboard</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<div class="header">
+  <h1>&#x1F504; Flip Signal Detection Dashboard</h1>
+  <div class="meta">
+    <span id="symbol">BTCUSDT</span> 5m &nbsp;|&nbsp;
+    Cycle #<span id="gen">-</span> &nbsp;|&nbsp;
+    <span id="clock">--</span> &nbsp;|&nbsp;
+    refresh: <span id="refresh-cnt">0</span>s
+  </div>
+</div>
+
+<!-- Stats Row -->
+<div class="stats">
+  <div class="stat-card">
+    <div class="label">Signals</div>
+    <div class="value" id="stat-total">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Won</div>
+    <div class="value val-green" id="stat-won">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Lost</div>
+    <div class="value val-red" id="stat-lost">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Win Rate</div>
+    <div class="value val-accent" id="stat-wr">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">P&amp;L</div>
+    <div class="value" id="stat-pnl">-</div>
+  </div>
+  <div class="stat-card">
+    <div class="label">Pending</div>
+    <div class="value" id="stat-pending">-</div>
+  </div>
+</div>
+
+<!-- Main Grid: Engine State + Live Prices -->
+<div class="main-grid">
+  <div class="panel">
+    <h3>&#x2699; Engine State</h3>
+    <table class="info">
+      <tr><td>State</td><td><span class="state-badge state-idle" id="eng-state">-</span></td></tr>
+      <tr><td>Snapshots</td><td id="eng-snaps">-</td></tr>
+      <tr><td>Remaining</td><td id="eng-remaining">-</td></tr>
+      <tr><td>Side</td><td id="eng-side">-</td></tr>
+      <tr><td>Hist Avg Range</td><td id="eng-hrange">-</td></tr>
+      <tr><td>Condition ID</td><td id="eng-cid" style="font-size:0.7rem;">-</td></tr>
+    </table>
+  </div>
+  <div class="panel">
+    <h3>&#x1F4C8; Live Prices</h3>
+    <table class="info">
+      <tr><td>BTC</td><td style="font-size:1.2rem;font-weight:700;" id="price-btc">-</td></tr>
+      <tr><td>Open</td><td id="price-open">-</td></tr>
+      <tr><td>YES</td><td id="price-yes">-</td></tr>
+      <tr><td>NO</td><td id="price-no">-</td></tr>
+      <tr><td>Volume 5s (B/S)</td><td id="price-vol">-</td></tr>
+      <tr><td>Depth (Bid/Ask)</td><td id="price-depth">-</td></tr>
+    </table>
+  </div>
+</div>
+
+<!-- Cross Features (hidden when not confirming) -->
+<div class="panel" id="cross-panel" style="display:none; margin-bottom:12px;">
+  <h3>&#x1F3AF; Cross Features (T=0)</h3>
+  <div class="cross-grid" id="cross-grid"></div>
+</div>
+
+<!-- Price Chart -->
+<div class="chart-panel">
+  <h3>&#x1F4C9; Price Chart — BTC + YES/NO</h3>
+  <div class="chart-wrap"><canvas id="priceChart"></canvas></div>
+</div>
+
+<!-- Signal History -->
+<div class="signal-panel">
+  <h3>&#x1F4CB; Signal History</h3>
+  <div style="overflow-x:auto;">
+    <table class="sig-table">
+      <thead>
+        <tr>
+          <th>Time</th><th>Side</th><th>Score</th><th>Entry</th><th>Shrs</th>
+          <th>PathEff</th><th>Noise</th><th>Osc</th><th>RngExp</th>
+          <th>BTCPos</th><th>Oth&Delta;</th><th>W/L</th><th>PnL</th>
+        </tr>
+      </thead>
+      <tbody id="sig-body">
+        <tr><td colspan="13" class="empty-state">No signals yet</td></tr>
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

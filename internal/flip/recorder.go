@@ -12,9 +12,10 @@ import (
 // analysis. Signals are written immediately; resolution (won/pnl) is appended
 // as a second line when the market resolves.
 type FlipRecorder struct {
-	mu      sync.Mutex
-	file    *os.File
-	pending map[string]*FlipSignal // conditionID → signal
+	mu       sync.Mutex
+	file     *os.File
+	pending  map[string]*FlipSignal // conditionID → signal
+	resolved []*FlipSignal          // all resolved signals (for dashboard)
 }
 
 // NewFlipRecorder creates a recorder that appends to the given JSONL file path.
@@ -83,6 +84,14 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	} else {
 		pnl = (0.0 - sig.EntryPrice) * float64(sig.Shares)
 	}
+	pnlRounded := round4(pnl)
+
+	// Write back to signal for dashboard stats
+	sig.Won = won
+	sig.PnL = pnlRounded
+
+	// Save resolved signal for dashboard history
+	r.resolved = append(r.resolved, sig)
 
 	rec := resolutionRecord{
 		Type:        "resolution",
@@ -91,7 +100,7 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 		EntryPrice:  sig.EntryPrice,
 		Shares:      sig.Shares,
 		Won:         won,
-		PnL:         round4(pnl),
+		PnL:         pnlRounded,
 	}
 
 	data, err := json.Marshal(rec)
@@ -135,4 +144,51 @@ func round4(v float64) float64 {
 		return float64(int(v*10000-0.5)) / 10000
 	}
 	return float64(int(v*10000+0.5)) / 10000
+}
+
+// ── Dashboard accessors ──
+
+// PendingSignals returns a copy of all pending (unresolved) signals.
+func (r *FlipRecorder) PendingSignals() []*FlipSignal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*FlipSignal, 0, len(r.pending))
+	for _, sig := range r.pending {
+		out = append(out, sig)
+	}
+	return out
+}
+
+// ResolvedSignals returns a copy of all resolved signals.
+func (r *FlipRecorder) ResolvedSignals() []*FlipSignal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*FlipSignal, len(r.resolved))
+	copy(out, r.resolved)
+	return out
+}
+
+// SignalStats returns aggregate statistics for the dashboard.
+func (r *FlipRecorder) SignalStats() (total, won, lost, pending int, winRate, cumPnl float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	pending = len(r.pending)
+	resolved := len(r.resolved)
+	total = resolved + pending
+
+	for _, sig := range r.resolved {
+		if sig.Won {
+			won++
+			cumPnl += sig.PnL
+		} else {
+			lost++
+			cumPnl += sig.PnL
+		}
+	}
+
+	if won+lost > 0 {
+		winRate = float64(won) / float64(won+lost)
+	}
+	return
 }

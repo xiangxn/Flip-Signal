@@ -174,3 +174,18 @@ func (c *Collector) FinalizeEvent() *Event {
 		Snapshots:  c.snapshots,
 	}
 }
+
+// ── Dashboard getters ──
+
+// ConditionID returns the current event's condition ID.
+func (c *Collector) ConditionID() string { return c.conditionID }
+
+// OpenPrice returns the current event's opening price.
+func (c *Collector) OpenPrice() float64 { return c.openPrice }
+
+// Snapshots returns a copy of the current event's snapshot slice.
+func (c *Collector) Snapshots() []*ResearchSnapshot {
+	out := make([]*ResearchSnapshot, len(c.snapshots))
+	copy(out, c.snapshots)
+	return out
+}

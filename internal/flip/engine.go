@@ -7,6 +7,18 @@ import (
 	"github.com/necklace/lasttrading/internal/lab"
 )
 
+// T0Features holds the features computed at the crossing moment (T=0).
+// Exported for use by the dashboard to display crossing-level detail.
+type T0Features struct {
+	PathEff        float64 `json:"path_eff"`
+	NoiseRatio     float64 `json:"noise_ratio"`
+	Flips          int     `json:"flips"`
+	Oscillating    bool    `json:"is_oscillating"`
+	RangeExpansion float64 `json:"range_expansion"`
+	BTCPosition    float64 `json:"btc_position"`
+	BTCExtreme     bool    `json:"btc_extreme"`
+}
+
 // Engine detects flip signals from a stream of ResearchSnapshots.
 // It implements the Python backtest first_crossing_only logic exactly:
 // check YES first → if signal, done; else check NO → if signal, done.
@@ -349,3 +361,63 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		OtherDelta:     otherDelta,
 	}
 }
+
+// ── Dashboard getters ──
+// Engine fields are written only from the main market-loop goroutine.
+// Dashboard HTTP handlers read from a different goroutine; Go's memory
+// model guarantees eventual visibility for simple types, which is
+// sufficient for display purposes.
+
+// State returns the current engine state.
+func (e *Engine) State() flipState { return e.state }
+
+// Generation returns the current cycle generation number.
+func (e *Engine) Generation() int64 { return e.generation }
+
+// SnapCount returns the number of snapshots collected in the current cycle.
+func (e *Engine) SnapCount() int { return len(e.snapBuffer) }
+
+// CurrentSide returns the side being evaluated ("yes", "no", or "").
+func (e *Engine) CurrentSide() string { return e.crossSide }
+
+// ConfirmTicksWaited returns how many ticks have elapsed since entering CONFIRMING.
+func (e *Engine) ConfirmTicksWaited() int { return e.confirmCount }
+
+// T0Features returns a snapshot of the T=0 features computed at crossing time.
+// Returns nil if no crossing is active.
+func (e *Engine) T0Features() *T0Features {
+	if e.crossSnap == nil {
+		return nil
+	}
+	return &T0Features{
+		PathEff:        e.pathEff,
+		NoiseRatio:     e.noiseRatio,
+		Flips:          e.flips,
+		Oscillating:    e.oscillating,
+		RangeExpansion: e.rangeExpansion,
+		BTCPosition:    e.btcPosition,
+		BTCExtreme:     e.btcExtreme,
+	}
+}
+
+// IsDone returns true if this cycle already produced a signal.
+func (e *Engine) IsDone() bool { return e.doneThisGen }
+
+// StateLabel returns a human-readable label for the current engine state.
+func (e *Engine) StateLabel() string {
+	switch e.state {
+	case stateIdle:
+		return "Idle"
+	case stateWatching:
+		return "Watching"
+	case stateConfirming:
+		return "Confirming"
+	case stateDone:
+		return "Done"
+	default:
+		return "Unknown"
+	}
+}
+
+// Config returns a copy of the engine's running configuration.
+func (e *Engine) Config() FlipConfig { return e.cfg }
