@@ -542,6 +542,43 @@ func TestEngine_ResetForNewCycle(t *testing.T) {
 	}
 }
 
+func TestEngine_SkipEarlyCrossing(t *testing.T) {
+	// §2.1: crossings at remaining_sec >= MaxRemainingSec are invalid
+	// (window too early, BTC path too short). Only crossings after the
+	// window matures (rem < 260) should be tracked.
+	cfg := DefaultConfig()
+	ht := NewHistRangeTracker(18)
+	eng := NewEngine(cfg, ht)
+	eng.Reset(1)
+
+	// Early crossing at rem=270 (>=260) — should NOT be tracked
+	snapEarly := makeTestSnap(0.75, 0.30, 50000, 50000, 270)
+	eng.ProcessSnapshot(snapEarly, 1)
+	if eng.yesFirstCrossIdx != -1 {
+		t.Errorf("early YES crossing (rem=270 >= %d) should not be tracked", cfg.MaxRemainingSec)
+	}
+	if eng.noFirstCrossIdx != -1 {
+		t.Errorf("early NO crossing at rem=270: noPrice=0.30 < 0.7, should not be tracked anyway")
+	}
+
+	// Also verify early NO crossing is skipped
+	snapEarlyNO := makeTestSnap(0.30, 0.75, 50000, 50000, 265)
+	eng.ProcessSnapshot(snapEarlyNO, 1)
+	if eng.noFirstCrossIdx != -1 {
+		t.Errorf("early NO crossing (rem=265 >= %d) should not be tracked", cfg.MaxRemainingSec)
+	}
+
+	// Later crossing at rem=250 (<260) — SHOULD be tracked
+	snapValid := makeTestSnap(0.80, 0.20, 50010, 50000, 250)
+	eng.ProcessSnapshot(snapValid, 1)
+	if eng.yesFirstCrossIdx < 0 {
+		t.Error("valid YES crossing (rem=250 < 260) should be tracked")
+	}
+	if eng.noFirstCrossIdx != -1 {
+		t.Error("noPrice=0.20 < 0.7, NO should not be tracked")
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════
 // HistRangeTracker tests
 // ═══════════════════════════════════════════════════════════════

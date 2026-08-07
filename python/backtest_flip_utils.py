@@ -211,10 +211,10 @@ def check_signal(event: dict, side: str,
     other_key = "no_price" if side == "yes" else "yes_price"
     snaps = event["snapshots"]
 
-    # Step 1: 找第一次 >0.7 穿越
+    # Step 1: 找第一次 >0.7 穿越 (同时要求窗口已进入有效期: remaining_sec < max_remaining_sec)
     cross_idx = None
     for i, s in enumerate(snaps):
-        if s[this_key] > cfg.trigger_threshold:
+        if s[this_key] > cfg.trigger_threshold and s["remaining_sec"] < cfg.max_remaining_sec:
             cross_idx = i
             break
 

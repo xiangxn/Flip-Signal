@@ -14,9 +14,9 @@ import "time"
 // Defaults match backtest_flip_config.py exactly (5s data calibration).
 type FlipConfig struct {
 	// ── Layer 0: Pre-conditions (§2.1) ──
-	TriggerThreshold  float64 // PM price > this triggers detection (0.7)
-	FirstCrossingOnly bool    // Only trigger on first crossing per cycle
-	MinPreSnaps       int     // Minimum snapshots before crossing (5)
+	TriggerThreshold float64 // PM price > this triggers detection (0.7)
+	MinPreSnaps      int     // Minimum snapshots before crossing (5)
+	MaxRemainingSec  int     // Only crossings with remaining_sec < this are valid (260, window too early = insufficient BTC path)
 
 	// ── Oscillation detection (all three must hold) — Formula A ──
 	PathEffOscillating    float64 // path_eff ≤ this → candidate (0.8, was 0.5)
@@ -62,9 +62,9 @@ type FlipConfig struct {
 // Backtest result: 34 signals, 52.9% WR, +10.09 P&L, PF=2.7 on lab data.
 func DefaultConfig() FlipConfig {
 	return FlipConfig{
-		TriggerThreshold:      0.7,
-		FirstCrossingOnly:     true,
-		MinPreSnaps:           5,
+		TriggerThreshold: 0.7,
+		MinPreSnaps:      5,
+		MaxRemainingSec:  260, // §2.1: crossings before this are invalid (too early, BTC path too short)
 		PathEffOscillating:    0.8,  // Formula A: relaxed from 0.5
 		NoiseRatioOscillating: 1.5,  // Formula A: relaxed from 5.0 (never fired)
 		FlipsOscillating:      1,    // Formula A: relaxed from 2

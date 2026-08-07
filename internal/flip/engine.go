@@ -103,10 +103,11 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 
 	// Track first crossing per side regardless of state (so crossings
 	// during CONFIRMING are not lost for later fallback).
-	if e.yesFirstCrossIdx < 0 && snap.YesPrice > e.cfg.TriggerThreshold {
+	// §2.1: remaining_sec >= MaxRemainingSec → window too early, skip (same level as >0.7)
+	if e.yesFirstCrossIdx < 0 && snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec {
 		e.yesFirstCrossIdx = bufIdx
 	}
-	if e.noFirstCrossIdx < 0 && snap.NoPrice > e.cfg.TriggerThreshold {
+	if e.noFirstCrossIdx < 0 && snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec {
 		e.noFirstCrossIdx = bufIdx
 	}
 
