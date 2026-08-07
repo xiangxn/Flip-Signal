@@ -164,7 +164,11 @@ func main() {
 
 	// Optional HTTP dashboard
 	if *dashboardAddr != "" {
-		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, *symbol)
+		mode := "live"
+		if readOnly {
+			mode = "paper"
+		}
+		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, *symbol, mode)
 		go dash.ListenAndServe(*dashboardAddr)
 		log.Printf("[Flip] Dashboard: http://localhost%s", *dashboardAddr)
 	}

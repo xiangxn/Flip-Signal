@@ -37,6 +37,21 @@ body {
 .header h1 { font-size: 1.2rem; font-weight: 600; }
 .header .meta { font-size: 0.8rem; color: var(--text-muted); font-family: var(--font-mono); }
 
+/* ── Mode badge ── */
+.mode-badge {
+  display: inline-block;
+  padding: 1px 10px;
+  border-radius: 12px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  vertical-align: middle;
+  margin-left: 6px;
+}
+.mode-paper { background: rgba(210,153,29,0.2); color: var(--yellow); }
+.mode-live  { background: rgba(63,185,80,0.2);  color: var(--green); }
+
 /* ── Stats row ── */
 .stats {
   display: grid;

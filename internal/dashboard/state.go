@@ -22,6 +22,7 @@ type State struct {
 
 	// Static config
 	Symbol string
+	Mode   string // "paper" or "live"
 }
 
 // New creates a new State holding references to the running components.
@@ -32,6 +33,7 @@ func New(
 	recorder *flip.FlipRecorder,
 	binance *feed.BinanceAdapter,
 	symbol string,
+	mode string,
 ) *State {
 	return &State{
 		Collector: collector,
@@ -40,5 +42,6 @@ func New(
 		Recorder:  recorder,
 		Binance:   binance,
 		Symbol:    symbol,
+		Mode:      mode,
 	}
 }

@@ -22,6 +22,7 @@ const (
 
 type stateResponse struct {
 	TS            string       `json:"ts"`
+	Mode          string       `json:"mode"`
 	Generation    int64        `json:"generation"`
 	EngineState   string       `json:"engine_state"`
 	EngineLabel   string       `json:"engine_state_label"`
@@ -128,6 +129,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 
 	resp := stateResponse{
 		TS:            time.Now().UTC().Format(time.RFC3339),
+		Mode:          s.Mode,
 		Generation:    s.Engine.Generation(),
 		EngineState:   s.Engine.StateLabel(),
 		EngineLabel:   s.Engine.StateLabel(),

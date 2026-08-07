@@ -116,6 +116,11 @@ async function fetchState() {
     if (!r.ok) return;
     const d = await r.json();
 
+    // Mode badge
+    const mb = document.getElementById('mode-badge');
+    mb.textContent = d.mode === 'live' ? 'LIVE' : 'PAPER';
+    mb.className = 'mode-badge ' + (d.mode === 'live' ? 'mode-live' : 'mode-paper');
+
     document.getElementById('gen').textContent = d.generation;
     document.getElementById('clock').textContent = new Date(d.ts).toLocaleTimeString();
     document.getElementById('refresh-cnt').textContent = refreshSec;
