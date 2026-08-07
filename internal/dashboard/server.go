@@ -41,10 +41,10 @@ func (s *State) ListenAndServe(addr string) {
 // withLogging wraps a handler with basic request logging.
 func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
+		// start := time.Now()
 		next.ServeHTTP(w, r)
 		if r.URL.Path != "/api/state" { // don't spam for state polling
-			log.Printf("[Dashboard] %s %s %v", r.Method, r.URL.Path, time.Since(start).Round(time.Microsecond))
+			// log.Printf("[Dashboard] %s %s %v", r.Method, r.URL.Path, time.Since(start).Round(time.Microsecond))
 		}
 	})
 }

@@ -108,7 +108,7 @@ function updateChart(snapshots) {
 
 // ── Data fetching ──
 
-let refreshSec = 0;
+let refreshSec = 5;
 
 async function fetchState() {
   try {
@@ -124,7 +124,7 @@ async function fetchState() {
     document.getElementById('gen').textContent = d.generation;
     document.getElementById('clock').textContent = new Date(d.ts).toLocaleTimeString();
     document.getElementById('refresh-cnt').textContent = refreshSec;
-    refreshSec += 2;
+    // refreshSec += 5;
 
     // Stats
     document.getElementById('stat-total').textContent = d.signal_count;
@@ -148,7 +148,9 @@ async function fetchState() {
     document.getElementById('eng-side').textContent = d.current_side || '-';
     document.getElementById('eng-hrange').textContent =
       d.hist_ready ? '$' + d.hist_avg_range.toFixed(2) + ' (ready)' : '$' + d.hist_avg_range.toFixed(2) + ' (warming)';
-    document.getElementById('eng-cid').textContent = d.condition_id || '-';
+    const cidEl = document.getElementById('eng-cid');
+    cidEl.textContent = d.condition_id || '-';
+    cidEl.title = 'Tap to copy';
 
     // Prices
     document.getElementById('price-btc').textContent = '$' + d.current_price.toFixed(2);
@@ -247,6 +249,21 @@ async function fetchSignals() {
   }
 }
 
+// ── Tap-to-copy Condition ID ──
+document.getElementById('eng-cid').addEventListener('click', async () => {
+  const el = document.getElementById('eng-cid');
+  const text = el.textContent;
+  if (!text || text === '-') return;
+  try {
+    await navigator.clipboard.writeText(text);
+    el.classList.add('copied');
+    el.title = 'Copied!';
+    setTimeout(() => { el.classList.remove('copied'); el.title = 'Tap to copy'; }, 1500);
+  } catch (_) {
+    // clipboard not available, ignore
+  }
+});
+
 // ── Polling ──
 
 function pollAll() {
@@ -254,5 +271,5 @@ function pollAll() {
 }
 
 pollAll();
-setInterval(pollAll, 2000);
+setInterval(pollAll, refreshSec*1000);
 setInterval(fetchSignals, 10000);

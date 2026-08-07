@@ -109,6 +109,20 @@ table.info td { padding: 3px 0; }
 table.info td:first-child { color: var(--text-muted); width: 50%; }
 table.info td:last-child { text-align: right; font-weight: 500; }
 
+/* ── Condition ID (truncated, tap-to-copy) ── */
+.cid-value {
+  display: inline-block;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: color 0.15s;
+}
+.cid-value:hover { color: var(--accent); }
+.cid-value.copied { color: var(--green); }
+
 /* ── State badge ── */
 .state-badge {
   display: inline-block;
@@ -204,4 +218,61 @@ table.info td:last-child { text-align: right; font-weight: 500; }
 @media (max-width: 800px) {
   .stats { grid-template-columns: repeat(3, 1fr); }
   .main-grid { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 640px) {
+  body { padding: 8px; }
+
+  /* Header: stack vertically */
+  .header {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .header h1 { font-size: 1rem; }
+  .header .meta { font-size: 0.7rem; }
+
+  /* Stats: 2 columns, smaller values */
+  .stats {
+    grid-template-columns: repeat(2, 1fr);
+    gap: 6px;
+  }
+  .stat-card { padding: 10px 8px; }
+  .stat-card .label { font-size: 0.6rem; }
+  .stat-card .value { font-size: 1.15rem; }
+
+  /* Panels: tighter padding */
+  .panel { padding: 10px 12px; }
+  .panel h3 { font-size: 0.68rem; margin-bottom: 8px; }
+
+  /* Info tables: smaller font */
+  table.info { font-size: 0.75rem; }
+
+  /* Chart: shorter */
+  .chart-panel { padding: 10px 12px; }
+  .chart-panel h3 { font-size: 0.68rem; margin-bottom: 8px; }
+  .chart-wrap { height: 220px; }
+
+  /* Cross features: smaller tiles */
+  .cross-grid { grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 6px; }
+  .cross-item { padding: 8px 6px; }
+  .cross-item .label { font-size: 0.55rem; }
+  .cross-item .value { font-size: 0.85rem; }
+
+  /* Signal table: smaller font, horizontal scroll handled by wrapper */
+  .signal-panel { padding: 10px 12px; }
+  .signal-panel h3 { font-size: 0.68rem; margin-bottom: 8px; }
+  .sig-table { font-size: 0.68rem; }
+  .sig-table th { font-size: 0.6rem; padding: 5px 6px; }
+  .sig-table td { padding: 3px 6px; }
+
+  /* Mode badge: smaller */
+  .mode-badge { font-size: 0.6rem; padding: 1px 7px; }
+
+  /* Panels: limit width so they don't feel stretched */
+  .main-grid .panel { max-width: 100%; }
+
+  /* Condition ID: tighter truncation */
+  .cid-value { max-width: 140px; }
 }
