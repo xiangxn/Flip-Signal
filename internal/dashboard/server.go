@@ -32,7 +32,7 @@ func (s *State) ListenAndServe(addr string) {
 		IdleTimeout:  30 * time.Second,
 	}
 
-	log.Printf("[Dashboard] listening on http://localhost%s", addr)
+	log.Printf("[Dashboard] listening on %s", addr)
 	if err := server.ListenAndServe(); err != nil {
 		log.Printf("[Dashboard] server error: %v", err)
 	}

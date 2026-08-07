@@ -170,7 +170,7 @@ func main() {
 		}
 		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, *symbol, mode)
 		go dash.ListenAndServe(*dashboardAddr)
-		log.Printf("[Flip] Dashboard: http://localhost%s", *dashboardAddr)
+		log.Printf("[Flip] Dashboard: http://0.0.0.0%s (accessible from any network interface)", *dashboardAddr)
 	}
 
 	log.Println("========================================")
