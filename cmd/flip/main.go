@@ -391,14 +391,19 @@ func main() {
 
 // pmMidPrice returns the mid price (average of best bid and best ask)
 // from a Polymarket CLOB order book.
-// Bids are sorted ascending; the last bid is the highest. Asks are sorted
-// ascending; the first ask is the lowest. Returns 0 if either side is empty.
+//
+// Both Bids and Asks are sorted by the API so that the LAST element is the
+// best price: Bids[len-1] = highest bid, Asks[len-1] = lowest ask.
+// Falls back to best bid only when asks are not yet available.
 func pmMidPrice(book *sdk.OrderBook) float64 {
-	if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 {
+	if book == nil || len(book.Bids) == 0 {
 		return 0
 	}
 	bestBid := book.Bids[len(book.Bids)-1].Price
-	bestAsk := book.Asks[0].Price
+	if len(book.Asks) == 0 {
+		return bestBid // ask side not yet populated, fallback to bid
+	}
+	bestAsk := book.Asks[len(book.Asks)-1].Price
 	return (bestBid + bestAsk) / 2
 }
 

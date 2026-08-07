@@ -52,6 +52,16 @@ const chart = new Chart(ctx, {
         borderDash: [5, 5],
         tension: 0,
       },
+      {
+        label: 'Open',
+        data: [],
+        borderColor: '#d2991d',
+        yAxisID: 'y-btc',
+        pointRadius: 0,
+        borderWidth: 1,
+        borderDash: [4, 4],
+        tension: 0,
+      },
     ],
   },
   options: {
@@ -103,6 +113,7 @@ function updateChart(snapshots) {
   chart.data.datasets[1].data = snapshots.map(s => s.yes_price);
   chart.data.datasets[2].data = snapshots.map(s => s.no_price);
   chart.data.datasets[3].data = snapshots.map(() => 0.7);
+  chart.data.datasets[4].data = snapshots.map(s => s.open);
   chart.update('none');
 }
 
