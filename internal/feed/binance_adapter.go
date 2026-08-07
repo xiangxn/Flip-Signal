@@ -20,13 +20,8 @@ type BinanceMarketData struct {
 	OpenPrice float64 // Current 5-minute kline open price (refreshed per cycle)
 
 	// Volume accumulated since last ConsumeVolume call.
-	// Consumption interval depends on caller (e.g. 5s for Flip/Lab).
 	BuyVolume  float64 `json:"buy_vol"`
 	SellVolume float64 `json:"sell_vol"`
-
-	// Cumulative volume since last ConsumeVolume call (same reset cycle as BuyVolume).
-	BuyVolume10s  float64 `json:"buy_vol_10s"`
-	SellVolume10s float64 `json:"sell_vol_10s"`
 
 	// Order book depth
 	BidDepth5  float64
@@ -77,8 +72,6 @@ type BinanceAdapter struct {
 	volMu       sync.Mutex
 	buyVol5s    float64
 	sellVol5s   float64
-	buyVol10s   float64
-	sellVol10s  float64
 
 	started atomic.Bool
 
@@ -194,22 +187,17 @@ func (b *BinanceAdapter) LatestData() BinanceMarketData {
 	b.volMu.Lock()
 	d.BuyVolume = b.buyVol5s
 	d.SellVolume = b.sellVol5s
-	d.BuyVolume10s = b.buyVol10s
-	d.SellVolume10s = b.sellVol10s
 	b.volMu.Unlock()
 
 	return d
 }
 
-func (b *BinanceAdapter) ConsumeVolume() (buyAcc, sellAcc, buy10s, sell10s float64) {
+func (b *BinanceAdapter) ConsumeVolume() (buyAcc, sellAcc float64) {
 	b.volMu.Lock()
 	defer b.volMu.Unlock()
 	buyAcc, sellAcc = b.buyVol5s, b.sellVol5s
-	buy10s, sell10s = b.buyVol10s, b.sellVol10s
 	b.buyVol5s = 0
 	b.sellVol5s = 0
-	b.buyVol10s = 0
-	b.sellVol10s = 0
 	return
 }
 
@@ -345,10 +333,8 @@ func (b *BinanceAdapter) handleTrade(data json.RawMessage) {
 	b.volMu.Lock()
 	if trade.IsBuyerMM {
 		b.sellVol5s += qty
-		b.sellVol10s += qty
 	} else {
 		b.buyVol5s += qty
-		b.buyVol10s += qty
 	}
 	b.volMu.Unlock()
 }

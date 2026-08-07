@@ -15,12 +15,9 @@ type OrderBookAdapter struct {
 
 // NewOrderBookAdapter creates a new order book adapter.
 // wsBaseURL: e.g. "wss://ws-subscriptions-clob.polymarket.com"
-// customFeatureEnabled: set to true to receive resolution events via WebSocket
 //
-// NOTE: isStore parameter is deprecated and ignored — the adapter always enables
-// the SDK's internal atomic storage (isStore=true) so GetLatestBook works.
-// Streaming via OrderBook() still works for backward compatibility.
-func NewOrderBookAdapter(wsBaseURL string, client *sdk.PolymarketClient, isStore bool) *OrderBookAdapter {
+// Always enables the SDK's internal atomic storage so GetLatestBook works.
+func NewOrderBookAdapter(wsBaseURL string, client *sdk.PolymarketClient) *OrderBookAdapter {
 	return &OrderBookAdapter{
 		monitor:     sdk.NewMarketMonitor(wsBaseURL, true, client, false),
 		orderBookCh: make(chan *sdk.OrderBook, 4096),
@@ -29,7 +26,7 @@ func NewOrderBookAdapter(wsBaseURL string, client *sdk.PolymarketClient, isStore
 
 // NewOrderBookAdapterWithResolve is like NewOrderBookAdapter but with
 // customFeatureEnabled=true, which enables market_resolved events on the WebSocket.
-func NewOrderBookAdapterWithResolve(wsBaseURL string, client *sdk.PolymarketClient, isStore bool) *OrderBookAdapter {
+func NewOrderBookAdapterWithResolve(wsBaseURL string, client *sdk.PolymarketClient) *OrderBookAdapter {
 	return &OrderBookAdapter{
 		monitor:     sdk.NewMarketMonitor(wsBaseURL, true, client, true),
 		orderBookCh: make(chan *sdk.OrderBook, 4096),

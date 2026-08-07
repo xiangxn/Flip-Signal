@@ -69,7 +69,7 @@ func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 		return nil
 	}
 
-	buyVol, sellVol, _, _ := c.binance.ConsumeVolume()
+	buyVol, sellVol := c.binance.ConsumeVolume()
 
 	remaining := int(c.endTime - now.Unix())
 	if remaining < 0 {

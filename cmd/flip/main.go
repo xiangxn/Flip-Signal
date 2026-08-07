@@ -92,7 +92,7 @@ func main() {
 	// Polymarket order book adapter
 	// ================================================================
 	bookAdapter := feed.NewOrderBookAdapterWithResolve(
-		cfg.SDK.Polymarket.ClobWSBaseURL, client, false,
+		cfg.SDK.Polymarket.ClobWSBaseURL, client,
 	)
 	bookAdapter.Start(ctx)
 
@@ -323,7 +323,7 @@ func main() {
 				yb := bookAdapter.GetLatestBook(yesTok)
 				nb := bookAdapter.GetLatestBook(noTok)
 
-				collector.UpdatePolymarket(bestBid(yb), bestBid(nb))
+				collector.UpdatePolymarket(pmMidPrice(yb), pmMidPrice(nb))
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
@@ -389,13 +389,17 @@ func main() {
 
 // ── Helpers ──
 
-// bestBid returns the best (highest) bid price from a Polymarket order book.
-// Polymarket CLOB bids are sorted ascending; the last bid is the highest.
-func bestBid(book *sdk.OrderBook) float64 {
-	if book == nil || len(book.Bids) == 0 {
+// pmMidPrice returns the mid price (average of best bid and best ask)
+// from a Polymarket CLOB order book.
+// Bids are sorted ascending; the last bid is the highest. Asks are sorted
+// ascending; the first ask is the lowest. Returns 0 if either side is empty.
+func pmMidPrice(book *sdk.OrderBook) float64 {
+	if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 {
 		return 0
 	}
-	return book.Bids[len(book.Bids)-1].Price
+	bestBid := book.Bids[len(book.Bids)-1].Price
+	bestAsk := book.Asks[0].Price
+	return (bestBid + bestAsk) / 2
 }
 
 // ── Config ──
