@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 	"github.com/xiangxn/go-polymarket-sdk/orders"
+	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/flip"
 )
@@ -197,13 +197,14 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 	}
 
 	// 实盘：CreateMarketOrder
-	signedOrder, err := client.CreateMarketOrder(&orders.UserMarketOrder{
+	umo := orders.UserMarketOrder{
 		TokenID:   tokenID,
 		Price:     &maxPrice,
 		Amount:    cfg.StakePerSignal,
 		Side:      orders.BUY,
 		OrderType: orders.MARKET_FAK,
-	}, orders.CreateOrderOptions{})
+	}
+	signedOrder, err := client.CreateMarketOrder(&umo, orders.CreateOrderOptions{})
 	if err != nil {
 		t.mu.Lock()
 		rec.State = OrderFailed
@@ -225,7 +226,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return fmt.Errorf("提交订单失败: %w", err)
+		return fmt.Errorf("提交订单失败: %w, Price: %.4f, Amount: %.4f", err, *umo.Price, umo.Amount)
 	}
 
 	orderID, success, errMsg := ParsePostOrderResp(resp)
