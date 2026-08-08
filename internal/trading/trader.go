@@ -329,22 +329,21 @@ func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) {
 
 // fallbackSettlementTimer 在超时后检查持仓是否仍未结算，若是则回退到模拟结算。
 func (t *Trader) fallbackSettlementTimer(pos *Position, simulatedOutcome int, timeout time.Duration) {
-	select {
-	case <-time.After(timeout):
-		// 超时：检查是否已被 resolutionWatcher 结算
-		t.mu.RLock()
-		currentPos := t.exec.Position
-		t.mu.RUnlock()
+	time.Sleep(timeout)
 
-		if currentPos == nil || currentPos.ConditionID != pos.ConditionID {
-			return // 已被 WS 结算
-		}
+	// 超时：检查是否已被 resolutionWatcher 结算
+	t.mu.RLock()
+	currentPos := t.exec.Position
+	t.mu.RUnlock()
 
-		won := (pos.TokenSide == "yes" && simulatedOutcome == 0) ||
-			(pos.TokenSide == "no" && simulatedOutcome == 1)
-		log.Printf("[Trading] ⚠️ 结算超时 %v，使用模拟 outcome", timeout)
-		t.settleWithOutcome(pos, won, "simulated_fallback")
+	if currentPos == nil || currentPos.ConditionID != pos.ConditionID {
+		return // 已被 WS 结算
 	}
+
+	won := (pos.TokenSide == "yes" && simulatedOutcome == 0) ||
+		(pos.TokenSide == "no" && simulatedOutcome == 1)
+	log.Printf("[Trading] ⚠️ 结算超时 %v，使用模拟 outcome", timeout)
+	t.settleWithOutcome(pos, won, "simulated_fallback")
 }
 
 // settleWithOutcome 按指定结果结算持仓（调用方自行加锁）。
