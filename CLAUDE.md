@@ -336,11 +336,21 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
 
 ## 环境变量
 
+所有环境变量使用 `PM_` 前缀，点号替换为下划线，由 viper 自动映射到配置路径。
+例如 `PM_SDK_POLYMARKET_OWNER_KEY` → `sdk.polymarket.owner_key`。
+
 | 变量 | 说明 | 必填 |
 |------|------|------|
-| `POLYMARKET_OWNER_KEY` | 钱包私钥（hex）| 仅交易模式 |
-| `POLYMARKET_CLOB_KEY` | CLOB API Key | 仅交易模式 |
-| `POLYMARKET_CLOB_SECRET` | CLOB API Secret | 仅交易模式 |
-| `POLYMARKET_CLOB_PASSPHRASE` | CLOB API Passphrase | 仅交易模式 |
-| `POLYMARKET_FUNDER` | 代理钱包地址 | 可选 |
-| `POLYMARKET_PROXY` | SOCKS5 代理 | 可选 |
+| `PM_SDK_POLYMARKET_OWNER_KEY` | 钱包私钥（hex，支持加密存储）| 仅交易模式 |
+| `PM_SDK_POLYMARKET_CLOB_CREDS_KEY` | CLOB API Key | 仅交易模式 |
+| `PM_SDK_POLYMARKET_CLOB_CREDS_SECRET` | CLOB API Secret | 仅交易模式 |
+| `PM_SDK_POLYMARKET_CLOB_CREDS_PASSPHRASE` | CLOB API Passphrase | 仅交易模式 |
+| `PM_SDK_POLYMARKET_FUNDER_ADDRESS` | 代理钱包地址 | 可选 |
+| `PM_SDK_SOCKS_PROXY` | SOCKS5 代理 | 可选 |
+| `PM_CONFIG_DECRYPT_PASSWORD` | 解密密码（替代交互式输入）| 可选 |
+| `PM_RUNTIME_SYMBOL` | Binance 交易对 | 可选 |
+| `PM_FLIP_TRIGGER_THRESHOLD` 等 | Flip 引擎参数 | 可选 |
+
+敏感字段（`owner_key`、`clob_creds.*`）支持 AES-256-CBC 加密存储。
+用 `pmutils.NewEncryptor(password).Encrypt(plaintext)` 生成密文写入 config.yaml，
+启动时通过 `PM_CONFIG_DECRYPT_PASSWORD` 或交互式终端输入密码解密。

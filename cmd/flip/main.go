@@ -21,23 +21,29 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/spf13/viper"
 	"github.com/tidwall/gjson"
+	sdkmodel "github.com/xiangxn/go-polymarket-sdk/model"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
+	pmutils "github.com/xiangxn/go-polymarket-sdk/utils"
 
 	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
 	"github.com/necklace/flip-signal/internal/lab"
 	"github.com/necklace/flip-signal/internal/trading"
+
+	"golang.org/x/term"
 )
 
 func init() {
@@ -526,29 +532,21 @@ type AppConfig struct {
 
 // loadConfig 按 viper 优先级加载配置：
 //
-//	代码默认值（最低）← config.yaml ← 环境变量 POLYMARKET_*（最高）
+//	代码默认值（最低）← config.yaml ← 环境变量 PM_*（最高）
+//
+// 敏感字段（owner_key / clob_creds.*）支持 AES-256-CBC 加密存储，
+// 启动时通过密码解密。密码来源：PM_CONFIG_DECRYPT_PASSWORD 环境变量
+// 或交互式终端输入。
 //
 // CLI 参数在 loadConfig 返回后由 main() 单独叠加。
 func loadConfig(configPath string) (*AppConfig, error) {
 	v := viper.New()
 
-	// ── 环境变量绑定（在 ReadInConfig 之前执行，确保优先级：env > file > default）──
-
-	// POLYMARKET_* → sdk.polymarket.* / sdk.*
-	v.BindEnv("sdk.polymarket.owner_key", "POLYMARKET_OWNER_KEY")
-	v.BindEnv("sdk.polymarket.clob_creds.key", "POLYMARKET_CLOB_KEY")
-	v.BindEnv("sdk.polymarket.clob_creds.secret", "POLYMARKET_CLOB_SECRET")
-	v.BindEnv("sdk.polymarket.clob_creds.passphrase", "POLYMARKET_CLOB_PASSPHRASE")
-	v.BindEnv("sdk.polymarket.funder_address", "POLYMARKET_FUNDER")
-	v.BindEnv("sdk.socks_proxy", "POLYMARKET_PROXY")
-
-	// FLIP_* → runtime.*
-	v.BindEnv("runtime.symbol", "FLIP_SYMBOL")
-	v.BindEnv("runtime.slug_prefix", "FLIP_SLUG_PREFIX")
-	v.BindEnv("runtime.output_path", "FLIP_OUTPUT")
-	v.BindEnv("runtime.lab_output_dir", "FLIP_LAB_OUTPUT")
-	v.BindEnv("runtime.dashboard_addr", "FLIP_DASHBOARD")
-	v.BindEnv("binance.symbol", "FLIP_SYMBOL") // 同步 Binance 交易对
+	// ── 环境变量：PM_ 前缀，自动映射 "." → "_" ──
+	// 例如 PM_SDK_POLYMARKET_OWNER_KEY → sdk.polymarket.owner_key
+	v.SetEnvPrefix("PM")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
 
 	// ── 第 1 步：代码默认值（最低优先级）──
 	cfg := &AppConfig{
@@ -565,10 +563,10 @@ func loadConfig(configPath string) (*AppConfig, error) {
 		Trading: trading.DefaultConfig(),
 	}
 	// SDK DefaultConfig 内置 dummy OwnerKey，此处置空以触发只读模式
-	// （可通过环境变量 POLYMARKET_OWNER_KEY 或配置文件覆盖）
+	// （可通过环境变量 PM_SDK_POLYMARKET_OWNER_KEY 或配置文件覆盖）
 	cfg.SDK.Polymarket.OwnerKey = ""
 
-	// ── 第 2 步：文件配置（覆盖默认值，env 绑定的变量自动享有更高优先级）──
+	// ── 第 2 步：文件配置（覆盖默认值，AutomaticEnv 自动享有更高优先级）──
 	if configPath != "" {
 		v.SetConfigFile(configPath)
 	} else {
@@ -578,7 +576,8 @@ func loadConfig(configPath string) (*AppConfig, error) {
 	}
 
 	if err := v.ReadInConfig(); err != nil {
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+		var notFound viper.ConfigFileNotFoundError
+		if !errors.As(err, &notFound) {
 			return nil, fmt.Errorf("读取配置文件失败: %w", err)
 		}
 		log.Printf("[Config] 未找到配置文件（%s），使用代码默认值", configPath)
@@ -586,11 +585,98 @@ func loadConfig(configPath string) (*AppConfig, error) {
 		log.Printf("[Config] 已加载配置文件: %s", v.ConfigFileUsed())
 	}
 
-	// Unmarshal 自动按优先级合并：BindEnv > config file > struct default
+	// Unmarshal 自动按优先级合并：env > config file > struct default
 	// （仅覆盖 viper 中存在对应值的字段，不会清零未配置项）
 	if err := v.Unmarshal(cfg); err != nil {
 		return nil, fmt.Errorf("配置反序列化失败: %w", err)
 	}
 
+	// ── 第 3 步：敏感字段解密 ──
+	if err := decryptSensitiveFields(cfg); err != nil {
+		return nil, err
+	}
+	if cfg.SDK.Polymarket.OwnerKey != "" {
+		cfg.SDK.Polymarket.OwnerKey = strings.TrimPrefix(strings.TrimSpace(cfg.SDK.Polymarket.OwnerKey), "0x")
+	}
+
 	return cfg, nil
+}
+
+// decryptSensitiveFields 检测配置中的敏感字段是否为加密值，若是则提示输入密码进行解密。
+//
+// 加密值特征：hex 编码的 AES-256-CBC 密文（与 pmutils.Encryptor 兼容）。
+// 若所有敏感字段均为空（已通过环境变量设置或在 main() 中置空），则跳过密码提示。
+func decryptSensitiveFields(cfg *AppConfig) error {
+	type decryptTarget struct {
+		label string
+		value *string
+	}
+
+	targets := []decryptTarget{
+		{label: "sdk.polymarket.owner_key", value: &cfg.SDK.Polymarket.OwnerKey},
+	}
+
+	appendCredTargets := func(prefix string, creds *sdkmodel.ApiKeyCreds) {
+		if creds == nil {
+			return
+		}
+		targets = append(targets,
+			decryptTarget{label: prefix + ".key", value: &creds.Key},
+			decryptTarget{label: prefix + ".secret", value: &creds.Secret},
+			decryptTarget{label: prefix + ".passphrase", value: &creds.Passphrase},
+		)
+	}
+	appendCredTargets("sdk.polymarket.clob_creds", cfg.SDK.Polymarket.CLOBCreds)
+
+	// 检查是否有需要解密的字段
+	hasEncrypted := false
+	for i := range targets {
+		if strings.TrimSpace(*targets[i].value) != "" {
+			hasEncrypted = true
+			break
+		}
+	}
+	if !hasEncrypted {
+		return nil
+	}
+
+	password, err := readDecryptPassword()
+	if err != nil {
+		return err
+	}
+	encryptor := pmutils.NewEncryptor(password)
+
+	for i := range targets {
+		raw := strings.TrimSpace(*targets[i].value)
+		if raw == "" {
+			continue
+		}
+		decrypted, err := encryptor.Decrypt(raw)
+		if err != nil {
+			return fmt.Errorf("解密 %s 失败: %w", targets[i].label, err)
+		}
+		*targets[i].value = strings.TrimSpace(decrypted)
+	}
+	return nil
+}
+
+// readDecryptPassword 获取解密密码。
+//
+// 优先读取 PM_CONFIG_DECRYPT_PASSWORD 环境变量，否则通过终端安全输入（无回显）。
+func readDecryptPassword() (string, error) {
+	if envPassword := strings.TrimSpace(os.Getenv("PM_CONFIG_DECRYPT_PASSWORD")); envPassword != "" {
+		return envPassword, nil
+	}
+
+	fmt.Fprint(os.Stdout, "请输入启动密码: ")
+	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
+	fmt.Fprintln(os.Stdout)
+	if err != nil {
+		return "", fmt.Errorf("读取解密密码失败: %w", err)
+	}
+	password := strings.TrimSpace(string(passwordBytes))
+	if password == "" {
+		return "", errors.New("解密密码不能为空")
+	}
+	return password, nil
 }
