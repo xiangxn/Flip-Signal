@@ -372,7 +372,7 @@ func main() {
 		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s",
 			conditionID, yesTokenID, noTokenID)
 
-		// 步骤 5：订阅新 token（先取消旧订阅）
+		// 步骤 5：订阅新 token 并通知实盘新周期
 		if yesTok != "" || noTok != "" {
 			var oldTokens []string
 			if yesTok != "" {
