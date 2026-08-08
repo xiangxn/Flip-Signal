@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/necklace/lasttrading/internal/lab"
+	"github.com/necklace/flip-signal/internal/lab"
 )
 
 // T0Features holds the features computed at the crossing moment (T=0).

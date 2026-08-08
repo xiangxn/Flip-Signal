@@ -30,8 +30,8 @@ import (
 	"github.com/xiangxn/go-polymarket-sdk/model"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
-	"github.com/necklace/lasttrading/internal/feed"
-	"github.com/necklace/lasttrading/internal/lab"
+	"github.com/necklace/flip-signal/internal/feed"
+	"github.com/necklace/flip-signal/internal/lab"
 )
 
 func init() {

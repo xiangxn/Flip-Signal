@@ -4,7 +4,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/necklace/lasttrading/internal/feed"
+	"github.com/necklace/flip-signal/internal/feed"
 )
 
 const maxPriceHistory = 15 // enough for 12-tick volatility lookback at 5s intervals

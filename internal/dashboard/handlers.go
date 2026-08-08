@@ -6,8 +6,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/necklace/lasttrading/internal/flip"
-	"github.com/necklace/lasttrading/internal/lab"
+	"github.com/necklace/flip-signal/internal/flip"
+	"github.com/necklace/flip-signal/internal/lab"
 )
 
 // ── Engine state constants (mirrors flip package's unexported flipState) ──

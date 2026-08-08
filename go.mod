@@ -1,4 +1,4 @@
-module github.com/necklace/lasttrading
+module github.com/necklace/flip-signal
 
 go 1.25.7
 

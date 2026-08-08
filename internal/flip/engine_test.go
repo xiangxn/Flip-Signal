@@ -3,7 +3,7 @@ package flip
 import (
 	"testing"
 
-	"github.com/necklace/lasttrading/internal/lab"
+	"github.com/necklace/flip-signal/internal/lab"
 )
 
 // ═══════════════════════════════════════════════════════════════
