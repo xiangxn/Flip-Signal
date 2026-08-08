@@ -1,38 +1,288 @@
-# LastTrading Configuration
+# =============================================================================
+# Flip Signal — 完整配置文件
+# =============================================================================
+# 本文件包含 Flip Signal Detection 引擎的所有可配置项。
+# 复制为 config.yaml 后修改即可使用。
+#
+# 运行时也可通过命令行 flag 覆盖部分参数：
+#   go run ./cmd/flip -output data/flip_signals.jsonl -dashboard :8090
+# =============================================================================
 
-# Polymarket SDK configuration
+# ---------------------------------------------------------------------------
+# 运行时参数（对应 main.go 命令行 flag 的默认值）
+# ---------------------------------------------------------------------------
+runtime:
+  # 交易对符号，对应 Binance 的 trading pair
+  # 默认值: BTCUSDT
+  symbol: "BTCUSDT"
+
+  # Polymarket 市场 slug 前缀，运行时自动拼接 "-<unix_timestamp>"
+  # 例如 btc-updown-5m-1712345678
+  # 默认值: btc-updown-5m
+  slug_prefix: "btc-updown-5m"
+
+  # Flip Signal 检测结果 JSONL 输出路径
+  # 每行一条 FlipSignal JSON 记录
+  # 默认值: data/flip_signals.jsonl
+  output_path: "data/flip_signals.jsonl"
+
+  # （可选）Lab 事件数据输出目录，JSONL 格式，按日切分
+  # 与 cmd/lab 输出格式相同，包含完整的 ResearchSnapshot 序列
+  # 留空表示不启用 lab 数据采集
+  # 默认值: ""（不启用）
+  lab_output_dir: ""
+
+  # （可选）HTTP Dashboard 监听地址
+  # 例如 ":8090" 监听所有网卡的 8090 端口
+  # 留空表示不启动 Dashboard
+  # 默认值: ""（不启用）
+  dashboard_addr: ""
+
+# ---------------------------------------------------------------------------
+# Polymarket SDK 配置
+# ---------------------------------------------------------------------------
 sdk:
-  # HTTP client settings
+  # HTTP 客户端超时时间
+  # 默认值: 30s
   http_timeout: 30s
+
+  # HTTP 调试模式，开启后打印请求/响应详情
+  # 默认值: false
   http_debug: false
-  # SOCKS5 proxy (optional, for regions with restricted access)
+
+  # SOCKS5 代理地址（适用于网络受限地区）
+  # 也可通过环境变量 POLYMARKET_PROXY 设置
+  # 默认值: ""（不使用代理）
   # socks_proxy: "socks5://127.0.0.1:1080"
 
   polymarket:
-    # Polygon chain ID (137 = mainnet, 80002 = amoy testnet)
+    # Polygon 链 ID: 137 = 主网, 80002 = Amoy 测试网
+    # 默认值: 137
     chain_id: 137
 
-    # API endpoints
+    # ------ API 端点 ------
+    # CLOB REST API 基地址
+    # 默认值: "https://clob.polymarket.com"
     clob_base_url: "https://clob.polymarket.com"
+
+    # CLOB WebSocket 订阅地址
+    # 默认值: "wss://ws-subscriptions-clob.polymarket.com"
     clob_ws_base_url: "wss://ws-subscriptions-clob.polymarket.com"
+
+    # Gamma API 基地址（市场信息查询）
+    # 默认值: "https://gamma-api.polymarket.com"
     gamma_base_url: "https://gamma-api.polymarket.com"
+
+    # Data API 基地址（历史数据）
+    # 默认值: "https://data-api.polymarket.com"
     data_api_base_url: "https://data-api.polymarket.com"
+
+    # Live WebSocket 基地址（实时用户数据）
+    # 默认值: "wss://ws-subscriptions.polymarket.com/ws/live"
     live_ws_base_url: "wss://ws-subscriptions.polymarket.com/ws/live"
 
-    # Signature type: 0 = EOA, 1 = POLY_1271 (proxy wallet)
+    # Relayer API 基地址（可选，用于代理提交交易）
+    # 默认值: ""（不使用 relayer）
+    # relayer_base_url: ""
+
+    # ------ 签名与认证 ------
+    # 签名类型: 0 = EOA（普通钱包）, 1 = POLY_1271（代理钱包）
+    # 默认值: 0
     signature_type: 0
 
-    # Wallet private key (hex, without 0x prefix)
-    # Can also be set via POLYMARKET_OWNER_KEY env var
+    # 钱包私钥（hex 格式，不含 0x 前缀）
+    # 也可通过环境变量 POLYMARKET_OWNER_KEY 设置
+    # 未配置时自动生成临时密钥，仅用于数据读取（paper trading 模式）
+    # 默认值: ""（自动生成临时密钥，只读模式）
     owner_key: ""
 
-    # CLOB API credentials (L2 authentication)
-    # Can also be set via POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE env vars
+    # CLOB API 凭证（L2 认证，用于下单 / 查询账户）
+    # 也可分别通过环境变量设置：
+    #   POLYMARKET_CLOB_KEY, POLYMARKET_CLOB_SECRET, POLYMARKET_CLOB_PASSPHRASE
+    # 默认值: 不设置（只读模式够用）
     # clob_creds:
     #   key: ""
     #   secret: ""
     #   passphrase: ""
 
-    # Funder / proxy wallet address (optional)
-    # Can also be set via POLYMARKET_FUNDER env var
+    # 代理钱包地址（用于 funder/operator 模式）
+    # 也可通过环境变量 POLYMARKET_FUNDER 设置
+    # 默认值: ""（不使用代理钱包）
     # funder_address: ""
+
+    # Builder 佣金码（可选）
+    # 默认值: 不设置
+    # builder_code: ""
+
+    # Builder API 凭证（可选，用于 GTC/GTD 等高级订单类型）
+    # 默认值: 不设置
+    # builder_creds:
+    #   key: ""
+    #   secret: ""
+    #   passphrase: ""
+
+    # Relayer 签名密钥（可选）
+    # 默认值: 不设置
+    # relayer_key:
+    #   key: ""
+    #   secret: ""
+    #   passphrase: ""
+
+# ---------------------------------------------------------------------------
+# Binance 数据源配置
+# ---------------------------------------------------------------------------
+binance:
+  # 交易对
+  # 默认值: "BTCUSDT"
+  symbol: "BTCUSDT"
+
+  # WebSocket 流地址（aggTrade + depth20 多流复用）
+  # 默认值: "wss://data-stream.binance.vision"
+  stream_base_url: "wss://data-stream.binance.vision"
+
+  # REST API 基地址（获取 5m K线开盘价 + 历史 K线预热）
+  # 默认值: "https://data-api.binance.vision"
+  rest_base_url: "https://data-api.binance.vision"
+
+# ---------------------------------------------------------------------------
+# Flip Signal Detection 引擎参数
+# ---------------------------------------------------------------------------
+# 以下参数均来自 flip.DefaultConfig()，与 Python 回测配置一致。
+# 回测基准: Formula A — 34 signals, 52.9% WR, +10.09 P&L, PF=2.7
+# ---------------------------------------------------------------------------
+flip:
+  # ===== Layer 0: 前置条件 (§2.1) =====
+
+  # PM YES/NO 价格触发检测的阈值
+  # 当某一边价格首次超过此值时触发信号检测
+  # 默认值: 0.7
+  trigger_threshold: 0.7
+
+  # 穿越前最少 snapshot 数，确保有足够的前置数据
+  # 默认值: 5（5 × 5s = 25s 预热）
+  min_pre_snaps: 5
+
+  # 最大剩余秒数，只有 remaining_sec < 此值的穿越才有效
+  # 窗口过早 = BTC 路径太短，信号质量不足
+  # 默认值: 260（即窗口开始后至少经过 40s）
+  max_remaining_sec: 260
+
+  # ===== 振荡检测（Formula A 三条件，必须同时满足）=====
+
+  # 路径效率阈值，path_eff ≤ 此值 → 候选振荡
+  # 越低说明价格路径越曲折（非趋势性运动）
+  # 默认值: 0.8（Formula A: 从 0.5 放宽）
+  path_eff_oscillating: 0.8
+
+  # 噪声比阈值，noise_ratio > 此值 → 候选振荡
+  # 噪声比越高说明微小波动越多
+  # 默认值: 1.5（Formula A: 从 5.0 大幅放宽，旧值几乎不触发）
+  noise_ratio_oscillating: 1.5
+
+  # 翻转次数阈值，flips > 此值 → 候选振荡
+  # 价格方向切换越频繁越像振荡
+  # 默认值: 1（Formula A: 从 2 放宽）
+  flips_oscillating: 1
+
+  # ===== 历史波动范围（tick-independent，基于 hist_avg_range）=====
+
+  # 历史 K 线窗口大小，用于计算 hist_avg_range 基准
+  # 默认值: 18（约 1.5 小时的历史参考）
+  hist_window_n: 18
+
+  # 区间扩展阈值，range_expansion < 此值 → BTC 几乎没动，PM 过度自信
+  # 默认值: 0.5
+  range_exp_threshold: 0.5
+
+  # 区间扩展上限，range_expansion ≥ 此值 → F0 否决（真突破，取消信号）
+  # 默认值: 2.0
+  range_exp_max: 2.0
+
+  # ===== 对手盘确认 (§2.7) — Formula A 三级评分 =====
+
+  # 确认等待 tick 数（1 tick = 5s）
+  # 穿越后等待此 tick 数，再采样对手盘价格计算 other_delta
+  # 默认值: 1
+  confirm_delay_ticks: 1
+
+  # other_delta 硬下限，-999 表示禁用（Formula A 由评分体系处理）
+  # 默认值: -999.0（禁用）
+  od_hard_filter: -999.0
+
+  # 对手盘大幅移动阈值，other_delta > 此值 → +3 分
+  # 默认值: 0.05（Formula A 新增最高档）
+  other_delta_vstrong: 0.05
+
+  # 对手盘中幅移动阈值，other_delta > 此值 → +2 分
+  # 默认值: 0.02（Formula A: 原 0.03）
+  other_delta_strong: 0.02
+
+  # 对手盘小幅移动阈值，other_delta > 此值 → +1 分
+  # 默认值: 0.01（Formula A: 原 +2）
+  other_delta_weak: 0.01
+
+  # ===== BTC 相对位置 (§2.8) — Formula A 放宽 =====
+
+  # NO>0.7 时: btc_position > 此值 → BTC 与 PM 方向背离 → +1 分
+  # btc_position 是当前价格在日内 K 线范围中的归一化位置 [-1, 1]
+  # 默认值: 0.1（Formula A: 从 0.5 大幅放宽）
+  btc_pos_max: 0.1
+
+  # YES>0.7 时: btc_position < 此值 → BTC 与 PM 方向背离 → +1 分
+  # 默认值: -0.1（Formula A: 从 -0.5 大幅放宽）
+  btc_pos_min: -0.1
+
+  # ===== 入场价格 (§2.9) — Formula A 重新激活 =====
+
+  # 极低入场价阈值，entry_price < 此值 → +1 分
+  # 默认值: 0.20
+  entry_cheap_strong: 0.20
+
+  # 较低入场价阈值，entry_price < 此值 → +1 分（elif，不与上一档叠加）
+  # 默认值: 0.25
+  entry_cheap_weak: 0.25
+
+  # ===== 评分权重 (§2.10) — Formula A =====
+
+  # 对手盘大幅移动权重
+  # 默认值: 3（Formula A 新增）
+  w_other_delta_vstrong: 3
+
+  # 对手盘中幅移动权重
+  # 默认值: 2（Formula A: 原 4）
+  w_other_delta_strong: 2
+
+  # 对手盘小幅移动权重
+  # 默认值: 1（Formula A: 原 2）
+  w_other_delta_weak: 1
+
+  # 振荡加分权重
+  # 默认值: 2（Formula A: 原 1）
+  w_oscillating: 2
+
+  # 极低价入场权重
+  # 默认值: 1（Formula A: 原 2 且曾被禁用）
+  w_cheap_entry_strong: 1
+
+  # 较低价入场权重
+  # 默认值: 1
+  w_cheap_entry_weak: 1
+
+  # 区间过小（BTC 没动）权重
+  # 默认值: 2
+  w_range_expansion: 2
+
+  # BTC 极端位置背离权重
+  # 默认值: 1
+  w_btc_extreme: 1
+
+  # ===== 入场阈值 (§2.10) =====
+
+  # 开仓分数线，总分 ≥ 此值 → 开 1 share
+  # 默认值: 5
+  score_entry: 5
+
+  # 加仓分数线，总分 ≥ 此值 → 加 2 shares
+  # 99 = 禁用加仓（5s 数据评分精度不足以支持加仓）
+  # 默认值: 99（禁用）
+  score_add: 99
