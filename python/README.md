@@ -1,43 +1,35 @@
-# Feature Research Lab — Python 端
+# Flip Signal — Python 回测与分析
 
-BTC 5分钟 Polynarket 扫尾盘特征研究系统（Python 端）。
+PM BTC 5分钟市场 **Flip Signal Detection** 策略的 Python 回测与分析工具。
 
-**对应 PRD2**：`docs/prd2.md`
+对应 Go 引擎: `internal/flip/`，特征体系: `docs/flip_backtest_plan.md`
 
 ---
 
-## 环境初始化
+## 环境
 
 ```bash
 cd python/
-
-# 创建虚拟环境
 python -m venv venv
-
-# 激活虚拟环境
-source venv/bin/activate        # macOS / Linux
-# venv\Scripts\activate         # Windows
-
-# 安装依赖
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**依赖**：pandas, numpy, scipy（标准数据科学三件套）。
+依赖：numpy, scipy, pandas（数据分析标准三件套）
 
 ---
 
 ## 快速开始
 
 ```bash
-# 1. 先运行 Go 端采集数据（另一个终端，持续运行 24h+）
-cd .. && go run ./cmd/lab -output data/lab/
+# 回测（核心入口）
+python backtest_flip_scoring.py --data ../data/lab/
 
-# 2. 积累足够数据后，运行特征分析
-cd python/
-python run_lab.py --data ../data/lab/ --output ../reports/
+# 回测 + 导出信号 JSONL
+python backtest_flip_scoring.py --data ../data/lab/ --export signals.jsonl
 
-# 3. 查看报告
-open ../reports/feature_report_*.md
+# 回测 + 打印每笔信号详情
+python backtest_flip_scoring.py --data ../data/lab/ --verbose
 ```
 
 ---
@@ -46,127 +38,72 @@ open ../reports/feature_report_*.md
 
 ```
 python/
-├── README.md                          # 本文件
-├── requirements.txt                   # Python 依赖
+├── README.md
+├── requirements.txt
 │
-├── loader.py                          # [数据加载] JSONL → pandas DataFrame
-├── run_lab.py                         # [入口] 编排加载→特征计算→分析→报告
+├── backtest_flip_config.py      # [配置] Formula A 参数定义 + 默认值
+├── backtest_flip_utils.py       # [核心] 特征提取 + 信号检测 + 回测引擎
+├── backtest_flip_scoring.py     # [入口] 回测主程序（CLI）
 │
-├── features/                          # [特征层] 7个核心特征
-│   ├── __init__.py                    #   特征注册表
-│   ├── base.py                        #   Feature 抽象基类
-│   ├── distance_to_strike.py          #   F1: DistanceToStrike
-│   ├── safety_ratio.py                #   F2: SafetyRatio
-│   ├── reversal_capacity.py           #   F3: ReversalCapacity
-│   ├── volatility_expansion.py        #   F4: VolatilityExpansion
-│   ├── direction_persistence.py       #   F5: DirectionPersistence
-│   ├── signed_flow.py                 #   F6: SignedFlow
-│   └── volume_acceleration.py         #   F7: VolumeAcceleration
+├── sweep_other_delta.py         # [调参] other_delta 阈值网格搜索
+├── analyze_features.py          # [分析] 7特征预测能力全面分析
+├── analyze_filter_pipeline.py   # [分析] 过滤管线逐级杀灭率分析
+├── analyze_od_killed.py         # [分析] other_delta 硬过滤影响
+├── analyze_remsec.py            # [分析] remaining_sec 对胜率影响
 │
-├── analysis/                          # [分析层] 统计验证
-│   ├── __init__.py
-│   ├── buckets.py                     #   分档分析 (§8.1)
-│   ├── time_condition.py              #   剩余时间条件分析 (§8.2)
-│   ├── monotonicity.py                #   Spearman 单调性 (§8.3)
-│   └── combination.py                 #   二维特征组合 (§8.4)
-│
-└── report/                            # [报告层] Markdown 输出
-    ├── __init__.py
-    └── generator.py                   #   完整研究报告生成器 (§9)
+├── analyze_flip_comprehensive.py # [研究] 穿越 0.7 事件综合分析
+├── analyze_flip_deep.py          # [研究] BTC 穿越后行为深度分析
+├── analyze_flip_strategy.py      # [研究] wait-and-see 策略设计
+└── analyze_flip_final.py         # [研究] 入场价 + BTC 跑道优化
 ```
-
----
 
 ## 模块说明
 
-### loader.py — 数据加载
+### 回测核心（3 文件）
 
-将 Go 端生成的 `events_*.jsonl` 文件加载为 pandas DataFrame，每行一个 Snapshot。
+| 文件 | 职责 |
+|------|------|
+| `backtest_flip_config.py` | `FlipBacktestConfig` dataclass，与 Go 端 `FlipConfig` 一一对应 |
+| `backtest_flip_utils.py` | 纯函数：特征提取（PathEff, NoiseRatio, CountFlips…）、信号检测、回测循环 |
+| `backtest_flip_scoring.py` | CLI 入口，加载数据 → 运行回测 → 打印摘要 / 导出 JSONL |
 
-```python
-from loader import load_events, summary
+### 调参工具
 
-df = load_events("data/lab/")
-print(summary(df))
+| 文件 | 用途 |
+|------|------|
+| `sweep_other_delta.py` | 扫描 other_delta 硬过滤阈值，找到最优设置 |
+| `analyze_features.py` | 分析每个特征的独立预测能力，找最优阈值 |
+| `analyze_filter_pipeline.py` | 查看每级过滤干掉多少候选 |
+| `analyze_od_killed.py` | 评估 other_delta 硬过滤的影响面 |
+| `analyze_remsec.py` | 按剩余时间分层分析胜率 |
+
+### 研究笔记（4 文件）
+
+`analyze_flip_*.py` 系列是按阶段演进的分析脚本：
+1. `comprehensive` — 先了解 >0.7 后市场到底怎么走
+2. `deep` — 深入 BTC 穿越后行为
+3. `strategy` — 尝试 wait-and-see 策略
+4. `final` — 最终参数优化
+
+## 回测逻辑
+
+```
+1. 加载 events JSONL（来自 Go cmd/flip -lab-output 或 cmd/lab）
+2. 计算 hist_avg_range（前 N 个 event 的 K线振幅均值）
+3. 遍历每个 event 的 snapshots:
+   a. YES/NO > 0.7 → 触发检测（仅首次穿越, 先 YES 后 NO）
+   b. 等待 1 tick（5s）确认
+   c. 计算 7 特征复合评分
+   d. score ≥ 5 → 产生信号
+   e. event 结束时根据 BTC outcome 结算 P&L
+4. 输出摘要：信号数、胜率、总 P&L、Profit Factor
 ```
 
-DataFrame 列：
-- 所有 [ResearchSnapshot 字段](../internal/lab/types.go)（ts, event_id, remaining_sec, open, price, ret_1s, ...）
-- `outcome` — 从 Event 层级展平（1=YES/Up, 0=NO/Down）
-- `close_price` — Event 的最终价格
-
-### features/ — 特征层
-
-每个特征是一个 `Feature` 子类，实现 `compute(df) -> pd.Series`。
-
-**7 个第一批核心特征**：
-
-| # | 特征 | 文件 | 含义 |
-|---|------|------|------|
-| 1 | DistanceToStrike | `distance_to_strike.py` | 当前价格距开盘价的距离（方向归一化） |
-| 2 | SafetyRatio | `safety_ratio.py` | 优势相对于近期波动是否够大 |
-| 3 | ReversalCapacity | `reversal_capacity.py` | 市场反转能力 / 当前优势（越低越安全） |
-| 4 | VolatilityExpansion | `volatility_expansion.py` | 短期波动 / 中期波动（>1=异常放大） |
-| 5 | DirectionPersistence | `direction_persistence.py` | 方向上 1s return 占比（越高越持续） |
-| 6 | SignedFlow | `signed_flow.py` | 主动买卖量差（方向归一化） |
-| 7 | VolumeAcceleration | `volume_acceleration.py` | 近10s量 / 前10s量（>1=放量） |
-
-**添加新特征**：
-1. 在 `features/` 下新建文件，继承 `Feature`
-2. 在 `features/__init__.py` 注册
-3. 特征会自动出现在分析和报告中
-
-### analysis/ — 分析层
-
-每个分析模块独立可用：
-
-```python
-from analysis.buckets import analyze_buckets, bucket_summary_table
-from analysis.time_condition import analyze_time_conditioned, time_condition_table
-from analysis.monotonicity import analyze_monotonicity
-from analysis.combination import analyze_combination, combination_matrix
-```
-
-**分析方法**（对应 PRD2 §8）：
-
-| 模块 | 方法 | 输出 |
-|------|------|------|
-| `buckets.py` | 分10档统计胜率 + EV | Bucket 表 |
-| `time_condition.py` | 按60s/30s/15s/5s分别分析 | 时间条件表 |
-| `monotonicity.py` | Spearman Rank 相关系数 | ρ + p-value + 解读 |
-| `combination.py` | 二维 4×4 网格胜率矩阵 | 组合矩阵 |
-
-### report/generator.py — 报告生成
-
-自动生成完整 Markdown 报告，包含所有特征的：
-- Bucket 分析表
-- 时间条件分析表
-- Spearman 单调性
-- 最佳区间
-- 特征组合矩阵
-
----
+与 Go 端 `flip.Engine` 严格对齐：相同配置、相同逻辑、相同评分公式。
 
 ## 设计原则
 
-1. **数据 → 事实 → 特征 → 验证 → 组合 → 模型 → 交易**（严格遵守此顺序）
-2. Go 端只采集纯事实，不做任何 Feature 计算
-3. Python 端特征之间无耦合，可独立迭代
-4. 所有分析面向"尾盘下注"场景：按剩余时间分档，关注尾盘60秒内的表现
-
----
-
-## 第二阶段（待定）
-
-当第一批 7 个特征被验证有效后：
-
-- 特征组合发现（3+ 特征 AND 条件）
-- 更多剩余时间 checkpoint（45s, 20s, 10s, 3s）
-- 按市场时间段分层（亚洲盘/欧美盘）
-- 滚动窗口 stability 分析（特征是否随时间退化）
-
-## 第三阶段（待定）
-
-- LightGBM 模型：P(after-fee profit | features)
-- 实时特征计算管道
-- 集成回现有 MQS 交易引擎
+1. **纯函数核心** — `backtest_flip_utils.py` 无 IO 依赖，所有特征函数可直接 import 使用
+2. **与 Go 引擎一致** — config、特征计算、评分逻辑与 `internal/flip/` 保持同步
+3. **分析脚本独立** — 每个 `analyze_*.py` 可独立运行，不互相依赖
+4. **先回测、再分析、再调参** — 标准 workflow
