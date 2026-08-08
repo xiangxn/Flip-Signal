@@ -7,3 +7,5 @@ reports
 dist
 
 deploy.sh
+
+config.yaml
