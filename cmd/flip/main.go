@@ -464,7 +464,6 @@ type AppConfig struct {
 	Flip    flip.FlipConfig    `mapstructure:"flip"`
 }
 
-
 // loadConfig loads configuration with viper precedence:
 //
 //	代码默认值 (最低) ← config.yaml ← 环境变量 POLYMARKET_* (最高)
@@ -497,8 +496,8 @@ func loadConfig(configPath string) (*AppConfig, error) {
 			Symbol:        "BTCUSDT",
 			SlugPrefix:    "btc-updown-5m",
 			OutputPath:    "data/flip_signals.jsonl",
-			LabOutputDir:  "",
-			DashboardAddr: "",
+			LabOutputDir:  "data/lab",
+			DashboardAddr: ":8090",
 		},
 		SDK:     *sdk.DefaultConfig(),
 		Binance: feed.DefaultBinanceConfig(),
