@@ -109,6 +109,29 @@ table.info td { padding: 3px 0; }
 table.info td:first-child { color: var(--text-muted); width: 50%; }
 table.info td:last-child { text-align: right; font-weight: 500; }
 
+/* ── Toast notification ── */
+.toast {
+  position: fixed;
+  bottom: 24px;
+  left: 50%;
+  transform: translateX(-50%) translateY(80px);
+  background: var(--green);
+  color: #fff;
+  padding: 8px 20px;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  opacity: 0;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+  z-index: 999;
+  pointer-events: none;
+}
+.toast.show {
+  transform: translateX(-50%) translateY(0);
+  opacity: 1;
+}
+
 /* ── Condition ID (truncated, tap-to-copy) ── */
 .cid-value {
   display: inline-block;

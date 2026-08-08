@@ -10,6 +10,7 @@ import (
 // T0Features 保存穿越时刻（T=0）计算的特征值。
 // 导出供 Dashboard 展示穿越点详情。
 type T0Features struct {
+	Side           string  `json:"side"`
 	PathEff        float64 `json:"path_eff"`
 	NoiseRatio     float64 `json:"noise_ratio"`
 	Flips          int     `json:"flips"`
@@ -58,6 +59,10 @@ type Engine struct {
 	yesTried         bool // YES 侧已尝试且失败（本周期内）
 	noTried          bool // NO 侧已尝试且失败（本周期内）
 
+	// 多穿越重试追踪
+	retryCount   int        // 本周期内进入 Confirming 的次数
+	lastFailedT0 *T0Features // 最近一次失败穿越的 T=0 特征（Dashboard 展示用）
+
 	// T=0 特征值（enterConfirming 中计算，onConfirmed 中读取）
 	pathEff        float64
 	noiseRatio     float64
@@ -97,6 +102,9 @@ func (e *Engine) Reset(generation int64) {
 	e.noFirstCrossIdx = -1
 	e.yesTried = false
 	e.noTried = false
+
+	e.retryCount = 0
+	e.lastFailedT0 = nil
 
 	e.pathEff = 0
 	e.noiseRatio = 0
@@ -192,6 +200,8 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 // 多穿越模式（AllowRetryCrossings=true）：本次穿越被否决不会耗尽该侧 ——
 // 后续上升沿仍会重试。仅成功评分（score ≥ ScoreEntry）产生的信号才能终止本周期。
 func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
+	e.retryCount++ // 每次进入 Confirming 计数（多穿越模式下可能 > 1）
+
 	crossSnap := e.snapBuffer[crossIdx]
 
 	// 检查穿越前 snapshot 数量（含穿越点自身）。
@@ -355,6 +365,19 @@ func (e *Engine) findRecentCrossing(side string) int {
 
 // returnToWatching 重置穿越状态并切换回 Watching。
 func (e *Engine) returnToWatching() {
+	// 保存本次失败穿越的 T=0 特征供 Dashboard 诊断用
+	if e.crossSnap != nil {
+		e.lastFailedT0 = &T0Features{
+			Side:           e.crossSide,
+			PathEff:        e.pathEff,
+			NoiseRatio:     e.noiseRatio,
+			Flips:          e.flips,
+			Oscillating:    e.oscillating,
+			RangeExpansion: e.rangeExpansion,
+			BTCPosition:    e.btcPosition,
+			BTCExtreme:     e.btcExtreme,
+		}
+	}
 	e.state = stateWatching
 	e.crossSnap = nil
 	e.crossSide = ""
@@ -491,6 +514,7 @@ func (e *Engine) T0Features() *T0Features {
 		return nil
 	}
 	return &T0Features{
+		Side:           e.crossSide,
 		PathEff:        e.pathEff,
 		NoiseRatio:     e.noiseRatio,
 		Flips:          e.flips,
@@ -522,6 +546,12 @@ func (e *Engine) StateLabel() string {
 
 // Config 返回引擎运行配置的副本。
 func (e *Engine) Config() FlipConfig { return e.cfg }
+
+// RetryCount 返回本周期内已进入 Confirming 的次数（多穿越模式下可能 > 1）。
+func (e *Engine) RetryCount() int { return e.retryCount }
+
+// LastFailedT0 返回最近一次失败穿越的 T=0 特征，无失败穿越时返回 nil。
+func (e *Engine) LastFailedT0() *T0Features { return e.lastFailedT0 }
 
 // markSideTried 标记指定 side 在本周期内已尝试。
 func (e *Engine) markSideTried(side string) {

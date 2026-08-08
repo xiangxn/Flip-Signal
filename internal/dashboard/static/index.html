@@ -53,6 +53,8 @@
     <h3>&#x2699; Engine State</h3>
     <table class="info">
       <tr><td>State</td><td><span class="state-badge state-idle" id="eng-state">-</span></td></tr>
+      <tr><td>Multi-Crossing</td><td id="eng-multix">-</td></tr>
+      <tr><td>Retries (this cycle)</td><td id="eng-retries">-</td></tr>
       <tr><td>Snapshots</td><td id="eng-snaps">-</td></tr>
       <tr><td>Remaining</td><td id="eng-remaining">-</td></tr>
       <tr><td>Side</td><td id="eng-side">-</td></tr>
@@ -73,10 +75,16 @@
   </div>
 </div>
 
-<!-- Cross Features (hidden when not confirming) -->
+<!-- Cross Features (visible when confirming) -->
 <div class="panel" id="cross-panel" style="display:none; margin-bottom:12px;">
-  <h3>&#x1F3AF; Cross Features (T=0)</h3>
+  <h3>&#x1F3AF; Cross Features (T=0 — Active)</h3>
   <div class="cross-grid" id="cross-grid"></div>
+</div>
+
+<!-- Last Failed Cross Features (visible when multi-crossing and a retry failed) -->
+<div class="panel" id="failed-panel" style="display:none; margin-bottom:12px;">
+  <h3>&#x26A0; Cross Features (T=0 — Last Failed Retry)</h3>
+  <div class="cross-grid" id="failed-grid"></div>
 </div>
 
 <!-- Price Chart -->
@@ -104,6 +112,7 @@
   </div>
 </div>
 
+<div id="toast" class="toast"></div>
 <script src="/static/app.js"></script>
 </body>
 </html>

@@ -30,13 +30,13 @@ runtime:
   # 与 cmd/lab 输出格式相同，包含完整的 ResearchSnapshot 序列
   # 留空表示不启用 lab 数据采集
   # 默认值: ""（不启用）
-  lab_output_dir: ""
+  lab_output_dir: "data/lab"
 
   # （可选）HTTP Dashboard 监听地址
   # 例如 ":8090" 监听所有网卡的 8090 端口
   # 留空表示不启动 Dashboard
   # 默认值: ""（不启用）
-  dashboard_addr: ""
+  dashboard_addr: ":8090"
 
 # ---------------------------------------------------------------------------
 # Polymarket SDK 配置

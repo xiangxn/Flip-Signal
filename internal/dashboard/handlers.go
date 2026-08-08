@@ -39,7 +39,12 @@ type stateResponse struct {
 	PendingCount  int          `json:"pending_count"`
 	WinRate       float64      `json:"win_rate"`
 	CumulativePnl float64      `json:"cumulative_pnl"`
-	CrossFeatures *crossDetail `json:"cross_features"`
+
+	// 多穿越重试
+	AllowRetryCrossings bool         `json:"allow_retry_crossings"`
+	RetryCount          int          `json:"retry_count"`
+	CrossFeatures       *crossDetail `json:"cross_features"`       // 当前 Confirming 中
+	LastFailedFeatures  *crossDetail `json:"last_failed_features"` // 最近一次失败穿越（多穿越模式诊断用）
 }
 
 type crossDetail struct {
@@ -147,14 +152,17 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		PendingCount:  pending,
 		WinRate:       winRate,
 		CumulativePnl: cumPnl,
+
+		AllowRetryCrossings: s.Engine.Config().AllowRetryCrossings,
+		RetryCount:          s.Engine.RetryCount(),
 	}
 
-	// Cross features when in confirming state
+	// 当前 Confirming 中的穿越特征
 	if engLabel == "Confirming" {
 		t0 := s.Engine.T0Features()
 		if t0 != nil {
 			resp.CrossFeatures = &crossDetail{
-				Side:               s.Engine.CurrentSide(),
+				Side:               t0.Side,
 				PathEff:            t0.PathEff,
 				NoiseRatio:         t0.NoiseRatio,
 				Flips:              t0.Flips,
@@ -164,6 +172,20 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 				BTCExtreme:         t0.BTCExtreme,
 				ConfirmTicksWaited: s.Engine.ConfirmTicksWaited(),
 			}
+		}
+	}
+
+	// 最近一次失败穿越的特征（多穿越模式下诊断用）
+	if t0 := s.Engine.LastFailedT0(); t0 != nil {
+		resp.LastFailedFeatures = &crossDetail{
+			Side:           t0.Side,
+			PathEff:        t0.PathEff,
+			NoiseRatio:     t0.NoiseRatio,
+			Flips:          t0.Flips,
+			IsOscillating:  t0.Oscillating,
+			RangeExpansion: t0.RangeExpansion,
+			BTCPosition:    t0.BTCPosition,
+			BTCExtreme:     t0.BTCExtreme,
 		}
 	}
 

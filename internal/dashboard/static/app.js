@@ -154,6 +154,11 @@ async function fetchState() {
     badge.textContent = d.engine_state_label;
     badge.className = 'state-badge ' + (STATE_CLASSES[d.engine_state_label] || 'state-idle');
 
+    const multixEl = document.getElementById('eng-multix');
+    multixEl.textContent = d.allow_retry_crossings ? 'ON' : 'OFF';
+    multixEl.className = d.allow_retry_crossings ? 'val-green' : '';
+
+    document.getElementById('eng-retries').textContent = d.retry_count || 0;
     document.getElementById('eng-snaps').textContent = d.snap_count;
     document.getElementById('eng-remaining').textContent = d.remaining_sec + 's';
     document.getElementById('eng-side').textContent = d.current_side || '-';
@@ -173,7 +178,7 @@ async function fetchState() {
     document.getElementById('price-depth').textContent =
       d.bid_depth.toFixed(1) + ' / ' + d.ask_depth.toFixed(1);
 
-    // Cross features
+    // Cross features (active confirming)
     const cp = document.getElementById('cross-panel');
     const cg = document.getElementById('cross-grid');
     if (d.cross_features) {
@@ -198,6 +203,32 @@ async function fetchState() {
       }).join('');
     } else {
       cp.style.display = 'none';
+    }
+
+    // Last failed cross features (multi-crossing retry diagnostics)
+    const fp = document.getElementById('failed-panel');
+    const fg = document.getElementById('failed-grid');
+    if (d.last_failed_features) {
+      fp.style.display = '';
+      const f = d.last_failed_features;
+      const items = [
+        ['Side', f.side],
+        ['Path Eff', f.path_eff.toFixed(3)],
+        ['Noise Ratio', f.noise_ratio.toFixed(2)],
+        ['Flips', f.flips],
+        ['Oscillating', f.is_oscillating ? '✓' : '✗'],
+        ['Range Exp.', f.range_expansion.toFixed(2)],
+        ['BTC Position', f.btc_position.toFixed(2)],
+        ['BTC Extreme', f.btc_extreme ? '✓' : '✗'],
+      ];
+      fg.innerHTML = items.map(([l, v]) => {
+        let cls = '';
+        if (typeof v === 'boolean' || v === '✓' || v === '✗')
+          cls = v === true || v === '✓' ? 'bool-true' : 'bool-false';
+        return `<div class="cross-item"><div class="label">${l}</div><div class="value ${cls}">${v}</div></div>`;
+      }).join('');
+    } else {
+      fp.style.display = 'none';
     }
   } catch (e) {
     console.error('state fetch:', e);
@@ -260,6 +291,16 @@ async function fetchSignals() {
   }
 }
 
+// ── Toast helper ──
+let toastTimer = 0;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1500);
+}
+
 // ── Tap-to-copy Condition ID ──
 document.getElementById('eng-cid').addEventListener('click', async () => {
   const el = document.getElementById('eng-cid');
@@ -269,6 +310,7 @@ document.getElementById('eng-cid').addEventListener('click', async () => {
     await navigator.clipboard.writeText(text);
     el.classList.add('copied');
     el.title = 'Copied!';
+    showToast('✓ Condition ID copied');
     setTimeout(() => { el.classList.remove('copied'); el.title = 'Tap to copy'; }, 1500);
   } catch (_) {
     // clipboard not available, ignore
