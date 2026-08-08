@@ -10,14 +10,6 @@ import (
 	"github.com/necklace/flip-signal/internal/lab"
 )
 
-// ── Engine state constants (mirrors flip package's unexported flipState) ──
-const (
-	engStateIdle       = 0
-	engStateWatching   = 1
-	engStateConfirming = 2
-	engStateDone       = 3
-)
-
 // ── Response types ──
 
 type stateResponse struct {
@@ -125,14 +117,14 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 
 	total, won, lost, pending, winRate, cumPnl := s.Recorder.SignalStats()
 
-	engState := int(s.Engine.State())
+	engLabel := s.Engine.StateLabel()
 
 	resp := stateResponse{
 		TS:            time.Now().UTC().Format(time.RFC3339),
 		Mode:          s.Mode,
 		Generation:    s.Engine.Generation(),
-		EngineState:   s.Engine.StateLabel(),
-		EngineLabel:   s.Engine.StateLabel(),
+		EngineState:   engLabel,
+		EngineLabel:   engLabel,
 		CurrentSide:   s.Engine.CurrentSide(),
 		SnapCount:     s.Engine.SnapCount(),
 		RemainingSec:  remainingSec,
@@ -147,7 +139,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		AskDepth:      btc.AskDepth5,
 		HistReady:     s.HistRange.IsReady(),
 		HistAvgRange:  s.HistRange.AvgRange(),
-		HistWindowN:   18,
+		HistWindowN:   s.Engine.Config().HistWindowN,
 		SignalCount:   total,
 		WonCount:      won,
 		LostCount:     lost,
@@ -157,7 +149,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Cross features when in confirming state
-	if engState == engStateConfirming {
+	if engLabel == "Confirming" {
 		t0 := s.Engine.T0Features()
 		if t0 != nil {
 			resp.CrossFeatures = &crossDetail{
@@ -226,7 +218,7 @@ func (s *State) handleSnapshots(w http.ResponseWriter, r *http.Request) {
 func (s *State) handleHistRange(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, histRangeResponse{
 		Ready:    s.HistRange.IsReady(),
-		WindowN:  18,
+		WindowN:  s.Engine.Config().HistWindowN,
 		AvgRange: s.HistRange.AvgRange(),
 	})
 }

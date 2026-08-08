@@ -184,6 +184,16 @@ flip:
   # 默认值: 1（Formula A: 从 2 放宽）
   flips_oscillating: 1
 
+  # ===== T=0 穿线时刻质量否决（硬编码→可配置）=====
+
+  # 路径效率下限，path_eff < 此值 → 趋势太模糊，否决
+  # 默认值: 0.4
+  path_eff_veto_min: 0.4
+
+  # 噪声比上限，noise_ratio > 此值 → 价格太不稳定，否决
+  # 默认值: 3.0
+  noise_ratio_veto_max: 3.0
+
   # ===== 历史波动范围（tick-independent，基于 hist_avg_range）=====
 
   # 历史 K 线窗口大小，用于计算 hist_avg_range 基准

@@ -135,12 +135,19 @@ func main() {
 	flipCfg := cfg.Flip
 	histTracker := flip.NewHistRangeTracker(flipCfg.HistWindowN)
 
-	// Wait for initial Binance data before warming up hist range
+	// Wait for initial Binance data before warming up hist range.
+	// Poll LatestData() every second instead of a blind sleep.
 	log.Println("[Flip] Waiting for initial Binance data...")
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(3 * time.Second):
+	for i := 0; i < 30; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
+		}
+		if btc := binance.LatestData(); btc.Price != 0 {
+			log.Printf("[Flip] Binance data ready after %ds (price=%.2f)", i+1, btc.Price)
+			break
+		}
 	}
 
 	// Warmup: fetch historical 5m klines for instant hist_avg_range
@@ -215,7 +222,11 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[Flip] Shutting down...")
+			log.Println("[Flip] Shutting down — flushing buffers...")
+			// Give in-flight operations (HTTP fetches, WS writes) time to finish.
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer shutdownCancel()
+			<-shutdownCtx.Done()
 			return
 		default:
 		}
@@ -238,8 +249,17 @@ func main() {
 			}
 		}
 
-		// Step 3: Fetch Binance kline open price
-		binance.FetchKlineOpenPrice()
+		// Step 3: Fetch Binance kline open price (with timeout)
+		klineDone := make(chan struct{}, 1)
+		go func() {
+			binance.FetchKlineOpenPrice()
+			klineDone <- struct{}{}
+		}()
+		select {
+		case <-klineDone:
+		case <-time.After(5 * time.Second):
+			log.Printf("[Cycle] WARNING: kline fetch timeout, using current price")
+		}
 
 		btc := binance.LatestData()
 		openPrice := btc.OpenPrice
@@ -265,6 +285,8 @@ func main() {
 		case <-ctx.Done():
 			log.Println("[Cycle] market fetch interrupted")
 			return
+		case <-time.After(15 * time.Second):
+			fetchErr = fmt.Errorf("market fetch timeout (slug=%s)", marketSlug)
 		case mr := <-marketCh:
 			marketData, fetchErr = mr.data, mr.err
 		}
@@ -346,7 +368,7 @@ func main() {
 				yb := bookAdapter.GetLatestBook(yesTok)
 				nb := bookAdapter.GetLatestBook(noTok)
 
-				collector.UpdatePolymarket(pmMidPrice(yb), pmMidPrice(nb))
+				collector.UpdatePolymarket(bestBid(yb), bestBid(nb))
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
@@ -412,22 +434,15 @@ func main() {
 
 // ── Helpers ──
 
-// pmMidPrice returns the mid price (average of best bid and best ask)
-// from a Polymarket CLOB order book.
+// bestBid returns the best bid price from a Polymarket CLOB order book.
 //
-// Both Bids and Asks are sorted by the API so that the LAST element is the
-// best price: Bids[len-1] = highest bid, Asks[len-1] = lowest ask.
-// Falls back to best bid only when asks are not yet available.
-func pmMidPrice(book *sdk.OrderBook) float64 {
+// Polymarket CLOB bids are sorted ascending: the LAST element is the
+// highest (best) bid. Returns 0 if the book is nil or empty.
+func bestBid(book *sdk.OrderBook) float64 {
 	if book == nil || len(book.Bids) == 0 {
 		return 0
 	}
-	bestBid := book.Bids[len(book.Bids)-1].Price
-	if len(book.Asks) == 0 {
-		return bestBid // ask side not yet populated, fallback to bid
-	}
-	bestAsk := book.Asks[len(book.Asks)-1].Price
-	return (bestBid + bestAsk) / 2
+	return book.Bids[len(book.Bids)-1].Price
 }
 
 // ── Config ──

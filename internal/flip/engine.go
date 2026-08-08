@@ -162,19 +162,14 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 // enterConfirming transitions to CONFIRMING state using the crossing at the
 // given buffer index. Computes all T=0 features from snapshots up to crossIdx.
 func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
-	// Mark this side as tried
-	if side == "yes" {
-		e.yesTried = true
-	} else {
-		e.noTried = true
-	}
-
 	crossSnap := e.snapBuffer[crossIdx]
 
-	// Check minimum pre-snapshots (including crossing snap)
+	// Check minimum pre-snapshots (including crossing snap).
+	// nPre = crossIdx+1 is fixed — later ticks can't increase it.
+	// Mark tried and fallback so the other side gets a chance.
 	nPre := crossIdx + 1 // snapshots up to and including crossing
 	if nPre < e.cfg.MinPreSnaps {
-		// Not enough history — try other side instead
+		e.markSideTried(side)
 		return e.fallbackAfterFailedConfirm()
 	}
 
@@ -199,13 +194,16 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	}
 	preRange := preHigh - preLow
 	if preRange == 0 {
+		// All prices identical — invalid data for this crossing, mark tried & fallback
+		e.markSideTried(side)
 		return e.fallbackAfterFailedConfirm()
 	}
 
 	e.pathEff = netMove / preRange
 
 	// path_eff too low → trend unclear, veto
-	if e.pathEff < 0.4 {
+	if e.pathEff < e.cfg.PathEffVetoMin {
+		e.markSideTried(side)
 		return e.fallbackAfterFailedConfirm()
 	}
 
@@ -217,7 +215,8 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	}
 
 	// high noise ratio → PM price unstable, veto
-	if e.noiseRatio > 3.0 {
+	if e.noiseRatio > e.cfg.NoiseRatioVetoMax {
+		e.markSideTried(side)
 		return e.fallbackAfterFailedConfirm()
 	}
 
@@ -231,8 +230,12 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 
 	// F0: Range expansion too large — real breakout, PM is right, veto
 	if e.histRange.IsReady() && e.rangeExpansion >= e.cfg.RangeExpMax {
+		e.markSideTried(side)
 		return e.fallbackAfterFailedConfirm()
 	}
+
+	// All pre-checks passed — mark side as tried
+	e.markSideTried(side)
 
 	// Save crossing state
 	e.crossSnap = crossSnap
@@ -330,6 +333,7 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		EntryPrice:     entryPrice,
 		RangeExpansion: e.rangeExpansion,
 		BTCPosition:    e.btcPosition,
+		BTCExtreme:     e.btcExtreme,
 		HistReady:      e.histRange.IsReady(),
 		Cfg:            e.cfg,
 	}
@@ -421,3 +425,12 @@ func (e *Engine) StateLabel() string {
 
 // Config returns a copy of the engine's running configuration.
 func (e *Engine) Config() FlipConfig { return e.cfg }
+
+// markSideTried marks the given side as having been attempted this generation.
+func (e *Engine) markSideTried(side string) {
+	if side == "yes" {
+		e.yesTried = true
+	} else {
+		e.noTried = true
+	}
+}

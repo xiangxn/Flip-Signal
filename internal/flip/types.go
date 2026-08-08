@@ -39,6 +39,10 @@ type FlipConfig struct {
 	BTCPosMax float64 `mapstructure:"btc_pos_max"` // NO>0.7: btc_pos > this → BTC diverges from PM → +1 (0.1)
 	BTCPosMin float64 `mapstructure:"btc_pos_min"` // YES>0.7: btc_pos < this → BTC diverges from PM → +1 (-0.1)
 
+	// ── T=0 quality vetoes（硬编码→可配置）──
+	PathEffVetoMin    float64 `mapstructure:"path_eff_veto_min"`    // path_eff < this → veto at crossing (0.4, trend too unclear)
+	NoiseRatioVetoMax float64 `mapstructure:"noise_ratio_veto_max"` // noise_ratio > this → veto at crossing (3.0, price too unstable)
+
 	// ── Entry price (§2.9) — Formula A: re-activated ──
 	EntryCheapStrong float64 `mapstructure:"entry_cheap_strong"` // < this → +1 point  (0.20)
 	EntryCheapWeak   float64 `mapstructure:"entry_cheap_weak"`   // < this → +1 point  (0.25, elif — no stacking)
@@ -76,9 +80,11 @@ func DefaultConfig() FlipConfig {
 		OtherDeltaVStrong:     0.05,   // Formula A: new top tier (>0.05 → +3)
 		OtherDeltaStrong:      0.02,   // Formula A: was 0.03 +4
 		OtherDeltaWeak:        0.01,   // Formula A: was +2
-		BTCPosMax:             0.1,    // Formula A: widened from 0.5
-		BTCPosMin:             -0.1,   // Formula A: widened from -0.5
-		EntryCheapStrong:      0.20,   // Formula A: re-activated (was 0=disabled)
+		PathEffVetoMin:        0.4,  // path_eff below this → trend too unclear, veto
+		NoiseRatioVetoMax:     3.0,  // noise_ratio above this → price too unstable, veto
+		BTCPosMax:             0.1,  // Formula A: widened from 0.5
+		BTCPosMin:             -0.1, // Formula A: widened from -0.5
+		EntryCheapStrong:      0.20, // Formula A: re-activated (was 0=disabled)
 		EntryCheapWeak:        0.25,
 		WOtherD5VStrong:       3,      // Formula A: new weight
 		WOtherD5Strong:        2,      // Formula A: was 4
@@ -142,6 +148,7 @@ type ScoreParams struct {
 	EntryPrice     float64
 	RangeExpansion float64
 	BTCPosition    float64
+	BTCExtreme     bool // pre-computed by engine (BTC diverges from PM direction)
 	HistReady      bool
 	Cfg            FlipConfig
 }

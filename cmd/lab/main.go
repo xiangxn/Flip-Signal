@@ -295,9 +295,9 @@ func main() {
 
 		// Step 7: Finalize and persist
 		event := collector.FinalizeEvent()
-		outcomeLabel := "NO (Down/Flat)"
-		if event.Outcome == 1 {
-			outcomeLabel = "YES (Up)"
+		outcomeLabel := "DOWN/Flat"
+		if event.Outcome == 0 {
+			outcomeLabel = "UP"
 		}
 		log.Printf("[Event] %s done — open=%.2f close=%.2f outcome=%s snapshots=%d",
 			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
