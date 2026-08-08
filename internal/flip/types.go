@@ -14,48 +14,48 @@ import "time"
 // Defaults match backtest_flip_config.py exactly (5s data calibration).
 type FlipConfig struct {
 	// ── Layer 0: Pre-conditions (§2.1) ──
-	TriggerThreshold float64 // PM price > this triggers detection (0.7)
-	MinPreSnaps      int     // Minimum snapshots before crossing (5)
-	MaxRemainingSec  int     // Only crossings with remaining_sec < this are valid (260, window too early = insufficient BTC path)
+	TriggerThreshold float64 `mapstructure:"trigger_threshold"` // PM price > this triggers detection (0.7)
+	MinPreSnaps      int     `mapstructure:"min_pre_snaps"`     // Minimum snapshots before crossing (5)
+	MaxRemainingSec  int     `mapstructure:"max_remaining_sec"` // Only crossings with remaining_sec < this are valid (260, window too early = insufficient BTC path)
 
 	// ── Oscillation detection (all three must hold) — Formula A ──
-	PathEffOscillating    float64 // path_eff ≤ this → candidate (0.8, was 0.5)
-	NoiseRatioOscillating float64 // noise_ratio > this → candidate (1.5, was 5.0)
-	FlipsOscillating      int     // flips > this → candidate (1, was 2)
+	PathEffOscillating    float64 `mapstructure:"path_eff_oscillating"`     // path_eff ≤ this → candidate (0.8, was 0.5)
+	NoiseRatioOscillating float64 `mapstructure:"noise_ratio_oscillating"` // noise_ratio > this → candidate (1.5, was 5.0)
+	FlipsOscillating      int     `mapstructure:"flips_oscillating"`       // flips > this → candidate (1, was 2)
 
 	// ── Range expansion (tick-independent, uses hist_avg_range) ──
-	HistWindowN       int     // Historical kline window size (18)
-	RangeExpThreshold float64 // < this → BTC barely moved, PM overconfident (0.5)
-	RangeExpMax       float64 // ≥ this → F0 veto, real breakout (2.0)
+	HistWindowN       int     `mapstructure:"hist_window_n"`        // Historical kline window size (18)
+	RangeExpThreshold float64 `mapstructure:"range_exp_threshold"`  // < this → BTC barely moved, PM overconfident (0.5)
+	RangeExpMax       float64 `mapstructure:"range_exp_max"`        // ≥ this → F0 veto, real breakout (2.0)
 
 	// ── Opposite-side confirmation (§2.7) — Formula A: 3-tier ──
-	ConfirmDelayTicks  int     // Ticks to wait for confirmation (1 tick = 5s)
-	ODHardFilter       float64 // other_delta hard lower bound, -999 = disabled (Formula A: scoring handles it)
-	OtherDeltaVStrong  float64 // > this → +3 points (0.05, new top tier)
-	OtherDeltaStrong   float64 // > this → +2 points (0.02, was 0.03)
-	OtherDeltaWeak     float64 // > this → +1 points (0.01, was +2)
+	ConfirmDelayTicks  int     `mapstructure:"confirm_delay_ticks"`  // Ticks to wait for confirmation (1 tick = 5s)
+	ODHardFilter       float64 `mapstructure:"od_hard_filter"`       // other_delta hard lower bound, -999 = disabled (Formula A: scoring handles it)
+	OtherDeltaVStrong  float64 `mapstructure:"other_delta_vstrong"`  // > this → +3 points (0.05, new top tier)
+	OtherDeltaStrong   float64 `mapstructure:"other_delta_strong"`   // > this → +2 points (0.02, was 0.03)
+	OtherDeltaWeak     float64 `mapstructure:"other_delta_weak"`     // > this → +1 points (0.01, was +2)
 
 	// ── BTC position (§2.8) — Formula A: widened ──
-	BTCPosMax float64 // NO>0.7: btc_pos > this → BTC diverges from PM → +1 (0.1)
-	BTCPosMin float64 // YES>0.7: btc_pos < this → BTC diverges from PM → +1 (-0.1)
+	BTCPosMax float64 `mapstructure:"btc_pos_max"` // NO>0.7: btc_pos > this → BTC diverges from PM → +1 (0.1)
+	BTCPosMin float64 `mapstructure:"btc_pos_min"` // YES>0.7: btc_pos < this → BTC diverges from PM → +1 (-0.1)
 
 	// ── Entry price (§2.9) — Formula A: re-activated ──
-	EntryCheapStrong float64 // < this → +1 point  (0.20)
-	EntryCheapWeak   float64 // < this → +1 point  (0.25, elif — no stacking)
+	EntryCheapStrong float64 `mapstructure:"entry_cheap_strong"` // < this → +1 point  (0.20)
+	EntryCheapWeak   float64 `mapstructure:"entry_cheap_weak"`   // < this → +1 point  (0.25, elif — no stacking)
 
 	// ── Scoring weights (§2.10) — Formula A ──
-	WOtherD5VStrong int // Opposite huge move  (3, new)
-	WOtherD5Strong  int // Opposite big move    (2, was 4)
-	WOtherD5Weak    int // Opposite small move  (1, was 2)
-	WOscillating    int // Oscillation bonus    (2, was 1)
-	WCheapEntryStr  int // Very cheap entry     (1, was 2, was disabled)
-	WCheapEntryWeak int // Cheap entry          (1)
-	WRangeExpansion int // Range too small      (2)
-	WBtcExtreme     int // BTC extreme pos      (1)
+	WOtherD5VStrong int `mapstructure:"w_other_delta_vstrong"` // Opposite huge move  (3, new)
+	WOtherD5Strong  int `mapstructure:"w_other_delta_strong"`  // Opposite big move    (2, was 4)
+	WOtherD5Weak    int `mapstructure:"w_other_delta_weak"`    // Opposite small move  (1, was 2)
+	WOscillating    int `mapstructure:"w_oscillating"`         // Oscillation bonus    (2, was 1)
+	WCheapEntryStr  int `mapstructure:"w_cheap_entry_strong"`  // Very cheap entry     (1, was 2, was disabled)
+	WCheapEntryWeak int `mapstructure:"w_cheap_entry_weak"`    // Cheap entry          (1)
+	WRangeExpansion int `mapstructure:"w_range_expansion"`     // Range too small      (2)
+	WBtcExtreme     int `mapstructure:"w_btc_extreme"`         // BTC extreme pos      (1)
 
 	// ── Entry thresholds (§2.10) ──
-	ScoreEntry int // ≥ this → open 1 share (5)
-	ScoreAdd   int // ≥ this → add 2 shares (99 = disabled)
+	ScoreEntry int `mapstructure:"score_entry"` // ≥ this → open 1 share (5)
+	ScoreAdd   int `mapstructure:"score_add"`   // ≥ this → add 2 shares (99 = disabled)
 }
 
 // DefaultConfig returns a FlipConfig matching backtest_flip_config.py Formula A.

@@ -43,8 +43,8 @@ runtime:
 # ---------------------------------------------------------------------------
 sdk:
   # HTTP 客户端超时时间
-  # 默认值: 30s
-  http_timeout: 30s
+  # 默认值: 10s（SDK DefaultConfig）
+  http_timeout: 10s
 
   # HTTP 调试模式，开启后打印请求/响应详情
   # 默认值: false
@@ -77,18 +77,18 @@ sdk:
     # 默认值: "https://data-api.polymarket.com"
     data_api_base_url: "https://data-api.polymarket.com"
 
-    # Live WebSocket 基地址（实时用户数据）
-    # 默认值: "wss://ws-subscriptions.polymarket.com/ws/live"
-    live_ws_base_url: "wss://ws-subscriptions.polymarket.com/ws/live"
+    # Live WebSocket 基地址（实时数据 RTDS）
+    # 默认值: "wss://ws-live-data.polymarket.com"
+    live_ws_base_url: "wss://ws-live-data.polymarket.com"
 
-    # Relayer API 基地址（可选，用于代理提交交易）
-    # 默认值: ""（不使用 relayer）
-    # relayer_base_url: ""
+    # Relayer API 基地址（用于代理提交交易）
+    # 默认值: "https://relayer-v2.polymarket.com"（SDK DefaultConfig）
+    relayer_base_url: "https://relayer-v2.polymarket.com"
 
     # ------ 签名与认证 ------
-    # 签名类型: 0 = EOA（普通钱包）, 1 = POLY_1271（代理钱包）
-    # 默认值: 0
-    signature_type: 0
+    # 签名类型: 0 = EOA（普通钱包）, 1 = POLY_PROXY, 2 = POLY_GNOSIS_SAFE
+    # 默认值: 2（SDK DefaultConfig）
+    signature_type: 2
 
     # 钱包私钥（hex 格式，不含 0x 前缀）
     # 也可通过环境变量 POLYMARKET_OWNER_KEY 设置

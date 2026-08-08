@@ -35,15 +35,15 @@ type BinanceMarketData struct {
 
 // BinanceConfig holds configuration for the Binance adapter.
 type BinanceConfig struct {
-	Symbol        string // e.g. "BTCUSDT"
-	StreamBaseURL string // e.g. "wss://stream.binance.com:9443"
-	RestBaseURL   string // e.g. "https://data-api.binance.vision"
+	Symbol        string `mapstructure:"symbol"`          // e.g. "BTCUSDT"
+	StreamBaseURL string `mapstructure:"stream_base_url"` // e.g. "wss://stream.binance.com:9443"
+	RestBaseURL   string `mapstructure:"rest_base_url"`   // e.g. "https://data-api.binance.vision"
 }
 
 func DefaultBinanceConfig() BinanceConfig {
 	return BinanceConfig{
 		Symbol:        "BTCUSDT",
-		StreamBaseURL: "wss://stream.binance.com:9443",
+		StreamBaseURL: "wss://data-stream.binance.vision",
 		RestBaseURL:   "https://data-api.binance.vision",
 	}
 }

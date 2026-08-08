@@ -29,8 +29,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/spf13/viper"
 	"github.com/tidwall/gjson"
-	"github.com/xiangxn/go-polymarket-sdk/model"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/dashboard"
@@ -44,20 +44,47 @@ func init() {
 }
 
 func main() {
-	outputPath := flag.String("output", "data/flip_signals.jsonl", "Output JSONL path for flip signals")
-	labOutputDir := flag.String("lab-output", "", "Optional lab event output directory (JSONL, same format as cmd/lab)")
-	dashboardAddr := flag.String("dashboard", "", "HTTP dashboard address (e.g. :8090)")
-	symbol := flag.String("symbol", "BTCUSDT", "Binance trading pair")
-	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug prefix")
+	// ── CLI flags: 优先级最高，可覆盖所有配置来源 ──
+	configPath := flag.String("config", "config.yaml", "配置文件路径（YAML）")
+	outputPath := flag.String("output", "", "Flip Signal JSONL 输出路径（覆盖配置文件）")
+	labOutputDir := flag.String("lab-output", "", "Lab 数据输出目录（覆盖配置文件）")
+	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（覆盖配置文件）")
+	symbol := flag.String("symbol", "", "Binance 交易对（覆盖配置文件）")
+	slugPrefix := flag.String("slug", "", "Polymarket slug 前缀（覆盖配置文件）")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	// ================================================================
+	// 配置加载: 代码默认值 ← 文件配置 ← 环境变量 (优先级从低到高)
+	// ================================================================
+	cfg, err := loadConfig(*configPath)
+	if err != nil {
+		log.Fatalf("[Config] 加载配置失败: %v", err)
+	}
+
+	// ── CLI 覆盖（最高优先级）──
+	if *outputPath != "" {
+		cfg.Runtime.OutputPath = *outputPath
+	}
+	if *labOutputDir != "" {
+		cfg.Runtime.LabOutputDir = *labOutputDir
+	}
+	if *dashboardAddr != "" {
+		cfg.Runtime.DashboardAddr = *dashboardAddr
+	}
+	if *symbol != "" {
+		cfg.Runtime.Symbol = *symbol
+		cfg.Binance.Symbol = *symbol
+	}
+	if *slugPrefix != "" {
+		cfg.Runtime.SlugPrefix = *slugPrefix
+	}
+
+	// ================================================================
 	// Polymarket client (read-only if no owner key configured)
 	// ================================================================
-	cfg := loadConfig()
 	readOnly := false
 	if cfg.SDK.Polymarket.OwnerKey == "" {
 		key := make([]byte, 32)
@@ -76,12 +103,7 @@ func main() {
 	// ================================================================
 	// Binance adapter
 	// ================================================================
-	binanceCfg := feed.BinanceConfig{
-		Symbol:        *symbol,
-		StreamBaseURL: "wss://data-stream.binance.vision",
-		RestBaseURL:   "https://data-api.binance.vision",
-	}
-	binance := feed.NewBinanceAdapterWithConfig(binanceCfg)
+	binance := feed.NewBinanceAdapterWithConfig(cfg.Binance)
 	go func() {
 		if err := binance.Start(ctx); err != nil {
 			log.Printf("[Flip] Binance start: %v", err)
@@ -110,8 +132,8 @@ func main() {
 	// ================================================================
 	// Flip Engine & Recorder
 	// ================================================================
-	flipCfg := flip.DefaultConfig()
-	histTracker := flip.NewHistRangeTracker(flipCfg.HistWindowN) // 18
+	flipCfg := cfg.Flip
+	histTracker := flip.NewHistRangeTracker(flipCfg.HistWindowN)
 
 	// Wait for initial Binance data before warming up hist range
 	log.Println("[Flip] Waiting for initial Binance data...")
@@ -124,7 +146,7 @@ func main() {
 	// Warmup: fetch historical 5m klines for instant hist_avg_range
 	histErr := make(chan error, 1)
 	go func() {
-		histErr <- histTracker.Warmup(binanceCfg.RestBaseURL, *symbol)
+		histErr <- histTracker.Warmup(cfg.Binance.RestBaseURL, cfg.Binance.Symbol)
 	}()
 	select {
 	case <-ctx.Done():
@@ -138,7 +160,7 @@ func main() {
 
 	flipEngine := flip.NewEngine(flipCfg, histTracker)
 
-	flipRecorder, err := flip.NewFlipRecorder(*outputPath)
+	flipRecorder, err := flip.NewFlipRecorder(cfg.Runtime.OutputPath)
 	if err != nil {
 		log.Fatalf("[Flip] recorder: %v", err)
 	}
@@ -150,8 +172,8 @@ func main() {
 
 	// Optional lab data writer (same format as cmd/lab)
 	var labWriter *lab.Writer
-	if *labOutputDir != "" {
-		labWriter, err = lab.NewWriter(*labOutputDir)
+	if cfg.Runtime.LabOutputDir != "" {
+		labWriter, err = lab.NewWriter(cfg.Runtime.LabOutputDir)
 		if err != nil {
 			log.Fatalf("[Flip] lab writer: %v", err)
 		}
@@ -163,21 +185,22 @@ func main() {
 	}
 
 	// Optional HTTP dashboard
-	if *dashboardAddr != "" {
+	if cfg.Runtime.DashboardAddr != "" {
 		mode := "live"
 		if readOnly {
 			mode = "paper"
 		}
-		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, *symbol, mode)
-		go dash.ListenAndServe(*dashboardAddr)
-		log.Printf("[Flip] Dashboard: http://0.0.0.0%s (accessible from any network interface)", *dashboardAddr)
+		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, cfg.Runtime.Symbol, mode)
+		go dash.ListenAndServe(cfg.Runtime.DashboardAddr)
+		log.Printf("[Flip] Dashboard: http://0.0.0.0%s (accessible from any network interface)", cfg.Runtime.DashboardAddr)
 	}
 
 	log.Println("========================================")
 	log.Println(" Flip Signal Detection — Paper Trading")
-	log.Printf(" Symbol: %s  |  Slug: %s  |  Output: %s", *symbol, *slugPrefix, *outputPath)
-	if *labOutputDir != "" {
-		log.Printf(" Lab data: %s (events JSONL)", *labOutputDir)
+	log.Printf(" Symbol: %s  |  Slug: %s  |  Output: %s",
+		cfg.Runtime.Symbol, cfg.Runtime.SlugPrefix, cfg.Runtime.OutputPath)
+	if cfg.Runtime.LabOutputDir != "" {
+		log.Printf(" Lab data: %s (events JSONL)", cfg.Runtime.LabOutputDir)
 	}
 	log.Printf(" Config: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d",
 		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
@@ -201,7 +224,7 @@ func main() {
 		now := time.Now()
 		alignedTs := now.Unix() / lab.WindowSec * lab.WindowSec
 		nextStart := time.Unix(alignedTs, 0)
-		marketSlug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
+		marketSlug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
 
 		// Step 2: Wait until window start + 2s
 		waitUntil := nextStart.Add(2 * time.Second)
@@ -409,50 +432,90 @@ func pmMidPrice(book *sdk.OrderBook) float64 {
 
 // ── Config ──
 
-type appConfig struct {
-	SDK sdk.Config `mapstructure:"sdk"`
+// RuntimeConfig holds runtime parameters that can be overridden by CLI flags.
+type RuntimeConfig struct {
+	Symbol        string `mapstructure:"symbol"`         // Binance trading pair
+	SlugPrefix    string `mapstructure:"slug_prefix"`    // Polymarket slug prefix
+	OutputPath    string `mapstructure:"output_path"`    // Flip signal JSONL output path
+	LabOutputDir  string `mapstructure:"lab_output_dir"` // Optional lab event output directory
+	DashboardAddr string `mapstructure:"dashboard_addr"` // HTTP dashboard listen address
 }
 
-func loadConfig() *appConfig {
-	cfg := &appConfig{
-		SDK: sdk.Config{
-			Polymarket: sdk.PolymarketConfig{
-				ChainID:        137,
-				ClobBaseURL:    "https://clob.polymarket.com",
-				ClobWSBaseURL:  "wss://ws-subscriptions-clob.polymarket.com",
-				GammaBaseURL:   "https://gamma-api.polymarket.com",
-				DataAPIBaseURL: "https://data-api.polymarket.com",
-			},
+// AppConfig is the top-level configuration structure matching config.yaml.
+type AppConfig struct {
+	Runtime RuntimeConfig      `mapstructure:"runtime"`
+	SDK     sdk.Config         `mapstructure:"sdk"`
+	Binance feed.BinanceConfig `mapstructure:"binance"`
+	Flip    flip.FlipConfig    `mapstructure:"flip"`
+}
+
+
+// loadConfig loads configuration with viper precedence:
+//
+//	代码默认值 (最低) ← config.yaml ← 环境变量 POLYMARKET_* (最高)
+//
+// CLI flags are applied separately in main() after loadConfig returns.
+func loadConfig(configPath string) (*AppConfig, error) {
+	v := viper.New()
+
+	// ── 环境变量绑定（在 ReadInConfig 之前，确保优先级：env > file > default）──
+
+	// POLYMARKET_* → sdk.polymarket.* / sdk.*
+	v.BindEnv("sdk.polymarket.owner_key", "POLYMARKET_OWNER_KEY")
+	v.BindEnv("sdk.polymarket.clob_creds.key", "POLYMARKET_CLOB_KEY")
+	v.BindEnv("sdk.polymarket.clob_creds.secret", "POLYMARKET_CLOB_SECRET")
+	v.BindEnv("sdk.polymarket.clob_creds.passphrase", "POLYMARKET_CLOB_PASSPHRASE")
+	v.BindEnv("sdk.polymarket.funder_address", "POLYMARKET_FUNDER")
+	v.BindEnv("sdk.socks_proxy", "POLYMARKET_PROXY")
+
+	// FLIP_* → runtime.*
+	v.BindEnv("runtime.symbol", "FLIP_SYMBOL")
+	v.BindEnv("runtime.slug_prefix", "FLIP_SLUG_PREFIX")
+	v.BindEnv("runtime.output_path", "FLIP_OUTPUT")
+	v.BindEnv("runtime.lab_output_dir", "FLIP_LAB_OUTPUT")
+	v.BindEnv("runtime.dashboard_addr", "FLIP_DASHBOARD")
+	v.BindEnv("binance.symbol", "FLIP_SYMBOL") // 同步 binance 交易对
+
+	// ── Step 1: 代码默认值（最低优先级）──
+	cfg := &AppConfig{
+		Runtime: RuntimeConfig{
+			Symbol:        "BTCUSDT",
+			SlugPrefix:    "btc-updown-5m",
+			OutputPath:    "data/flip_signals.jsonl",
+			LabOutputDir:  "",
+			DashboardAddr: "",
 		},
+		SDK:     *sdk.DefaultConfig(),
+		Binance: feed.DefaultBinanceConfig(),
+		Flip:    flip.DefaultConfig(),
+	}
+	// SDK DefaultConfig 设了 dummy OwnerKey，置空以触发 read-only 模式
+	// （env POLYMARKET_OWNER_KEY 或配置文件可覆盖）
+	cfg.SDK.Polymarket.OwnerKey = ""
+
+	// ── Step 2: 文件配置（覆盖默认值，env 绑定的变量自动优先）──
+	if configPath != "" {
+		v.SetConfigFile(configPath)
+	} else {
+		v.SetConfigName("config")
+		v.SetConfigType("yaml")
+		v.AddConfigPath(".")
 	}
 
-	if v := os.Getenv("POLYMARKET_OWNER_KEY"); v != "" {
-		cfg.SDK.Polymarket.OwnerKey = v
-	}
-	if v := os.Getenv("POLYMARKET_CLOB_KEY"); v != "" {
-		if cfg.SDK.Polymarket.CLOBCreds == nil {
-			cfg.SDK.Polymarket.CLOBCreds = &model.ApiKeyCreds{}
+	if err := v.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+			return nil, fmt.Errorf("read config file: %w", err)
 		}
-		cfg.SDK.Polymarket.CLOBCreds.Key = v
-	}
-	if v := os.Getenv("POLYMARKET_CLOB_SECRET"); v != "" {
-		if cfg.SDK.Polymarket.CLOBCreds == nil {
-			cfg.SDK.Polymarket.CLOBCreds = &model.ApiKeyCreds{}
-		}
-		cfg.SDK.Polymarket.CLOBCreds.Secret = v
-	}
-	if v := os.Getenv("POLYMARKET_CLOB_PASSPHRASE"); v != "" {
-		if cfg.SDK.Polymarket.CLOBCreds == nil {
-			cfg.SDK.Polymarket.CLOBCreds = &model.ApiKeyCreds{}
-		}
-		cfg.SDK.Polymarket.CLOBCreds.Passphrase = v
-	}
-	if v := os.Getenv("POLYMARKET_FUNDER"); v != "" {
-		cfg.SDK.Polymarket.FunderAddress = v
-	}
-	if v := os.Getenv("POLYMARKET_PROXY"); v != "" {
-		cfg.SDK.SocksProxy = v
+		log.Printf("[Config] 未找到配置文件 (%s)，使用代码默认值", configPath)
+	} else {
+		log.Printf("[Config] 已加载配置文件: %s", v.ConfigFileUsed())
 	}
 
-	return cfg
+	// Unmarshal 自动处理优先级: BindEnv > config file > struct default
+	// （只覆盖 viper 中存在对应值的字段）
+	if err := v.Unmarshal(cfg); err != nil {
+		return nil, fmt.Errorf("unmarshal config: %w", err)
+	}
+
+	return cfg, nil
 }
