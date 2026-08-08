@@ -154,6 +154,12 @@ replace (
 - **接口隔离**: SDK 集成层（`internal/feed/`）与核心计算层分离
 - **纯函数优先**: 特征提取（`features.go`）和评分（`scoring.go`）为纯函数，无副作用，易于测试
 
+### 注释规范
+
+- **注释语言一律使用中文**，技术专有名词保留英文（如 BTC、PM、path_eff、noise_ratio、YES/NO 等）
+- **数学公式、符号映射保留原样**（如 `§2.2: path_eff = |lastPrice - openPrice| / pre_range`、`POLYMARKET_* → sdk.polymarket.*`）
+- 注释应描述逻辑意图而非复述代码，做到专业、精准、不直译
+
 ### 命名约定
 
 - **文件名**: `snake_case.go`
@@ -162,7 +168,7 @@ replace (
 - **导出函数/方法**: `PascalCase`（如 `NewEngine`, `ProcessSnapshot`）
 - **私有函数/方法**: `camelCase`（如 `enterConfirming`, `onConfirmed`）
 - **私有常量**: `camelCase`（如 `stateWatching`）
-- **包级文档**: 每个包首行写 `// Package xxx implements...` 描述包职责
+- **包级文档**: 每个包首行描述包职责
 
 ### 结构体与配置
 
@@ -315,7 +321,7 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
 
 6. **5秒采样**: 与 Polymarket CLOC 盘口更新频率匹配，减少噪声。
 
-7. **first_crossing_only**: 每个周期最多产出一个信号，先检查 YES 再检查 NO，与 Python 回测逻辑完全一致。
+7. **多穿越重试（allow_retry_crossings）**: 每个向上穿越 0.7 的上升沿都触发检测，首个评分通过者下注。每周期最多一注，YES 优先。已下注后不再观察后续穿越。
 
 8. **纸面交易先于实盘**: 当前所有信号输出为 paper trading，不执行真实订单。
 
