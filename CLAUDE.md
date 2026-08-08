@@ -1,8 +1,8 @@
-# CLAUDE.md — LastTrading
+# CLAUDE.md — Flip Signal
 
 ## 项目概述
 
-**LastTrading** 是一个针对 **Polymarket BTC 5分钟市场** 的量化交易系统。核心引擎 **Flip Signal Detection** 检测 Polymarket YES/NO 价格穿越 0.7 后的反转信号，基于 7 特征复合评分进行方向性下注。
+**Flip Signal** 是一个针对 **Polymarket BTC 5分钟市场** 的量化交易系统。核心引擎 **Flip Signal Detection** 检测 Polymarket YES/NO 价格穿越 0.7 后的反转信号，基于 7 特征复合评分进行方向性下注。
 
 ### 核心原则
 > **不预测涨跌，只判断"什么时候市场过度自信"。**
@@ -12,20 +12,21 @@
 ## 项目结构
 
 ```
-LastTrading/
+FlipSignal/
 ├── cmd/
-│   ├── flip/main.go                     # Flip Signal 检测引擎 + Dashboard
-│   ├── lab/main.go                      # 实验室数据采集 (ResearchSnapshot)
-│   └── test_resolve/                    # 解析测试工具
+│   ├── flip/main.go                     # Flip Signal 检测引擎 + Dashboard（主入口）
+│   ├── lab/main.go                      # 实验室数据采集（ResearchSnapshot）
+│   └── test_resolve/main.go             # 结算测试工具
 ├── internal/
 │   ├── lab/
 │   │   ├── types.go                     # ResearchSnapshot + Event 结构体
-│   │   └── collector.go                 # 5秒生成 ResearchSnapshot
+│   │   ├── collector.go                 # 5秒生成 ResearchSnapshot
+│   │   └── writer.go                    # JSONL 事件持久化（按日切分）
 │   ├── flip/
 │   │   ├── types.go                     # FlipConfig + FlipSignal + ScoreParams
 │   │   ├── engine.go                    # 状态机: Watching → Confirming → Done
-│   │   ├── features.go                  # 特征提取: PathEff, NoiseRatio, CountFlips...
-│   │   ├── scoring.go                   # 7特征复合评分 (Formula A)
+│   │   ├── features.go                  # 特征提取纯函数: PathEff, NoiseRatio, CountFlips…
+│   │   ├── scoring.go                   # 7特征复合评分（Formula A）
 │   │   ├── hist_range.go               # 历史K线波动范围追踪器
 │   │   ├── recorder.go                  # JSONL 信号记录 + P&L 结算
 │   │   └── engine_test.go              # 单元测试
@@ -34,10 +35,11 @@ LastTrading/
 │   │   └── orderbook_adapter.go         # Polymarket WS: YES/NO 盘口
 │   └── dashboard/
 │       ├── server.go                    # HTTP server
-│       ├── handlers.go                  # /api/state, /api/signals, /api/snapshots...
+│       ├── handlers.go                  # /api/state, /api/signals, /api/snapshots…
 │       ├── state.go                     # 运行时组件引用
 │       ├── templates.go                 # 嵌入式 HTML 模板
 │       └── static/                      # app.js, style.css, index.html
+├── docs/                                # 策略设计与分析文档
 ├── config.example.yaml
 ├── go.mod / go.sum
 └── CLAUDE.md                           # 本文件
@@ -48,29 +50,29 @@ LastTrading/
 ## 架构与数据流
 
 ```
-                          Binance                  Polymarket
-                     ┌───── WS ─────┐         ┌──── WS ──────┐
-                     │ btcusdt@trade│         │ MarketMonitor│
-                     │ @depth20     │         │ (CLOB books) │
-                     └──┬───────┬───┘         └──────┬───────┘
-                        │       │                    │
-                        ▼       ▼                    ▼
-                   BTC价格/量  深度              YES/NO价格
-                        │       │                    │
-                        └───────┼────────────────────┘
-                                ▼
-                     lab.Collector (5秒定时器)
-                                │
-                                ▼
-                        ResearchSnapshot
-                                │
-                                ▼
-                         Flip Engine
-                     (状态机 + 7特征评分)
-                                │
-                                ▼
-                         FlipRecorder
-                      (JSONL + P&L结算)
+                         Binance                  Polymarket
+                    ┌───── WS ─────┐         ┌──── WS ──────┐
+                    │ btcusdt@trade│         │ MarketMonitor│
+                    │ @depth20     │         │ (CLOB books) │
+                    └──┬───────┬───┘         └──────┬───────┘
+                       │       │                    │
+                       ▼       ▼                    ▼
+                  BTC价格/量  深度              YES/NO价格
+                       │       │                    │
+                       └───────┼────────────────────┘
+                               ▼
+                    lab.Collector (5秒定时器)
+                               │
+                               ▼
+                       ResearchSnapshot
+                               │
+                               ▼
+                        Flip Engine
+                    (状态机 + 7特征评分)
+                               │
+                               ▼
+                        FlipRecorder
+                     (JSONL + P&L结算)
 ```
 
 ### 数据源分工
@@ -78,8 +80,8 @@ LastTrading/
 | 数据 | 来源 | 方式 |
 |------|------|------|
 | BTC 价格 | Binance `btcusdt@trade` | WebSocket |
-| BTC 5m 开盘价 | Binance REST `/api/v3/klines?interval=5m` | HTTP (每周期) |
-| 买卖成交量 | Binance `btcusdt@trade` (aggressor side) | WebSocket |
+| BTC 5m 开盘价 | Binance REST `/api/v3/klines?interval=5m` | HTTP（每周期）|
+| 买卖成交量 | Binance `btcusdt@trade`（aggressor side）| WebSocket |
 | 订单簿深度 | Binance `btcusdt@depth20@100ms` | WebSocket |
 | YES/NO 盘口 | Polymarket `MarketMonitor` | WebSocket |
 
@@ -87,24 +89,51 @@ LastTrading/
 
 ```
 1. 计算下个 5分钟对齐时间戳
-2. 等待窗口开始 + 2秒 (确保 Binance kline 已生成)
+2. 等待窗口开始 + 2秒（确保 Binance kline 已生成）
 3. GET /api/v3/klines → 获取当前5m K线开盘价
 4. GET gamma-api/markets/slug/btc-updown-5m-<ts> → 获取市场信息
 5. MarketMonitor.SubscribeTokens() → 订阅新市场的 YES/NO token
 6. Collector.StartEvent() → 设置 conditionID/openPrice/endTime
-7. 每5秒采集 ResearchSnapshot + Flip Engine 检测 (持续 ~298秒)
+7. 每5秒采集 ResearchSnapshot + Flip Engine 检测（持续 ~298秒）
 8. 市场结束 → FinalizeEvent → Resolve → UnsubscribeTokens → goto 1
 ```
+
+### Flip Engine 状态机
+
+```
+Idle ──Reset()──▶ Watching ──price>0.7──▶ Confirming ──score≥5──▶ Done (🎯 Signal)
+                       ▲                        │
+                       └── fallback ────────────┘（另一侧重试）
+```
+
+- **Watching**: 累积 snapshot，追踪 YES/NO 首次穿越 0.7 的位置
+- **Confirming**: 等待 T+N ticks 确认，计算 other_delta 和最终评分
+- **Done**: 本周期已产生信号，后续 snapshot 被忽略
+- **first_crossing_only**: 先试 YES，失败则 fallback 到 NO；两侧都失败则回到 Watching
+
+### 7 特征复合评分（Formula A）
+
+| 特征 | 条件 | 权重 |
+|------|------|------|
+| F1v OtherDelta | other_delta > 0.05 | +3 |
+| F1 OtherDelta | other_delta > 0.02 | +2 |
+| F2 OtherDelta | other_delta > 0.01 | +1 |
+| F3 Oscillating | path_eff≤0.8, noise>1.5, flips>1 | +2 |
+| F4 CheapEntry | entry_price < 0.20 | +1 |
+| F5 CheapEntry | entry_price < 0.25（elif）| +1 |
+| F6 RangeExpansion | range_expansion < 0.5 | +2 |
+| F7 BTCExtreme | BTC 与 PM 方向背离 | +1 |
+| **F0 Veto** | range_expansion ≥ 2.0（真突破）| 否决 |
 
 ---
 
 ## 依赖库
 
-| 库 | 版本 | 用途 |
-|----|------|------|
-| `github.com/xiangxn/go-polymarket-sdk` | v0.6.20 | Polymarket REST/WS 客户端 |
-| `github.com/gorilla/websocket` | v1.5.3 | Binance WebSocket 连接 |
-| `github.com/tidwall/gjson` | v1.18.0 | JSON 解析 (SDK 依赖) |
+| 库 | 用途 |
+|----|------|
+| `github.com/xiangxn/go-polymarket-sdk` | Polymarket REST/WS 客户端 |
+| `github.com/gorilla/websocket` | Binance WebSocket 连接 |
+| `github.com/tidwall/gjson` | JSON 解析（SDK 依赖）|
 
 ### 本地开发 replace 指令
 
@@ -116,28 +145,134 @@ replace (
 
 ---
 
-## 代码规范
+## Go 代码规范与最佳实践
 
-### Go 代码风格
+### 包设计
+
 - **标准库优先**: 能用标准库就不引入第三方依赖
 - **零外部依赖核心**: `internal/flip/` 和 `internal/lab/` 不依赖任何外部包，可独立测试
-- **接口隔离**: SDK 集成层 (`internal/feed/`) 与核心计算层分离
+- **接口隔离**: SDK 集成层（`internal/feed/`）与核心计算层分离
+- **纯函数优先**: 特征提取（`features.go`）和评分（`scoring.go`）为纯函数，无副作用，易于测试
 
 ### 命名约定
-- 文件名: `snake_case.go`
-- 包名: 小写单词, 与目录名一致
-- 导出类型: `PascalCase`
-- 私有函数: `camelCase`
+
+- **文件名**: `snake_case.go`
+- **包名**: 小写单词，与目录名一致
+- **导出类型**: `PascalCase`（如 `FlipConfig`, `ResearchSnapshot`）
+- **导出函数/方法**: `PascalCase`（如 `NewEngine`, `ProcessSnapshot`）
+- **私有函数/方法**: `camelCase`（如 `enterConfirming`, `onConfirmed`）
+- **私有常量**: `camelCase`（如 `stateWatching`）
+- **包级文档**: 每个包首行写 `// Package xxx implements...` 描述包职责
+
+### 结构体与配置
+
+- 配置使用专用 struct + `DefaultConfig()` 工厂函数返回默认值
+- 所有可调参数集中在 config struct 中，通过注释标注出处（如 `§2.1`, `Formula A`）
+- 字段对齐用 tab 对齐到列，提高可读性
+- 对外暴露的 struct 字段加 JSON tag
+
+```go
+type FlipConfig struct {
+    TriggerThreshold float64 // PM price > this triggers detection (0.7)
+    MinPreSnaps      int     // Minimum snapshots before crossing (5)
+    // ...
+}
+
+func DefaultConfig() FlipConfig {
+    return FlipConfig{
+        TriggerThreshold: 0.7,
+        MinPreSnaps:      5,
+    }
+}
+```
+
+### 状态机
+
+- 用 `type xxxState int` + `const` iota 定义状态枚举
+- 每个状态用 `switch e.state { case stateXxx: ... }` 分发
+- 状态命名: `state` 前缀 + 形容词（`stateWatching`, `stateConfirming`, `stateDone`）
 
 ### 并发安全
-- `BinanceAdapter`: `sync.Mutex` 保护连接, `sync.RWMutex` 保护数据, `atomic.Bool` 保护启动状态, `sync.Mutex` 保护成交量
-- `HistRangeTracker`: `sync.RWMutex` 保护
-- `FlipRecorder`: `sync.Mutex` 保护文件写入
+
+- **原则**: 只在必要的边界加锁，避免过度同步
+- `sync.Mutex` 保护写操作（文件写入、连接切换）
+- `sync.RWMutex` 保护读多写少的数据
+- `atomic.Bool` / `atomic.Int64` 用于简单标志位
+- Dashboard getter 与主循环 goroutine 之间通过注释说明内存可见性假设
+- Context 用于优雅关闭：`signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)`
+
+```go
+type Writer struct {
+    mu         sync.Mutex
+    dir        string
+    file       *os.File
+    buf        *bufio.Writer
+    currentDay string
+}
+
+func (w *Writer) Write(event *Event) error {
+    w.mu.Lock()
+    defer w.mu.Unlock()
+    // ...
+}
+```
+
+### 错误处理
+
+- 函数返回 `(result, error)`，不 panic
+- 用 `fmt.Errorf("context: %w", err)` 包装错误，保留调用链
+- 初始化阶段无法继续的错误用 `log.Fatalf`，运行中错误用 `log.Printf` + continue
+- 对异步操作（goroutine + channel）设超时或 select on ctx.Done()
 
 ### 日志规范
+
 - `log.Printf("[ComponentName] message")` — 统一前缀格式
 - 关键状态用 emoji: ⚠️🔒🟢🔴🟡🔥🎯
 - 禁止 `fmt.Println` 用于运行日志
+- 日志级别用前缀区分：`[Flip]`, `[Cycle]`, `[Event]`
+
+### I/O 规范
+
+- 文件写入用 `bufio.Writer` 包装，减少系统调用
+- JSONL 格式：每行一个 JSON object，适合流式处理
+- 文件追加模式（`O_APPEND`）支持重启不丢数据
+- `defer Flush() + Close()` 确保数据落盘
+
+### 测试规范
+
+- 测试文件命名：`*_test.go`
+- 纯函数用 table-driven test（多组输入/输出）
+- 状态机测试模拟完整的 Snapshot 序列
+- 每个测试函数覆盖一个具体场景，命名：`Test<Component>_<Scenario>`
+
+```go
+func TestPathEfficiency_Trending(t *testing.T) { ... }
+func TestPathEfficiency_Oscillating(t *testing.T) { ... }
+func TestEngine_CrossingWithConfirm(t *testing.T) { ... }
+```
+
+### 方法接收者
+
+- 需要修改接收者的方法用指针接收者 `(e *Engine)`
+- 纯读取且接收者较小（< 64 bytes）也用指针接收者保持一致性
+- 返回拷贝的方法用值接收者（如 `(e *Engine) Config() FlipConfig`）
+
+### import 分组
+
+```go
+import (
+    // 标准库
+    "fmt"
+    "log"
+    "time"
+
+    // 第三方库
+    "github.com/tidwall/gjson"
+
+    // 项目内部
+    "github.com/necklace/flip-signal/internal/flip"
+)
+```
 
 ---
 
@@ -180,13 +315,17 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
 
 6. **5秒采样**: 与 Polymarket CLOC 盘口更新频率匹配，减少噪声。
 
+7. **first_crossing_only**: 每个周期最多产出一个信号，先检查 YES 再检查 NO，与 Python 回测逻辑完全一致。
+
+8. **纸面交易先于实盘**: 当前所有信号输出为 paper trading，不执行真实订单。
+
 ---
 
 ## 环境变量
 
 | 变量 | 说明 | 必填 |
 |------|------|------|
-| `POLYMARKET_OWNER_KEY` | 钱包私钥 (hex) | 仅交易模式 |
+| `POLYMARKET_OWNER_KEY` | 钱包私钥（hex）| 仅交易模式 |
 | `POLYMARKET_CLOB_KEY` | CLOB API Key | 仅交易模式 |
 | `POLYMARKET_CLOB_SECRET` | CLOB API Secret | 仅交易模式 |
 | `POLYMARKET_CLOB_PASSPHRASE` | CLOB API Passphrase | 仅交易模式 |
