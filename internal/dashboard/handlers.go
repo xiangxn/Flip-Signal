@@ -79,6 +79,7 @@ type histRangeResponse struct {
 }
 
 type configResponse struct {
+	AllowRetryCrossings   bool    `json:"allow_retry_crossings"`
 	TriggerThreshold      float64 `json:"trigger_threshold"`
 	MinPreSnaps           int     `json:"min_pre_snaps"`
 	MaxRemainingSec       int     `json:"max_remaining_sec"`
@@ -226,6 +227,7 @@ func (s *State) handleHistRange(w http.ResponseWriter, r *http.Request) {
 func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Engine.Config()
 	writeJSON(w, http.StatusOK, configResponse{
+		AllowRetryCrossings:   cfg.AllowRetryCrossings,
 		TriggerThreshold:      cfg.TriggerThreshold,
 		MinPreSnaps:           cfg.MinPreSnaps,
 		MaxRemainingSec:       cfg.MaxRemainingSec,

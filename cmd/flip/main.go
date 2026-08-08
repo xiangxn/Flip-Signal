@@ -217,8 +217,8 @@ func main() {
 	if cfg.Runtime.LabOutputDir != "" {
 		log.Printf(" Lab data: %s (events JSONL)", cfg.Runtime.LabOutputDir)
 	}
-	log.Printf(" Config: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d",
-		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
+	log.Printf(" Config: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d multi_cross=%v",
+		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.ScoreEntry, flipCfg.ScoreAdd, flipCfg.AllowRetryCrossings)
 	log.Println(" Sources: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
 	log.Println("========================================")
 

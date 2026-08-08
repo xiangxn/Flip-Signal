@@ -761,8 +761,8 @@ func TestEngine_ConfirmTickAlreadyInBuffer(t *testing.T) {
 	eng.ProcessSnapshot(makeTestSnap(0.75, 0.30, 50040, openPrice, 235), 1)
 
 	// Snap 5: both YES confirm (unfavorable → fail) AND NO>0.7 crosses
-	// YES confirm: NO=0.25 → other_delta=-0.05 → fail → fallback
-	// NO cross: NO=0.75 → noFirstCrossIdx=5
+	// YES confirm: NO=0.25 → other_delta=-0.05 → fail → afterFailedConfirm
+	// NO is above threshold → findRecentCrossing("no") → enterConfirming on NO
 	eng.ProcessSnapshot(makeTestSnap(0.78, 0.75, 50040, openPrice, 230), 1)
 	// At this point: YES failed, fallback tried enterConfirming(5, "no")
 	// confIdx = 5 + 1 = 6, len(buffer)=6 → confIdx == len(buffer), NOT <
