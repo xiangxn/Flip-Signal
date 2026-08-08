@@ -23,6 +23,7 @@ func (s *State) ListenAndServe(addr string) {
 	mux.HandleFunc("/api/snapshots", s.handleSnapshots)
 	mux.HandleFunc("/api/histrange", s.handleHistRange)
 	mux.HandleFunc("/api/config", s.handleConfig)
+	mux.HandleFunc("/api/trader", s.handleTrader)
 
 	server := &http.Server{
 		Addr:         addr,

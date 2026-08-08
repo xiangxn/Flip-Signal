@@ -23,8 +23,9 @@ type State struct {
 	Trader    *trading.Trader // 可选：实盘交易执行器
 
 	// Static config
-	Symbol string
-	Mode   string // "paper" or "live"
+	Symbol     string
+	Mode       string // "paper" or "live"
+	TradingCfg trading.TradingConfig
 }
 
 // New creates a new State holding references to the running components.
@@ -37,15 +38,17 @@ func New(
 	trader *trading.Trader,
 	symbol string,
 	mode string,
+	tradingCfg trading.TradingConfig,
 ) *State {
 	return &State{
-		Collector: collector,
-		Engine:    engine,
-		HistRange: histRange,
-		Recorder:  recorder,
-		Binance:   binance,
-		Trader:    trader,
-		Symbol:    symbol,
-		Mode:      mode,
+		Collector:  collector,
+		Engine:     engine,
+		HistRange:  histRange,
+		Recorder:   recorder,
+		Binance:    binance,
+		Trader:     trader,
+		Symbol:     symbol,
+		Mode:       mode,
+		TradingCfg: tradingCfg,
 	}
 }

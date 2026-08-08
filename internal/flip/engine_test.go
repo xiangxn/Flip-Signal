@@ -410,8 +410,9 @@ func TestEngine_CrossingWithConfirm(t *testing.T) {
 	if sig.Score < 5 {
 		t.Errorf("score expected >=5, got %d", sig.Score)
 	}
-	if sig.Shares != 1 {
-		t.Errorf("expected 1 share, got %d", sig.Shares)
+	// Shares 由调用方根据 stake_per_signal 计算，Engine 不再设置（设为 0）
+	if sig.Shares != 0 {
+		t.Errorf("expected 0 shares (caller sets it), got %.0f", sig.Shares)
 	}
 }
 

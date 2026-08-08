@@ -8,6 +8,7 @@ import (
 
 	"github.com/necklace/flip-signal/internal/flip"
 	"github.com/necklace/flip-signal/internal/lab"
+	"github.com/necklace/flip-signal/internal/trading"
 )
 
 // ── Response types ──
@@ -39,6 +40,17 @@ type stateResponse struct {
 	PendingCount  int          `json:"pending_count"`
 	WinRate       float64      `json:"win_rate"`
 	CumulativePnl float64      `json:"cumulative_pnl"`
+
+	// 交易执行状态（纸面/实盘统一来源，从 FlipRecorder 的 ExecStatus 汇总）
+	FailedCount int `json:"failed_count"` // ExecStatus=="failed" 的信号数
+
+	// Trader 状态（实盘运行期信息）
+	TraderEnabled      bool    `json:"trader_enabled"`
+	TraderDailyPnl     float64 `json:"trader_daily_pnl"`
+	TraderDailySignals int     `json:"trader_daily_signals"`
+	TraderHasPosition  bool    `json:"trader_has_position"`
+	TraderTotalTrades  int     `json:"trader_total_trades"`  // 已结算 Position 总数
+	TraderCumPnl       float64 `json:"trader_cumulative_pnl"` // 全部 Position PnL 之和
 
 	// 多穿越重试
 	AllowRetryCrossings bool         `json:"allow_retry_crossings"`
@@ -157,6 +169,32 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		RetryCount:          s.Engine.RetryCount(),
 	}
 
+	// 统计 failed 信号数（已结算信号中 ExecStatus=="failed"）
+	failedCount := 0
+	for _, sig := range s.Recorder.ResolvedSignals() {
+		if sig.ExecStatus == "failed" {
+			failedCount++
+		}
+	}
+	resp.FailedCount = failedCount
+
+	// ── Trader 执行状态（纸面/实盘统一）──
+	if s.Trader != nil {
+		ts := s.Trader.Status()
+		resp.TraderEnabled = ts.Enabled
+		resp.TraderDailyPnl = ts.DailyPnl
+		resp.TraderDailySignals = ts.DailySignals
+		resp.TraderHasPosition = ts.Position != nil
+
+		var traderCumPnl float64
+		positions := s.Trader.Positions()
+		for _, p := range positions {
+			traderCumPnl += p.PnL
+		}
+		resp.TraderCumPnl = traderCumPnl
+		resp.TraderTotalTrades = len(positions)
+	}
+
 	// 当前 Confirming 中的穿越特征
 	if engLabel == "Confirming" {
 		t0 := s.Engine.T0Features()
@@ -272,6 +310,44 @@ func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── Helpers ──
+
+type traderResponse struct {
+	Enabled       bool                 `json:"enabled"`
+	DailyPnl      float64              `json:"daily_pnl"`
+	DailySignals  int                  `json:"daily_signals"`
+	DailyLimitHit bool                 `json:"daily_limit_hit"`
+	CooldownUntil string               `json:"cooldown_until"`
+	HasPosition   bool                 `json:"has_position"`
+	CumulativePnl float64              `json:"cumulative_pnl"`
+	TotalTrades   int                  `json:"total_trades"`
+	Positions     []trading.Position   `json:"positions"`
+	RecentOrders  []trading.OrderRecord `json:"recent_orders"`
+}
+
+func (s *State) handleTrader(w http.ResponseWriter, r *http.Request) {
+	if s.Trader == nil {
+		writeJSON(w, http.StatusOK, map[string]string{"status": "no trader"})
+		return
+	}
+	ts := s.Trader.Status()
+	positions := s.Trader.Positions()
+	var cumPnl float64
+	for _, p := range positions {
+		cumPnl += p.PnL
+	}
+	writeJSON(w, http.StatusOK, traderResponse{
+		Enabled:       ts.Enabled,
+		DailyPnl:      ts.DailyPnl,
+		DailySignals:  ts.DailySignals,
+		DailyLimitHit: ts.DailyLimitHit,
+		CooldownUntil: ts.CooldownUntil.Format(time.RFC3339),
+		HasPosition:   ts.Position != nil,
+		CumulativePnl: cumPnl,
+		TotalTrades:   len(positions),
+		Positions:     positions,
+		RecentOrders:  s.Trader.Orders(20),
+	})
+}
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")

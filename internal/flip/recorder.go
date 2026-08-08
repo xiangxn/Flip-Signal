@@ -55,8 +55,29 @@ func (r *FlipRecorder) RecordSignal(sig *FlipSignal) error {
 	return nil
 }
 
+// UpdateExecution 回填信号的执行结果（Trader 调用）。
+//
+//	execStatus: "filled" 或 "failed"
+//	filledShares: 实际成交股数（failed 时为 0）
+//	avgFillPrice: 实际成交均价（failed 时为 0）
+func (r *FlipRecorder) UpdateExecution(conditionID, execStatus string, filledShares, avgFillPrice float64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	sig, ok := r.pending[conditionID]
+	if !ok {
+		return
+	}
+	sig.ExecStatus = execStatus
+	sig.FilledShares = filledShares
+	sig.AvgFillPrice = avgFillPrice
+}
+
 // Resolve 计算待结算信号的 won/pnl 并写入结算记录。
 // outcome 遵循 lab.Event.Outcome: 0=Up, 1=Down。
+//
+// 胜负判定与执行状态无关（信号方向正确即 Won=true）。
+// PnL 仅在 execStatus=="filled" 时计算，failed 信号 PnL=0。
 func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -67,7 +88,7 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	}
 	delete(r.pending, conditionID)
 
-	// 胜负判定：
+	// 胜负判定（与执行状态无关，反映信号方向准确度）：
 	//   side=="yes" → YES>0.7, 买 NO（赌 DOWN）→ outcome==1（Down）时赢
 	//   side=="no"  → NO>0.7, 买 YES（赌 UP）→ outcome==0（Up）时赢
 	var won bool
@@ -77,12 +98,17 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 		won = outcome == 0 // UP wins
 	}
 
+	// PnL 计算：仅 filled 时按真实成交价/量计算
 	var pnl float64
-	if won {
-		pnl = (1.0 - sig.EntryPrice) * float64(sig.Shares)
-	} else {
-		pnl = (0.0 - sig.EntryPrice) * float64(sig.Shares)
+	if sig.ExecStatus == "filled" {
+		if won {
+			pnl = sig.FilledShares * (1.0 - sig.AvgFillPrice)
+		} else {
+			pnl = -sig.FilledShares * sig.AvgFillPrice
+		}
 	}
+	// failed / 未执行 → pnl = 0
+
 	pnlRounded := round4(pnl)
 
 	// 回写到信号对象，供 Dashboard 统计
@@ -93,13 +119,16 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	r.resolved = append(r.resolved, sig)
 
 	rec := resolutionRecord{
-		Type:        "resolution",
-		ConditionID: conditionID,
-		Side:        sig.Side,
-		EntryPrice:  sig.EntryPrice,
-		Shares:      sig.Shares,
-		Won:         won,
-		PnL:         pnlRounded,
+		Type:         "resolution",
+		ConditionID:  conditionID,
+		Side:         sig.Side,
+		EntryPrice:   sig.EntryPrice,
+		Shares:       sig.Shares,
+		ExecStatus:   sig.ExecStatus,
+		FilledShares: sig.FilledShares,
+		AvgFillPrice: sig.AvgFillPrice,
+		Won:          won,
+		PnL:          pnlRounded,
 	}
 
 	data, err := json.Marshal(rec)
@@ -129,13 +158,16 @@ func (r *FlipRecorder) Close() error {
 
 // resolutionRecord 是市场结算时追加的 JSON 行。
 type resolutionRecord struct {
-	Type        string  `json:"type"`
-	ConditionID string  `json:"condition_id"`
-	Side        string  `json:"side"`
-	EntryPrice  float64 `json:"entry_price"`
-	Shares      int     `json:"shares"`
-	Won         bool    `json:"won"`
-	PnL         float64 `json:"pnl"`
+	Type         string  `json:"type"`
+	ConditionID  string  `json:"condition_id"`
+	Side         string  `json:"side"`
+	EntryPrice   float64 `json:"entry_price"`
+	Shares       float64 `json:"shares"`
+	ExecStatus   string  `json:"exec_status"`
+	FilledShares float64 `json:"filled_shares"`
+	AvgFillPrice float64 `json:"avg_fill_price"`
+	Won          bool    `json:"won"`
+	PnL          float64 `json:"pnl"`
 }
 
 func round4(v float64) float64 {

@@ -240,7 +240,7 @@ func main() {
 		mode = "live"
 	}
 	if cfg.Runtime.DashboardAddr != "" {
-		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, trader, cfg.Runtime.Symbol, mode)
+		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, trader, cfg.Runtime.Symbol, mode, cfg.Trading)
 		go dash.ListenAndServe(cfg.Runtime.DashboardAddr)
 		log.Printf("[Flip] Dashboard: http://0.0.0.0%s（可通过任意网卡访问）", cfg.Runtime.DashboardAddr)
 	}
@@ -426,21 +426,29 @@ func main() {
 				// ── 翻转信号检测 ──
 				if sig := flipEngine.ProcessSnapshot(snap, generation); sig != nil {
 					sig.ConditionID = conditionID
+					// 根据 stake_per_signal 计算目标股数（纸面/实盘统一）
+					sig.Shares = trading.ComputeShares(cfg.Trading.StakePerSignal, sig.EntryPrice)
+
 					if err := flipRecorder.RecordSignal(sig); err != nil {
 						log.Printf("[Flip] 信号记录失败: %v", err)
 					}
-					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f shares=%d | "+
+					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f shares=%.0f | "+
 						"osc=%v path_eff=%.2f noise=%.1f flips=%d range_exp=%.1f btc_pos=%.2f other_d=%+.3f rem=%ds",
 						sig.Side, sig.Score, sig.EntryPrice, sig.Shares,
 						sig.IsOscillating, sig.PathEff, sig.NoiseRatio, sig.Flips,
 						sig.RangeExpansion, sig.BTCPosition, sig.OtherDelta,
 						sig.RemainingSec)
 
-					// ── 实盘执行 ──
+					// ── 交易执行（纸面/实盘统一路径）──
 					if trader != nil {
-						if err := trader.OnSignal(sig, yesTok, noTok); err != nil {
+						execInfo, err := trader.OnSignal(sig, yesTok, noTok)
+						if err != nil {
 							log.Printf("[Trading] ⚠️ 信号未执行: %v", err)
 						}
+						flipRecorder.UpdateExecution(conditionID, execInfo.Status, execInfo.FilledShares, execInfo.AvgFillPrice)
+					} else {
+						// 无 Trader：纯纸面模拟成交（成交价 = 入场价）
+						flipRecorder.UpdateExecution(conditionID, "filled", sig.Shares, sig.EntryPrice)
 					}
 				}
 

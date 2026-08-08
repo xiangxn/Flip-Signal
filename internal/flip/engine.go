@@ -464,17 +464,16 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		return nil
 	}
 
-	shares := 1
-	if score >= e.cfg.ScoreAdd {
-		shares = 2
-	}
+	// 仓位大小由调用方根据 stake_per_signal 计算，Engine 仅负责信号检测。
+	// ScoreAdd 阈值不再控制仓位翻倍（由调用方自行决定是否使用）。
 
 	return &FlipSignal{
 		Time:           time.Now().UTC(),
 		Side:           e.crossSide,
 		Score:          score,
 		EntryPrice:     entryPrice,
-		Shares:         shares,
+		Shares:         0, // 由调用方根据 stake_per_signal 计算后填充
+		ExecStatus:     "pending",
 		RemainingSec:   e.crossSnap.RemainingSec,
 		PathEff:        e.pathEff,
 		NoiseRatio:     e.noiseRatio,

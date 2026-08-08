@@ -24,7 +24,10 @@ func TestFlipRecorder_RecordAndResolve_Win(t *testing.T) {
 		Side:         "yes",
 		Score:        6,
 		EntryPrice:   0.15,
-		Shares:       1,
+		Shares:       1.0,
+		ExecStatus:   "filled",
+		FilledShares: 1.0,
+		AvgFillPrice: 0.15,
 		RemainingSec: 225,
 		PathEff:      0.75,
 		NoiseRatio:   1.2,
@@ -92,7 +95,10 @@ func TestFlipRecorder_RecordAndResolve_Loss(t *testing.T) {
 		Side:         "no",
 		Score:        7,
 		EntryPrice:   0.22,
-		Shares:       2,
+		Shares:       2.0,
+		ExecStatus:   "filled",
+		FilledShares: 2.0,
+		AvgFillPrice: 0.22,
 		RemainingSec: 200,
 	}
 
@@ -160,11 +166,11 @@ func TestFlipRecorder_SignalStats(t *testing.T) {
 
 	// Record and resolve 2 won, 1 lost
 	sigs := []struct {
-		cid    string
-		side   string
-		price  float64
+		cid     string
+		side    string
+		price   float64
 		outcome int
-		won    bool
+		won     bool
 	}{
 		{"0x01", "yes", 0.15, 1, true},  // YES side, Down wins
 		{"0x02", "no", 0.20, 0, true},   // NO side, Up wins
@@ -173,10 +179,13 @@ func TestFlipRecorder_SignalStats(t *testing.T) {
 
 	for _, s := range sigs {
 		sig := &FlipSignal{
-			ConditionID: s.cid,
-			Side:        s.side,
-			EntryPrice:  s.price,
-			Shares:      1,
+			ConditionID:  s.cid,
+			Side:         s.side,
+			EntryPrice:   s.price,
+			Shares:       1.0,
+			ExecStatus:   "filled",
+			FilledShares: 1.0,
+			AvgFillPrice: s.price,
 		}
 		r.RecordSignal(sig)
 		r.Resolve(s.cid, s.outcome)
@@ -201,5 +210,66 @@ func TestFlipRecorder_SignalStats(t *testing.T) {
 	// PnL: (1-0.15) + (1-0.20) + (0-0.25) = 0.85 + 0.80 - 0.25 = 1.40
 	if cumPnl < 1.39 || cumPnl > 1.41 {
 		t.Errorf("cumPnl: expected ~1.40, got %.4f", cumPnl)
+	}
+}
+
+// Test failed signals: count in won/lost but PnL=0
+func TestFlipRecorder_FailedSignal(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "signals.jsonl")
+
+	r, err := NewFlipRecorder(path)
+	if err != nil {
+		t.Fatalf("NewFlipRecorder: %v", err)
+	}
+	defer r.Close()
+
+	sig := &FlipSignal{
+		ConditionID:  "0xfail",
+		Side:         "yes",
+		EntryPrice:   0.15,
+		Shares:       1.0,
+		ExecStatus:   "failed",
+		FilledShares: 0,
+		AvgFillPrice: 0,
+	}
+	r.RecordSignal(sig)
+	// Outcome=1 (Down) → would have won if executed
+	r.Resolve("0xfail", 1)
+
+	_, won, lost, _, _, cumPnl := r.SignalStats()
+	if won != 1 {
+		t.Errorf("failed signal should count as won (direction correct), got won=%d", won)
+	}
+	if lost != 0 {
+		t.Errorf("failed signal should not count as lost, got lost=%d", lost)
+	}
+	if cumPnl != 0 {
+		t.Errorf("failed signal PnL should be 0, got %.4f", cumPnl)
+	}
+
+	// Verify resolution record in file
+	sig2 := &FlipSignal{
+		ConditionID:  "0xfail2",
+		Side:         "no",
+		EntryPrice:   0.20,
+		Shares:       1.0,
+		ExecStatus:   "failed",
+		FilledShares: 0,
+		AvgFillPrice: 0,
+	}
+	r.RecordSignal(sig2)
+	// Outcome=1 (Down) → NO side would lose
+	r.Resolve("0xfail2", 1)
+
+	_, won2, lost2, _, _, cumPnl2 := r.SignalStats()
+	if won2 != 1 {
+		t.Errorf("total won should be 1, got %d", won2)
+	}
+	if lost2 != 1 {
+		t.Errorf("total lost should be 1 (one won failed + one lost failed), got %d", lost2)
+	}
+	if cumPnl2 != 0 {
+		t.Errorf("all failed signals PnL should be 0, got %.4f", cumPnl2)
 	}
 }

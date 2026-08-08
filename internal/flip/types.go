@@ -121,8 +121,13 @@ type FlipSignal struct {
 	Side         string    `json:"side"` // "yes" or "no"
 	Score        int       `json:"score"`
 	EntryPrice   float64   `json:"entry_price"`
-	Shares       int       `json:"shares"`
+	Shares       float64   `json:"shares"`       // 目标股数 = stake / entry_price（Engine 不设置，由调用方计算）
 	RemainingSec int       `json:"remaining_sec"`
+
+	// 执行结果（Trader 回填）
+	ExecStatus   string  `json:"exec_status"`    // "pending" | "filled" | "failed"
+	FilledShares float64 `json:"filled_shares"`  // 实际成交股数（failed 时为 0）
+	AvgFillPrice float64 `json:"avg_fill_price"` // 实际成交均价（纸面 = entryPrice，实盘 = CLOB 真实价）
 
 	// 特征详情（分析/调试用）
 	PathEff        float64 `json:"path_eff"`

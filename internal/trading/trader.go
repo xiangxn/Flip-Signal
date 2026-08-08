@@ -135,8 +135,11 @@ func (t *Trader) NewCycle(conditionID string, _ /*yesTokenID*/, _ /*noTokenID*/ 
 
 // OnSignal 在信号发射点调用，执行风控→FAK 下单→记录。
 //
+// 返回 ExecInfo 供调用方回填 FlipRecorder（纸面/实盘路径统一）。
 // 锁仅在状态读写时持有，SDK 网络调用在锁外执行。
-func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) error {
+func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (ExecInfo, error) {
+	failInfo := ExecInfo{Status: "failed"}
+
 	// ── 阶段 1：锁内预检查 ──
 	t.mu.Lock()
 	verdict := CheckRisk(t.exec, t.cfg, t.timeNow())
@@ -144,21 +147,21 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		reason := verdict.Reason
 		t.exec.LastSkipReason = reason
 		t.mu.Unlock()
-		return fmt.Errorf("风控拒绝: %s", reason)
+		return failInfo, fmt.Errorf("风控拒绝: %s", reason)
 	}
 
 	tokenID, tokenSide, err := SignalToOrder(sig, yesTokenID, noTokenID)
 	if err != nil {
 		t.exec.LastSkipReason = err.Error()
 		t.mu.Unlock()
-		return fmt.Errorf("信号映射失败: %w", err)
+		return failInfo, fmt.Errorf("信号映射失败: %w", err)
 	}
 
 	maxPrice := CalcMaxPrice(sig.EntryPrice, t.cfg.MaxSlippage)
 	if maxPrice <= 0 {
 		t.exec.LastSkipReason = "价格上限计算无效"
 		t.mu.Unlock()
-		return fmt.Errorf("价格上限无效: entry=%.4f slippage=%.2f", sig.EntryPrice, t.cfg.MaxSlippage)
+		return failInfo, fmt.Errorf("价格上限无效: entry=%.4f slippage=%.2f", sig.EntryPrice, t.cfg.MaxSlippage)
 	}
 
 	rec := &OrderRecord{
@@ -180,20 +183,34 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 
 	// ── 阶段 2：锁外 SDK 调用 ──
 
-	// 纸面模式：仅记录，不提交
+	// 纸面模式：模拟成交，创建 Position 走统一结算路径
 	if !liveOK || client == nil {
 		t.mu.Lock()
+		filledShares := ComputeShares(cfg.StakePerSignal, sig.EntryPrice)
 		rec.State = OrderFilled
-		rec.FilledShares = ComputeShares(cfg.StakePerSignal, sig.EntryPrice)
+		rec.FilledShares = filledShares
 		rec.AvgFillPrice = sig.EntryPrice
 		rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(rec)
+
+		// 创建纸面 Position（与实盘路径一致）
+		pos := &Position{
+			ConditionID: sig.ConditionID,
+			TokenID:     tokenID,
+			TokenSide:   tokenSide,
+			Shares:      filledShares,
+			AvgPrice:    sig.EntryPrice, // 纸面：入场价即成交价
+			CostUSDC:    filledShares * sig.EntryPrice,
+			OrderID:     "paper",
+			OpenedAt:    t.timeNow(),
+		}
+		t.exec.Position = pos
 		t.exec.DailySignals++
 		t.exec.LastSkipReason = ""
 		t.mu.Unlock()
-		log.Printf("[Trading] 📝 纸面信号记录: side=%s entry=%.4f shares=%.0f maxPrice=%.4f",
-			tokenSide, sig.EntryPrice, rec.FilledShares, maxPrice)
-		return nil
+		log.Printf("[Trading] 📝 纸面信号: side=%s entry=%.4f shares=%.0f cost=%.2f",
+			tokenSide, sig.EntryPrice, filledShares, pos.CostUSDC)
+		return ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: sig.EntryPrice}, nil
 	}
 
 	// 实盘：CreateMarketOrder
@@ -213,7 +230,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return fmt.Errorf("创建订单失败: %w", err)
+		return failInfo, fmt.Errorf("创建订单失败: %w", err)
 	}
 
 	// PostOrder
@@ -226,7 +243,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return fmt.Errorf("提交订单失败: %w, Price: %.4f, Amount: %.4f", err, *umo.Price, umo.Amount)
+		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Amount: %.4f", err, *umo.Price, umo.Amount)
 	}
 
 	orderID, success, errMsg := ParsePostOrderResp(resp)
@@ -307,8 +324,11 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 	}
 
 	t.exec.DailySignals++
-	return nil
-}
+		if orderState == OrderFilled && filledShares > 0 {
+			return ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: avgFillPrice}, nil
+		}
+		return ExecInfo{Status: "failed"}, nil
+	}
 
 // OnCycleEnd 市场结束时调用。
 //

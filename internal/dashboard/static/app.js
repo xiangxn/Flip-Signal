@@ -141,11 +141,13 @@ async function fetchState() {
     document.getElementById('stat-total').textContent = d.signal_count;
     document.getElementById('stat-won').textContent = d.won_count;
     document.getElementById('stat-lost').textContent = d.lost_count;
+    document.getElementById('stat-failed').textContent = d.failed_count ?? 0;
     document.getElementById('stat-wr').textContent = (d.win_rate * 100).toFixed(1) + '%';
     document.getElementById('stat-pending').textContent = d.pending_count;
 
+    // PnL 优先使用 Trader 累计（纸面/实盘统一），无 Trader 时用 FlipRecorder
+    const pnl = d.trader_cumulative_pnl ?? d.cumulative_pnl;
     const pnlEl = document.getElementById('stat-pnl');
-    const pnl = d.cumulative_pnl;
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(4);
     pnlEl.className = 'value ' + (pnl >= 0 ? 'val-green' : 'val-red');
 
@@ -254,7 +256,7 @@ async function fetchSignals() {
     const tb = document.getElementById('sig-body');
 
     if (!d.signals || d.signals.length === 0) {
-      tb.innerHTML = '<tr><td colspan="13" class="empty-state">No signals yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="14" class="empty-state">No signals yet</td></tr>';
       return;
     }
 
@@ -270,12 +272,16 @@ async function fetchSignals() {
         pnlCls = v >= 0 ? 'won' : 'lost';
       }
       const sideCls = s.side === 'yes' ? 'side-yes' : 'side-no';
+      let execHtml = '<span class="pending">&hellip;</span>';
+      if (s.exec_status === 'filled') execHtml = '<span class="won">&#10003;</span>';
+      else if (s.exec_status === 'failed') execHtml = '<span class="lost">&#10007;</span>';
       return `<tr>
         <td>${t}</td>
         <td class="${sideCls}">${s.side.toUpperCase()}</td>
         <td>${s.score}</td>
         <td>${s.entry_price.toFixed(3)}</td>
-        <td>${s.shares}</td>
+        <td>${(s.shares || 0).toFixed(1)}</td>
+        <td>${execHtml}</td>
         <td>${s.path_eff?.toFixed(2) || '-'}</td>
         <td>${s.noise_ratio?.toFixed(2) || '-'}</td>
         <td>${s.is_oscillating ? '✓' : '-'}</td>
