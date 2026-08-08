@@ -7,8 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xiangxn/go-polymarket-sdk/orders"
 	sdkModel "github.com/xiangxn/go-polymarket-sdk/model"
+	"github.com/xiangxn/go-polymarket-sdk/orders"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/flip"
@@ -249,7 +249,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Size: %.0f", err, uo.Price, uo.Size)
+		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Size: %.4f", err, uo.Price, uo.Size)
 	}
 
 	orderID, success, errMsg := ParsePostOrderResp(resp)
@@ -296,7 +296,8 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 // OnCycleEnd 市场结束时调用。
 //
 //   - 对账 GTC 挂单：TradeMonitor 已实时追踪成交，此处仅做最终处理
-//   - 有成交 → 创建/确认 Position；无成交 → 取消挂单
+//   - 有成交且无持仓 → 创建 Position；有成交已有持仓（processTrade 已建）→ 仅清理 PendingOrder
+//   - 无成交 → 取消挂单
 //   - 兜底：若 PendingOrder 存在但 TradeMonitor 未收到事件，用 GetOpenOrders 查询
 //   - 返回 ExecInfo 供调用方在 Resolve 前回填 FlipRecorder
 //   - 非阻塞：启动后台 goroutine 等待 WS 结算，超时后回退到模拟 outcome
@@ -304,7 +305,6 @@ func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) ExecInfo {
 	var result ExecInfo
 
 	t.mu.RLock()
-	pos := t.exec.Position
 	pending := t.exec.PendingOrder
 	client := t.client
 	t.mu.RUnlock()
@@ -314,7 +314,7 @@ func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) ExecInfo {
 		filledShares := pending.FilledShares
 		totalCost := pending.TotalCost
 
-		// 兜底：若 TradeMonitor 未收到任何事件（filledShares==0），用 GetOpenOrders 查询
+		// 兜底：若 TradeMonitor 未收到任何事件，用 GetOpenOrders 查询
 		if filledShares == 0 && pending.TradeCount == 0 && pending.Status == "" {
 			openOrders, oErr := client.GetOpenOrders(&orders.OpenOrderParams{Id: &pending.OrderID}, true, nil)
 			if oErr != nil {
@@ -329,57 +329,78 @@ func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) ExecInfo {
 			}
 		}
 
-		if filledShares > 0 && pos == nil {
-			// GTC 成交：创建持仓（均价优先用 TradeMonitor 累积的真实成交价）
-			avgFillPrice := totalCost / filledShares
-			if avgFillPrice <= 0 {
-				avgFillPrice = t.cfg.StakePerSignal / filledShares // fallback 估算
-			}
+		// 需取消：完全未成交（无 TradeMonitor 事件且 GetOpenOrders 也无成交）
+		needCancel := filledShares == 0
 
-			t.mu.Lock()
-			// 更新订单记录
-			pending.Rec.State = OrderFilled
-			pending.Rec.FilledShares = filledShares
-			pending.Rec.AvgFillPrice = avgFillPrice
-			pending.Rec.UpdatedAt = t.timeNow()
-			t.recorder.AppendOrder(pending.Rec)
-
-			newPos := &Position{
-				ConditionID: conditionID,
-				TokenID:     pending.TokenID,
-				TokenSide:   pending.TokenSide,
-				Shares:      filledShares,
-				AvgPrice:    avgFillPrice,
-				CostUSDC:    filledShares * avgFillPrice,
-				OrderID:     pending.OrderID,
-				OpenedAt:    t.timeNow(),
-			}
-			t.exec.Position = newPos
-			t.exec.PendingOrder = nil
-			t.exec.LastSkipReason = ""
-			t.mu.Unlock()
-			log.Printf("[Trading] 🎯 GTC 窗口内成交: side=%s shares=%.1f avgPrice=%.4f trades=%d orderID=%s",
-				pending.TokenSide, filledShares, avgFillPrice, pending.TradeCount, pending.OrderID)
-			result = ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: avgFillPrice}
-		} else {
-			// GTC 未成交：取消挂单
+		// 先做网络调用（取消订单），锁外执行
+		if needCancel {
 			_, cErr := client.CancelOrder(&orders.OrderPayload{OrderID: pending.OrderID})
 			if cErr != nil {
 				log.Printf("[Trading] ⚠️ 取消 GTC 订单失败: %v (orderID=%s)", cErr, pending.OrderID)
 			} else {
 				log.Printf("[Trading] 🧹 已取消未成交 GTC 订单: %s", pending.OrderID)
 			}
-			t.mu.Lock()
-			t.exec.PendingOrder = nil
+		}
+
+		// ── 锁内状态更新 ──
+		t.mu.Lock()
+
+		// 重新读取持仓（processTrade 可能已在事件循环中创建了 Position）
+		pos := t.exec.Position
+
+		if filledShares > 0 {
+			// 计算均价（优先用 TradeMonitor 累积的真实成交价）
+			avgFillPrice := totalCost / filledShares
+			if avgFillPrice <= 0 {
+				avgFillPrice = t.cfg.StakePerSignal / filledShares // fallback 估算
+			}
+
+			if pos == nil {
+				// 创建持仓（正常路径：TradeMonitor 未建仓或未收到事件）
+				pending.Rec.State = OrderFilled
+				pending.Rec.FilledShares = filledShares
+				pending.Rec.AvgFillPrice = avgFillPrice
+				pending.Rec.UpdatedAt = t.timeNow()
+				t.recorder.AppendOrder(pending.Rec)
+
+				newPos := &Position{
+					ConditionID: pending.ConditionID,
+					TokenID:     pending.TokenID,
+					TokenSide:   pending.TokenSide,
+					Shares:      filledShares,
+					AvgPrice:    avgFillPrice,
+					CostUSDC:    filledShares * avgFillPrice,
+					OrderID:     pending.OrderID,
+					OpenedAt:    t.timeNow(),
+				}
+				t.exec.Position = newPos
+				log.Printf("[Trading] 🎯 GTC 周期末建仓: side=%s shares=%.1f avgPrice=%.4f trades=%d orderID=%s",
+					pending.TokenSide, filledShares, avgFillPrice, pending.TradeCount, pending.OrderID)
+			} else {
+				// Position 已由 processTrade 创建，仅更新订单记录
+				pending.Rec.State = OrderFilled
+				pending.Rec.FilledShares = filledShares
+				pending.Rec.AvgFillPrice = avgFillPrice
+				pending.Rec.UpdatedAt = t.timeNow()
+				t.recorder.AppendOrder(pending.Rec)
+				log.Printf("[Trading] ✅ GTC 周期末确认: side=%s shares=%.1f avgPrice=%.4f（TradeMonitor 已建仓）",
+					pending.TokenSide, filledShares, avgFillPrice)
+			}
+			t.exec.LastSkipReason = ""
+			result = ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: avgFillPrice}
+		} else {
+			// 未成交：仅清理 PendingOrder
 			t.exec.LastSkipReason = fmt.Sprintf("GTC 订单窗口内未成交，已取消: %s", pending.OrderID)
-			t.mu.Unlock()
 			result = ExecInfo{Status: "failed"}
 		}
+
+		t.exec.PendingOrder = nil
+		t.mu.Unlock()
 	}
 
-	// 重新读取持仓（GTC 对账可能已创建新持仓，或 TradeMonitor 事件已创建）
+	// 重新读取持仓（GTC 对账可能已创建新持仓）
 	t.mu.RLock()
-	pos = t.exec.Position
+	pos := t.exec.Position
 	t.mu.RUnlock()
 
 	if pos == nil || pos.ConditionID != conditionID {
