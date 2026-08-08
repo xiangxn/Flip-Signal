@@ -56,6 +56,14 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Graceful shutdown: runs on any return (including all ctx.Done paths),
+	// giving in-flight operations time to finish before resource cleanup.
+	defer func() {
+		log.Println("[Flip] Gracefully shutting down — waiting for in-flight operations (10s)...")
+		time.Sleep(10 * time.Second)
+		log.Println("[Flip] Shutdown complete.")
+	}()
+
 	// ================================================================
 	// 配置加载: 代码默认值 ← 文件配置 ← 环境变量 (优先级从低到高)
 	// ================================================================
@@ -222,11 +230,6 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[Flip] Shutting down — flushing buffers...")
-			// Give in-flight operations (HTTP fetches, WS writes) time to finish.
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-			defer shutdownCancel()
-			<-shutdownCtx.Done()
 			return
 		default:
 		}
