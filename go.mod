@@ -4,6 +4,7 @@ go 1.25.7
 
 require (
 	github.com/gorilla/websocket v1.5.3
+	github.com/spf13/viper v1.21.0
 	github.com/tidwall/gjson v1.18.0
 	github.com/xiangxn/go-polymarket-sdk v0.6.21
 )
@@ -63,7 +64,6 @@ require (
 	github.com/spf13/afero v1.15.0 // indirect
 	github.com/spf13/cast v1.10.0 // indirect
 	github.com/spf13/pflag v1.0.10 // indirect
-	github.com/spf13/viper v1.21.0 // indirect
 	github.com/subosito/gotenv v1.6.0 // indirect
 	github.com/supranational/blst v0.3.16 // indirect
 	github.com/syndtr/goleveldb v1.0.1-0.20210819022825-2ae1ddf74ef7 // indirect
