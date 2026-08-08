@@ -14,10 +14,12 @@
 ```
 FlipSignal/
 ├── cmd/
-│   ├── flip/main.go                     # Flip Signal 检测引擎 + Dashboard（主入口）
+│   ├── flip/main.go                     # Flip Signal 交易引擎主入口（组件初始化 + 市场循环）
 │   ├── lab/main.go                      # 实验室数据采集（ResearchSnapshot）
 │   └── test_resolve/main.go             # 结算测试工具
 ├── internal/
+│   ├── config/
+│   │   └── config.go                    # AppConfig + Load() + 敏感字段解密
 │   ├── lab/
 │   │   ├── types.go                     # ResearchSnapshot + Event 结构体
 │   │   ├── collector.go                 # 5秒生成 ResearchSnapshot
