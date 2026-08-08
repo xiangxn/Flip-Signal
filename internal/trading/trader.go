@@ -377,7 +377,12 @@ func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) ExecInfo {
 				log.Printf("[Trading] 🎯 GTC 周期末建仓: side=%s shares=%.1f avgPrice=%.4f trades=%d orderID=%s",
 					pending.TokenSide, filledShares, avgFillPrice, pending.TradeCount, pending.OrderID)
 			} else {
-				// Position 已由 processTrade 创建，仅更新订单记录
+				// Position 已由 processTrade 创建，同步更新以对齐兜底数据
+				if t.exec.Position != nil {
+					t.exec.Position.Shares = filledShares
+					t.exec.Position.AvgPrice = avgFillPrice
+					t.exec.Position.CostUSDC = filledShares * avgFillPrice
+				}
 				pending.Rec.State = OrderFilled
 				pending.Rec.FilledShares = filledShares
 				pending.Rec.AvgFillPrice = avgFillPrice

@@ -280,7 +280,7 @@ async function fetchSignals() {
         <td class="${sideCls}">${s.side.toUpperCase()}</td>
         <td>${s.score}</td>
         <td>${s.entry_price.toFixed(3)}</td>
-        <td>${(s.shares || 0).toFixed(1)}</td>
+        <td>${(s.shares || 0).toFixed(2)}</td>
         <td>${execHtml}</td>
         <td>${s.path_eff?.toFixed(2) || '-'}</td>
         <td>${s.noise_ratio?.toFixed(2) || '-'}</td>

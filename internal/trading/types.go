@@ -105,7 +105,7 @@ type Position struct {
 
 // ExecInfo 信号执行结果，由 OnSignal 返回供调用方回填 FlipRecorder。
 type ExecInfo struct {
-	Status       string  // "filled" 或 "failed"
+	Status       string  // "pending" | "filled" | "failed"
 	FilledShares float64 // 实际成交股数
 	AvgFillPrice float64 // 实际成交均价
 }
