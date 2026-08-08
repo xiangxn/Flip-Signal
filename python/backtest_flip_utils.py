@@ -201,33 +201,22 @@ class FlipSignal:
     other_delta: float
 
 
-def check_signal(event: dict, side: str,
-                 cfg: FlipBacktestConfig) -> FlipSignal | None:
-    """对给定 side (yes/no) 检测 >0.7 穿越并评估信号。
+def _score_crossing(event: dict, side: str, cross_idx: int,
+                    cfg: FlipBacktestConfig) -> FlipSignal | None:
+    """对指定穿越点评分，返回 FlipSignal 或 None（评分不足/被否决）。
 
-    这是核心信号检测函数，对应 §3.2 check_signal。
+    从 check_signal 中抽取的纯评分逻辑 — 给定穿越点 cross_idx，
+    提取特征、应用硬过滤、计算复合评分、判定输赢。
     """
     this_key = "yes_price" if side == "yes" else "no_price"
     other_key = "no_price" if side == "yes" else "yes_price"
     snaps = event["snapshots"]
-
-    # Step 1: 找第一次 >0.7 穿越 (同时要求窗口已进入有效期: remaining_sec < max_remaining_sec)
-    cross_idx = None
-    for i, s in enumerate(snaps):
-        if s[this_key] > cfg.trigger_threshold and s["remaining_sec"] < cfg.max_remaining_sec:
-            cross_idx = i
-            break
-
-    if cross_idx is None or cross_idx < cfg.min_pre_snaps:
-        return None
-
     cross_snap = snaps[cross_idx]
     pre_prices = extract_pre_prices(snaps, cross_idx)
     open_price = event["open_price"]
 
     # ── T=0 实时特征 ──
 
-    # 一次遍历算出 pre_high/pre_low/pre_range (避免 compute_path_efficiency 重复 max/min)
     net_move = abs(cross_snap["price"] - open_price)
     pre_high = max(pre_prices)
     pre_low = min(pre_prices)
@@ -238,7 +227,6 @@ def check_signal(event: dict, side: str,
     path_eff = net_move / pre_range
     noise_ratio_val = compute_noise_ratio(pre_prices, net_move)
     flips_val = compute_flips(pre_prices)
-    # 传入预计算值，避免 is_oscillating 内部重复遍历
     oscillating = is_oscillating(pre_prices, open_price, cfg,
                                  path_eff=path_eff,
                                  noise_ratio=noise_ratio_val,
@@ -350,6 +338,46 @@ def check_signal(event: dict, side: str,
         btc_extreme=btc_extreme,
         other_delta=other_delta,
     )
+
+
+def check_signal(event: dict, side: str,
+                 cfg: FlipBacktestConfig) -> FlipSignal | None:
+    """对给定 side (yes/no) 检测 >0.7 穿越并评估信号。
+
+    这是核心信号检测函数，对应 §3.2 check_signal。
+
+    当 allow_retry_crossings=True（默认）：遍历所有向上穿越 0.7 的上升沿，
+    返回第一个评分通过的信号。一次事件最多产生一个信号（已下注不再观察）。
+
+    当 allow_retry_crossings=False：仅检测第一次穿越（旧行为）。
+    """
+    this_key = "yes_price" if side == "yes" else "no_price"
+    snaps = event["snapshots"]
+
+    if cfg.allow_retry_crossings:
+        # ── 多穿越模式: 遍历所有上升沿（从 ≤0.7 → >0.7），第一个评分通过的获胜 ──
+        was_above = False
+        for i, s in enumerate(snaps):
+            is_above = (s[this_key] > cfg.trigger_threshold
+                        and s["remaining_sec"] < cfg.max_remaining_sec)
+            if is_above and not was_above and i >= cfg.min_pre_snaps:
+                signal = _score_crossing(event, side, i, cfg)
+                if signal is not None:
+                    return signal
+            was_above = is_above
+        return None
+    else:
+        # ── 单穿越模式 (旧行为): 仅检测第一次 >0.7 ──
+        cross_idx = None
+        for i, s in enumerate(snaps):
+            if s[this_key] > cfg.trigger_threshold and s["remaining_sec"] < cfg.max_remaining_sec:
+                cross_idx = i
+                break
+
+        if cross_idx is None or cross_idx < cfg.min_pre_snaps:
+            return None
+
+        return _score_crossing(event, side, cross_idx, cfg)
 
 
 # ═══════════════════════════════════════════════════════════════
