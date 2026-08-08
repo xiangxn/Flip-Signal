@@ -1,4 +1,4 @@
-// Command flip 是 Flip Signal Detection 纸面交易引擎的入口。
+// Command flip 是 Flip Signal Detection 交易引擎的入口。
 //
 // 连接 Binance WebSocket（aggTrade + depth20）和 Polymarket CLOB WebSocket
 // （订单簿），通过 lab.Collector 每 5 秒生成 ResearchSnapshot，使用 flip.Engine
@@ -14,6 +14,7 @@
 //
 //	go run ./cmd/flip -output data/flip_signals.jsonl
 //	go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab
+//	go run ./cmd/flip -trading                  # 启用实盘交易
 package main
 
 import (
@@ -36,6 +37,7 @@ import (
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
 	"github.com/necklace/flip-signal/internal/lab"
+	"github.com/necklace/flip-signal/internal/trading"
 )
 
 func init() {
@@ -50,6 +52,9 @@ func main() {
 	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（覆盖配置文件）")
 	symbol := flag.String("symbol", "", "Binance 交易对（覆盖配置文件）")
 	slugPrefix := flag.String("slug", "", "Polymarket slug 前缀（覆盖配置文件）")
+	tradingEnabled := flag.Bool("trading", false, "启动时启用实盘交易（覆盖配置文件）")
+	stakeOverride := flag.Float64("stake", 0, "每信号投入 USDC（0=用配置文件值）")
+	maxLossOverride := flag.Float64("max-loss", 0, "日亏上限 USDC（0=用配置文件值）")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -88,6 +93,15 @@ func main() {
 	if *slugPrefix != "" {
 		cfg.Runtime.SlugPrefix = *slugPrefix
 	}
+	if *tradingEnabled {
+		cfg.Trading.Enabled = true
+	}
+	if *stakeOverride > 0 {
+		cfg.Trading.StakePerSignal = *stakeOverride
+	}
+	if *maxLossOverride > 0 {
+		cfg.Trading.MaxDailyLoss = *maxLossOverride
+	}
 
 	// ================================================================
 	// Polymarket 客户端（未配置 owner key 时只读运行）
@@ -124,6 +138,23 @@ func main() {
 		cfg.SDK.Polymarket.ClobWSBaseURL, client,
 	)
 	bookAdapter.Start(ctx)
+
+	// ================================================================
+	// 实盘交易执行器（仅在有凭证时构造）
+	// ================================================================
+	var trader *trading.Trader
+	if !readOnly {
+		tradeClient := &trading.SdkClient{Client: client}
+		trader = trading.NewTrader(cfg.Trading, tradeClient, bookAdapter.SubscribeResolved())
+		if err := trader.Start(ctx); err != nil {
+			log.Printf("[Trading] ⚠️ 交易记录器启动失败: %v", err)
+		}
+		if cfg.Trading.Enabled {
+			if err := trader.Enable(); err != nil {
+				log.Printf("[Trading] ⚠️ 实盘启用失败: %v（保持禁用）", err)
+			}
+		}
+	}
 
 	// 订单簿 token 追踪
 	var (
@@ -200,17 +231,23 @@ func main() {
 
 	// 可选：HTTP Dashboard
 	if cfg.Runtime.DashboardAddr != "" {
-		mode := "live"
-		if readOnly {
-			mode = "paper"
+		mode := "paper"
+		if trader != nil && trader.Enabled() {
+			mode = "live"
+		} else if !readOnly {
+			mode = "live" // 有凭证但未启用实盘，仍显示为 live（可下单模式）
 		}
-		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, cfg.Runtime.Symbol, mode)
+		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, trader, cfg.Runtime.Symbol, mode)
 		go dash.ListenAndServe(cfg.Runtime.DashboardAddr)
 		log.Printf("[Flip] Dashboard: http://0.0.0.0%s（可通过任意网卡访问）", cfg.Runtime.DashboardAddr)
 	}
 
+	modeLabel := "纸面交易"
+	if trader != nil && trader.Enabled() {
+		modeLabel = "实盘交易"
+	}
 	log.Println("========================================")
-	log.Println(" Flip Signal Detection — 纸面交易")
+	log.Printf(" Flip Signal Detection — %s", modeLabel)
 	log.Printf(" 交易对: %s  |  Slug: %s  |  输出: %s",
 		cfg.Runtime.Symbol, cfg.Runtime.SlugPrefix, cfg.Runtime.OutputPath)
 	if cfg.Runtime.LabOutputDir != "" {
@@ -348,6 +385,11 @@ func main() {
 		yesTok = yesTokenID
 		noTok = noTokenID
 
+		// 实盘：通知新周期
+		if trader != nil {
+			trader.NewCycle(conditionID, yesTokenID, noTokenID)
+		}
+
 		// 步骤 6：启动事件采集与翻转检测
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
 		generation++
@@ -390,6 +432,13 @@ func main() {
 						sig.IsOscillating, sig.PathEff, sig.NoiseRatio, sig.Flips,
 						sig.RangeExpansion, sig.BTCPosition, sig.OtherDelta,
 						sig.RemainingSec)
+
+					// ── 实盘执行 ──
+					if trader != nil {
+						if err := trader.OnSignal(sig, yesTok, noTok); err != nil {
+							log.Printf("[Trading] ⚠️ 信号未执行: %v", err)
+						}
+					}
 				}
 
 				if snap.RemainingSec <= 0 {
@@ -429,6 +478,11 @@ func main() {
 			log.Printf("[Flip] 结算失败: %v", err)
 		}
 
+		// 实盘结算
+		if trader != nil {
+			trader.OnCycleEnd(event.ConditionID, event.Outcome)
+		}
+
 		// 取消旧 token 订阅
 		bookAdapter.UnsubscribeTokens(tokenIDs...)
 	}
@@ -460,10 +514,11 @@ type RuntimeConfig struct {
 
 // AppConfig 是与 config.yaml 对应的顶层配置结构。
 type AppConfig struct {
-	Runtime RuntimeConfig      `mapstructure:"runtime"`
-	SDK     sdk.Config         `mapstructure:"sdk"`
-	Binance feed.BinanceConfig `mapstructure:"binance"`
-	Flip    flip.FlipConfig    `mapstructure:"flip"`
+	Runtime RuntimeConfig         `mapstructure:"runtime"`
+	SDK     sdk.Config            `mapstructure:"sdk"`
+	Binance feed.BinanceConfig    `mapstructure:"binance"`
+	Flip    flip.FlipConfig       `mapstructure:"flip"`
+	Trading trading.TradingConfig `mapstructure:"trading"`
 }
 
 // loadConfig 按 viper 优先级加载配置：
@@ -504,6 +559,7 @@ func loadConfig(configPath string) (*AppConfig, error) {
 		SDK:     *sdk.DefaultConfig(),
 		Binance: feed.DefaultBinanceConfig(),
 		Flip:    flip.DefaultConfig(),
+		Trading: trading.DefaultConfig(),
 	}
 	// SDK DefaultConfig 内置 dummy OwnerKey，此处置空以触发只读模式
 	// （可通过环境变量 POLYMARKET_OWNER_KEY 或配置文件覆盖）

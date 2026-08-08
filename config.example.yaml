@@ -302,3 +302,41 @@ flip:
   # 99 = 禁用加仓（5s 数据评分精度不足以支持加仓）
   # 默认值: 99（禁用）
   score_add: 99
+
+# ---------------------------------------------------------------------------
+# 实盘交易执行参数
+# ---------------------------------------------------------------------------
+# 安全第一：默认关闭。启用前请确保已配置 POLYMARKET_OWNER_KEY 和 CLOB 凭证。
+trading:
+  # 启动时是否启用实盘下单（true=实盘，false=纸面）
+  # 也可通过命令行 -trading flag 覆盖
+  # 默认值: false
+  enabled: false
+
+  # 交易记录 JSONL 输出路径（订单 + 结算）
+  # 默认值: data/trades.jsonl
+  output_path: "data/trades.jsonl"
+
+  # 每信号投入 USDC（FAK 市价单的 Amount 参数）
+  # 也可通过命令行 -stake flag 覆盖
+  # 默认值: 5.0
+  stake_per_signal: 5.0
+
+  # 滑点容忍：价格上限 = entry_price × (1 + max_slippage)
+  # 入场盘口价约 0.2-0.25，0.25-0.27 成交也允许
+  # 默认值: 0.07（7%）
+  max_slippage: 0.07
+
+  # 日亏上限（USDC）：当日累计 realized 亏损达到此值后停止交易至次日 UTC 零点
+  # 也可通过命令行 -max-loss flag 覆盖
+  # 默认值: 10.0
+  max_daily_loss: 10.0
+
+  # 亏损后冷却（秒）：一笔亏损结算后暂停下单
+  # 默认值: 300
+  cooldown_after_loss_sec: 300
+
+  # 结算等待真实 outcome 超时（秒）：市场结束后等待 WS 结算事件，
+  # 超时回退到模拟 BTC outcome（记录 resolution_source=simulated_fallback）
+  # 默认值: 300
+  resolution_timeout_sec: 300

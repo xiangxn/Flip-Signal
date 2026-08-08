@@ -8,6 +8,7 @@ import (
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
 	"github.com/necklace/flip-signal/internal/lab"
+	"github.com/necklace/flip-signal/internal/trading"
 )
 
 // State bundles references to all runtime components the dashboard needs to read.
@@ -19,6 +20,7 @@ type State struct {
 	HistRange *flip.HistRangeTracker
 	Recorder  *flip.FlipRecorder
 	Binance   *feed.BinanceAdapter
+	Trader    *trading.Trader // 可选：实盘交易执行器
 
 	// Static config
 	Symbol string
@@ -32,6 +34,7 @@ func New(
 	histRange *flip.HistRangeTracker,
 	recorder *flip.FlipRecorder,
 	binance *feed.BinanceAdapter,
+	trader *trading.Trader,
 	symbol string,
 	mode string,
 ) *State {
@@ -41,6 +44,7 @@ func New(
 		HistRange: histRange,
 		Recorder:  recorder,
 		Binance:   binance,
+		Trader:    trader,
 		Symbol:    symbol,
 		Mode:      mode,
 	}

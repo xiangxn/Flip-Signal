@@ -39,6 +39,13 @@ FlipSignal/
 │       ├── state.go                     # 运行时组件引用
 │       ├── templates.go                 # 嵌入式 HTML 模板
 │       └── static/                      # app.js, style.css, index.html
+│   └── trading/
+│       ├── types.go                     # TradingConfig + OrderRecord + Position
+│       ├── risk.go                      # 纯函数风险检查
+│       ├── order.go                     # 信号→FAK 订单映射
+│       ├── client.go                    # TradeClient 接口 + SDK 适配器
+│       ├── recorder.go                  # 交易 JSONL 日志
+│       └── trader.go                    # 核心 Trader：开关、下单、结算
 ├── docs/                                # 策略设计与分析文档
 ├── config.example.yaml
 ├── go.mod / go.sum
@@ -323,7 +330,7 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
 
 7. **多穿越重试（allow_retry_crossings）**: 每个向上穿越 0.7 的上升沿都触发检测，首个评分通过者下注。每周期最多一注，YES 优先。已下注后不再观察后续穿越。
 
-8. **纸面交易先于实盘**: 当前所有信号输出为 paper trading，不执行真实订单。
+8. **纸面交易 + 实盘可选**: 默认纸面交易，配置 `trading.enabled: true` 或 `-trading` flag 启用 FAK 市价单实盘执行。需要有 CLOB 凭证。
 
 ---
 
