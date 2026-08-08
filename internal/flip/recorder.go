@@ -8,9 +8,8 @@ import (
 	"sync"
 )
 
-// FlipRecorder writes flip trading signals to a JSONL file for paper trading
-// analysis. Signals are written immediately; resolution (won/pnl) is appended
-// as a second line when the market resolves.
+// FlipRecorder 将翻转交易信号写入 JSONL 文件，用于纸面交易分析。
+// 信号即时写入；结算结果（won/pnl）在市场结算时追加为第二行。
 type FlipRecorder struct {
 	mu       sync.Mutex
 	file     *os.File
@@ -18,7 +17,7 @@ type FlipRecorder struct {
 	resolved []*FlipSignal          // all resolved signals (for dashboard)
 }
 
-// NewFlipRecorder creates a recorder that appends to the given JSONL file path.
+// NewFlipRecorder 创建追加写入指定 JSONL 文件路径的 recorder。
 func NewFlipRecorder(path string) (*FlipRecorder, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -36,13 +35,13 @@ func NewFlipRecorder(path string) (*FlipRecorder, error) {
 	}, nil
 }
 
-// RecordSignal writes a signal record (without won/pnl) and stores it for
-// later resolution. Only the first signal per conditionID is kept.
+// RecordSignal 写入信号记录（不含 won/pnl）并暂存以待结算。
+// 每个 conditionID 仅保留第一个信号。
 func (r *FlipRecorder) RecordSignal(sig *FlipSignal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Store for resolution — overwrite if somehow duplicate
+	// 暂存以待结算 —— 重复时覆盖
 	r.pending[sig.ConditionID] = sig
 
 	data, err := json.Marshal(sig)
@@ -56,8 +55,8 @@ func (r *FlipRecorder) RecordSignal(sig *FlipSignal) error {
 	return nil
 }
 
-// Resolve computes won/pnl for a pending signal and writes a resolution record.
-// outcome follows lab.Event.Outcome: 0=Up, 1=Down.
+// Resolve 计算待结算信号的 won/pnl 并写入结算记录。
+// outcome 遵循 lab.Event.Outcome: 0=Up, 1=Down。
 func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -68,9 +67,9 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	}
 	delete(r.pending, conditionID)
 
-	// won computation:
-	//   side=="yes" → YES>0.7, bought NO (bet DOWN) → win if outcome==1 (Down)
-	//   side=="no"  → NO>0.7,  bought YES (bet UP) → win if outcome==0 (Up)
+	// 胜负判定：
+	//   side=="yes" → YES>0.7, 买 NO（赌 DOWN）→ outcome==1（Down）时赢
+	//   side=="no"  → NO>0.7, 买 YES（赌 UP）→ outcome==0（Up）时赢
 	var won bool
 	if sig.Side == "yes" {
 		won = outcome == 1 // DOWN wins
@@ -86,11 +85,11 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	}
 	pnlRounded := round4(pnl)
 
-	// Write back to signal for dashboard stats
+	// 回写到信号对象，供 Dashboard 统计
 	sig.Won = won
 	sig.PnL = pnlRounded
 
-	// Save resolved signal for dashboard history
+	// 保存已结算信号，供 Dashboard 历史查询
 	r.resolved = append(r.resolved, sig)
 
 	rec := resolutionRecord{
@@ -114,12 +113,12 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	return nil
 }
 
-// Close flushes pending signals and closes the file.
+// Close 刷新待结算信号并关闭文件。
 func (r *FlipRecorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Write any unresolved signals (shouldn't happen in normal operation)
+	// 写入任何未结算信号（正常运行中不应出现）
 	for _, sig := range r.pending {
 		data, _ := json.Marshal(sig)
 		r.file.Write(append(data, '\n'))
@@ -128,7 +127,7 @@ func (r *FlipRecorder) Close() error {
 	return r.file.Close()
 }
 
-// resolutionRecord is the JSON line appended when a market resolves.
+// resolutionRecord 是市场结算时追加的 JSON 行。
 type resolutionRecord struct {
 	Type        string  `json:"type"`
 	ConditionID string  `json:"condition_id"`
@@ -146,9 +145,9 @@ func round4(v float64) float64 {
 	return float64(int(v*10000+0.5)) / 10000
 }
 
-// ── Dashboard accessors ──
+// ── Dashboard 访问器 ──
 
-// PendingSignals returns a copy of all pending (unresolved) signals.
+// PendingSignals 返回所有待结算（未结算）信号的副本。
 func (r *FlipRecorder) PendingSignals() []*FlipSignal {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -159,7 +158,7 @@ func (r *FlipRecorder) PendingSignals() []*FlipSignal {
 	return out
 }
 
-// ResolvedSignals returns a copy of all resolved signals.
+// ResolvedSignals 返回所有已结算信号的副本。
 func (r *FlipRecorder) ResolvedSignals() []*FlipSignal {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -168,7 +167,7 @@ func (r *FlipRecorder) ResolvedSignals() []*FlipSignal {
 	return out
 }
 
-// SignalStats returns aggregate statistics for the dashboard.
+// SignalStats 返回 Dashboard 展示所需的汇总统计。
 func (r *FlipRecorder) SignalStats() (total, won, lost, pending int, winRate, cumPnl float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

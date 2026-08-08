@@ -9,12 +9,11 @@ import (
 	"sync"
 )
 
-// HistRangeTracker maintains a rolling window of historical 5m kline ranges
-// (|close - open|) and provides the average as a baseline for range_expansion
-// and btc_position calculations.
+// HistRangeTracker 维护历史 5m K 线振幅（|close - open|）的滑动窗口，
+// 提供均值作为 range_expansion 和 btc_position 计算的基准。
 //
-// Mirrors Python compute_hist_avg_range() — uses a FIFO queue of the last N
-// kline ranges across market cycles.
+// 对应 Python compute_hist_avg_range() —— 跨市场周期维护最近 N 根 K 线的
+// FIFO 队列。
 type HistRangeTracker struct {
 	mu       sync.RWMutex
 	windowN  int
@@ -23,7 +22,7 @@ type HistRangeTracker struct {
 	ready    bool // len(ranges) >= 3
 }
 
-// NewHistRangeTracker creates a tracker that keeps the last windowN ranges.
+// NewHistRangeTracker 创建一个保存最近 windowN 个振幅的追踪器。
 func NewHistRangeTracker(windowN int) *HistRangeTracker {
 	return &HistRangeTracker{
 		windowN: windowN,
@@ -31,11 +30,11 @@ func NewHistRangeTracker(windowN int) *HistRangeTracker {
 	}
 }
 
-// Warmup fetches the last `windowN` 5m klines from Binance REST and seeds the
-// tracker with their |close - open| values. Call once at startup.
+// Warmup 从 Binance REST 获取最近 windowN 根 5m K 线，
+// 用其 |close - open| 初始化追踪器。启动时调用一次。
 //
-// restBaseURL example: "https://data-api.binance.vision"
-// symbol example: "BTCUSDT"
+// restBaseURL 示例: "https://data-api.binance.vision"
+// symbol 示例: "BTCUSDT"
 func (t *HistRangeTracker) Warmup(restBaseURL, symbol string) error {
 	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=5m&limit=%d",
 		restBaseURL, symbol, t.windowN)
@@ -56,7 +55,7 @@ func (t *HistRangeTracker) Warmup(restBaseURL, symbol string) error {
 
 	t.ranges = t.ranges[:0]
 	for _, k := range klines {
-		// k[1] = open, k[4] = close (as strings)
+		// k[1] = 开盘价, k[4] = 收盘价（字符串格式）
 		if len(k) < 5 {
 			continue
 		}
@@ -77,8 +76,8 @@ func (t *HistRangeTracker) Warmup(restBaseURL, symbol string) error {
 	return nil
 }
 
-// AddRange appends a completed cycle's range and updates the average.
-// Called at the end of each 5-minute market cycle.
+// AddRange 追加一个已完成周期的振幅并更新均值。
+// 在每个 5 分钟市场周期结束时调用。
 func (t *HistRangeTracker) AddRange(openPrice, closePrice float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -91,14 +90,14 @@ func (t *HistRangeTracker) AddRange(openPrice, closePrice float64) {
 	t.recalcAvg()
 }
 
-// AvgRange returns the current average range. Returns 0 if not ready.
+// AvgRange 返回当前平均振幅，未就绪时返回 0。
 func (t *HistRangeTracker) AvgRange() float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.avgRange
 }
 
-// IsReady returns true when enough historical data is available (≥3 cycles).
+// IsReady 在有足够历史数据（≥3 个周期）时返回 true。
 func (t *HistRangeTracker) IsReady() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -119,8 +118,8 @@ func (t *HistRangeTracker) recalcAvg() {
 	t.ready = len(t.ranges) >= 3
 }
 
-// parseFloat parses a JSON string-or-number to float64.
-// Handles Binance's string-encoded numeric values.
+// parseFloat 将 JSON 的字符串或数字解析为 float64。
+// 兼容 Binance 以字符串编码的数值。
 func parseFloat(v any) float64 {
 	switch val := v.(type) {
 	case string:

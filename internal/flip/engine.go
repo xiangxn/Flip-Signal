@@ -7,8 +7,8 @@ import (
 	"github.com/necklace/flip-signal/internal/lab"
 )
 
-// T0Features holds the features computed at the crossing moment (T=0).
-// Exported for use by the dashboard to display crossing-level detail.
+// T0Features 保存穿越时刻（T=0）计算的特征值。
+// 导出供 Dashboard 展示穿越点详情。
 type T0Features struct {
 	PathEff        float64 `json:"path_eff"`
 	NoiseRatio     float64 `json:"noise_ratio"`
@@ -19,15 +19,15 @@ type T0Features struct {
 	BTCExtreme     bool    `json:"btc_extreme"`
 }
 
-// Engine detects flip signals from a stream of ResearchSnapshots.
+// Engine 从 ResearchSnapshot 流中检测翻转信号。
 //
-// Multi-crossing mode (AllowRetryCrossings=true, default):
-// Every rising edge (>0.7) triggers observation; the first crossing that
-// passes scoring wins. One bet per event. YES-first priority.
+// 多穿越模式（AllowRetryCrossings=true，默认）：
+// 每个向上穿越 0.7 的上升沿都触发观测；首个通过评分的穿越获胜。
+// 每事件最多一注，YES 侧优先。
 //
-// Legacy mode (AllowRetryCrossings=false): first crossing only per side.
+// 兼容模式（AllowRetryCrossings=false）：每侧仅检测首次穿越。
 //
-// Usage per market cycle:
+// 每轮市场周期的使用方式：
 //
 //	engine.Reset(gen)
 //	for each snapshot:
@@ -38,27 +38,27 @@ type Engine struct {
 	histRange *HistRangeTracker
 	state     flipState
 
-	snapBuffer []*lab.ResearchSnapshot // all snapshots in this cycle (always appended)
-	crossSnap  *lab.ResearchSnapshot   // snapshot at current crossing moment
-	crossSide  string                  // "yes" or "no"
-	crossIdx   int                     // index in snapBuffer of current crossing
+	snapBuffer []*lab.ResearchSnapshot // 当前周期全部 snapshot（持续追加）
+	crossSnap  *lab.ResearchSnapshot   // 当前穿越时刻的 snapshot
+	crossSide  string                  // "yes" 或 "no"
+	crossIdx   int                     // 当前穿越点在 snapBuffer 中的下标
 
-	confirmCount int  // ticks waited in CONFIRMING state
+	confirmCount int  // 已等待的 Confirming tick 数
 	generation   int64
 	doneThisGen  bool
 
-	// Multi-crossing: rising-edge detection (≤threshold → >threshold)
-	// Replaces the old first_crossing_only fields (yesFirstCrossIdx, noFirstCrossIdx, yesTried, noTried).
-	yesWasAbove bool // YES was > threshold in previous snapshot
-	noWasAbove  bool // NO was > threshold in previous snapshot
+	// 多穿越模式：上升沿检测（≤阈值 → >阈值）
+	// 替代旧的 first_crossing_only 字段（yesFirstCrossIdx, noFirstCrossIdx, yesTried, noTried）。
+	yesWasAbove bool // 上一 snapshot 中 YES 是否 > 阈值
+	noWasAbove  bool // 上一 snapshot 中 NO 是否 > 阈值
 
-	// Legacy first_crossing_only tracking (only used when AllowRetryCrossings=false)
-	yesFirstCrossIdx int  // index in snapBuffer of first YES >0.7, -1 if none
-	noFirstCrossIdx  int  // index in snapBuffer of first NO >0.7, -1 if none
-	yesTried         bool // YES side was attempted & failed this generation
-	noTried          bool // NO side was attempted & failed this generation
+	// 兼容模式下的首次穿越追踪（仅 AllowRetryCrossings=false 时使用）
+	yesFirstCrossIdx int  // YES 首次 >0.7 的 buffer 下标，-1 表示无
+	noFirstCrossIdx  int  // NO 首次 >0.7 的 buffer 下标，-1 表示无
+	yesTried         bool // YES 侧已尝试且失败（本周期内）
+	noTried          bool // NO 侧已尝试且失败（本周期内）
 
-	// T=0 features (computed in onCrossing, read in onConfirmed)
+	// T=0 特征值（enterConfirming 中计算，onConfirmed 中读取）
 	pathEff        float64
 	noiseRatio     float64
 	flips          int
@@ -68,7 +68,7 @@ type Engine struct {
 	btcExtreme     bool
 }
 
-// NewEngine creates a new flip detection engine.
+// NewEngine 创建一个新的翻转检测引擎。
 func NewEngine(cfg FlipConfig, histRange *HistRangeTracker) *Engine {
 	return &Engine{
 		cfg:               cfg,
@@ -79,7 +79,7 @@ func NewEngine(cfg FlipConfig, histRange *HistRangeTracker) *Engine {
 	}
 }
 
-// Reset prepares the engine for a new market cycle.
+// Reset 为新一轮市场周期重置引擎状态。
 func (e *Engine) Reset(generation int64) {
 	e.state = stateWatching
 	e.snapBuffer = e.snapBuffer[:0]
@@ -107,27 +107,26 @@ func (e *Engine) Reset(generation int64) {
 	e.btcExtreme = false
 }
 
-// ProcessSnapshot processes one ResearchSnapshot. Returns a FlipSignal if
-// all conditions are met, nil otherwise.
+// ProcessSnapshot 处理一个 ResearchSnapshot。满足全部条件时返回 FlipSignal，否则返回 nil。
 //
-// Multi-crossing mode (AllowRetryCrossings=true, default):
-//   - Detects rising edges (≤threshold → >threshold) for both YES and NO.
-//   - Each rising edge triggers observation; the first crossing that passes
-//     all pre-checks AND scoring wins. Once a bet is placed, the cycle ends.
-//   - If confirmation fails, checks whether the other side crossed during
-//     the wait and tries it; otherwise returns to watching.
+// 多穿越模式（AllowRetryCrossings=true，默认）：
+//   - 对 YES 和 NO 两侧做上升沿检测（≤阈值 → >阈值）。
+//   - 每个上升沿触发观测；首个通过全部前置检查且评分达标的穿越获胜。
+//     一旦下注，本周期终止。
+//   - 确认失败时，检查另一侧是否在等待期间发生了穿越并尝试之；
+//     若无则回到 Watching 状态。
 //
-// Legacy mode (AllowRetryCrossings=false): first crossing only per side.
+// 兼容模式（AllowRetryCrossings=false）：每侧仅检测首次穿越。
 func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSignal {
 	if gen != e.generation || e.doneThisGen {
 		return nil
 	}
 
-	// Always append to buffer so it reflects full cycle history.
+	// 始终追加到 buffer，保留完整周期历史。
 	bufIdx := len(e.snapBuffer)
 	e.snapBuffer = append(e.snapBuffer, snap)
 
-	// Rising-edge detection for both sides (§2.1: remaining_sec < MaxRemainingSec)
+	// 两侧上升沿检测（§2.1: remaining_sec < MaxRemainingSec）
 	yesIsAbove := snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
 	noIsAbove := snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
 
@@ -143,7 +142,7 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 
 	case stateWatching:
 		if e.cfg.AllowRetryCrossings {
-			// Multi-crossing: try every rising edge, YES-first priority
+			// 多穿越模式：每个上升沿都尝试，YES 优先
 			if yesRisingEdge && bufIdx >= e.cfg.MinPreSnaps {
 				return e.enterConfirming(bufIdx, "yes")
 			}
@@ -151,7 +150,7 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 				return e.enterConfirming(bufIdx, "no")
 			}
 		} else {
-			// Legacy: track first crossing per side, try YES then NO once each
+			// 兼容模式：记录每侧首次穿越，YES/NO 各尝试一次
 			if e.yesFirstCrossIdx < 0 && yesIsAbove {
 				e.yesFirstCrossIdx = bufIdx
 			}
@@ -176,7 +175,7 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 				e.doneThisGen = true
 				return sig
 			}
-			// Confirmation failed — try the other side or return to watching
+			// 确认失败 → 尝试另一侧穿越，或回到 Watching
 			return e.afterFailedConfirm(snap)
 		}
 		return nil
@@ -187,22 +186,21 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 	return nil
 }
 
-// enterConfirming transitions to CONFIRMING state using the crossing at the
-// given buffer index. Computes all T=0 features from snapshots up to crossIdx.
+// enterConfirming 使用指定 buffer 下标的穿越点，切换到 Confirming 状态。
+// 从 snapBuffer[0:crossIdx+1] 计算全部 T=0 特征。
 //
-// In multi-crossing mode (AllowRetryCrossings=true): veto failures on this
-// crossing don't exhaust the side — future rising edges will retry. Only
-// a successfully scored signal (score ≥ ScoreEntry) ends the cycle.
+// 多穿越模式（AllowRetryCrossings=true）：本次穿越被否决不会耗尽该侧 ——
+// 后续上升沿仍会重试。仅成功评分（score ≥ ScoreEntry）产生的信号才能终止本周期。
 func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	crossSnap := e.snapBuffer[crossIdx]
 
-	// Check minimum pre-snapshots (including crossing snap).
-	nPre := crossIdx + 1 // snapshots up to and including crossing
+	// 检查穿越前 snapshot 数量（含穿越点自身）。
+	nPre := crossIdx + 1 // 穿越点及其之前的所有 snapshot
 	if nPre < e.cfg.MinPreSnaps {
 		return e.handleEnterFail(side)
 	}
 
-	// Extract pre-prices from snap buffer up to crossing
+	// 从 buffer 中提取穿越时刻之前的价格序列
 	prePrices := make([]float64, nPre)
 	for i := 0; i < nPre; i++ {
 		prePrices[i] = e.snapBuffer[i].CurrentPrice
@@ -210,7 +208,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 
 	openPrice := crossSnap.OpenPrice
 
-	// Compute T=0 features
+	// 计算 T=0 实时特征
 	netMove := math.Abs(prePrices[len(prePrices)-1] - openPrice)
 	preHigh, preLow := prePrices[0], prePrices[0]
 	for _, p := range prePrices {
@@ -228,7 +226,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 
 	e.pathEff = netMove / preRange
 
-	// path_eff too low → trend unclear, veto
+	// path_eff 过低 → 趋势不明朗，否决
 	if e.pathEff < e.cfg.PathEffVetoMin {
 		return e.handleEnterFail(side)
 	}
@@ -240,7 +238,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 		e.noiseRatio = totalPathVal // pure oscillation
 	}
 
-	// high noise ratio → PM price unstable, veto
+	// noise_ratio 过高 → PM 价格不稳定，否决
 	if e.noiseRatio > e.cfg.NoiseRatioVetoMax {
 		return e.handleEnterFail(side)
 	}
@@ -248,26 +246,26 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	e.flips = CountFlips(prePrices)
 	e.oscillating = IsOscillating(e.pathEff, e.noiseRatio, e.flips, e.cfg)
 
-	// Range expansion (only when hist is ready)
+	// 振幅扩张（仅在历史数据就绪后计算）
 	if e.histRange.IsReady() {
 		e.rangeExpansion = RangeExpansion(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
 	}
 
-	// F0: Range expansion too large — real breakout, PM is right, veto
+	// F0: 振幅扩张过大 → 真突破，PM 判断正确，一票否决
 	if e.histRange.IsReady() && e.rangeExpansion >= e.cfg.RangeExpMax {
 		return e.handleEnterFail(side)
 	}
 
-	// All pre-checks passed — save crossing state
+	// 全部前置检查通过 → 保存穿越状态
 	e.crossSnap = crossSnap
 	e.crossSide = side
 	e.crossIdx = crossIdx
 	e.confirmCount = 0
 
-	// If the confirmation tick is already in the buffer (happens when
-	// falling back to a crossing that occurred before the failed side's
-	// confirmation), evaluate synchronously — matching Python's
-	// check_signal which has all data available at once.
+	// 若确认 tick 已在 buffer 中（回退到另一侧更早穿越时会出现），
+	// 则同步评估 —— 对应 Python check_signal 一次性拥有全部数据。
+	
+	
 	if confIdx := crossIdx + e.cfg.ConfirmDelayTicks; confIdx < len(e.snapBuffer) {
 		sig := e.onConfirmed(e.snapBuffer[confIdx])
 		if sig != nil {
@@ -275,39 +273,37 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 			e.doneThisGen = true
 			return sig
 		}
-		// This side failed — try the other side or return to watching
+		// 该侧确认失败 → 尝试另一侧穿越，或回到 Watching
 		return e.afterFailedConfirm(e.snapBuffer[confIdx])
 	}
 
-	// Normal path: wait for the confirmation tick to arrive
+	// 常规路径：等待确认 tick 到达
 	e.state = stateConfirming
 	return nil
 }
 
-// handleEnterFail handles a veto during enterConfirming. In multi-crossing mode
-// this crossing is abandoned but the side is not exhausted; in legacy mode the
-// side is marked as tried.
+// handleEnterFail 处理 enterConfirming 期间的否决。
+// 多穿越模式下：放弃本次穿越但不耗尽该侧；兼容模式下：标记该侧已尝试。
 func (e *Engine) handleEnterFail(side string) *FlipSignal {
 	if !e.cfg.AllowRetryCrossings {
 		e.markSideTried(side)
 		return e.fallbackAfterFailedConfirm()
 	}
-	// Multi-crossing: this crossing failed, return to watching for the next rising edge
+	// 多穿越模式：本次穿越失败，回到 Watching 等待下一个上升沿
 	e.returnToWatching()
 	return nil
 }
 
-// afterFailedConfirm handles the situation when a side's confirmation fails to
-// produce a signal. In multi-crossing mode it checks whether the other side
-// crossed during the confirmation window and tries it; otherwise returns to
-// watching. In legacy mode it delegates to fallbackAfterFailedConfirm.
+// afterFailedConfirm 处理确认失败后无法产生信号的情况。
+// 多穿越模式下：检查另一侧是否在确认等待期间发生了穿越并尝试之，
+// 否则回到 Watching。兼容模式下：委托给 fallbackAfterFailedConfirm。
 func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
 	if !e.cfg.AllowRetryCrossings {
 		return e.fallbackAfterFailedConfirm()
 	}
 
-	// Multi-crossing: check if the other side is currently above threshold
-	// (crossed during our confirmation window)
+	// 多穿越模式：检查另一侧当前是否仍在阈值之上
+	// （在确认等待期间发生了穿越）
 	otherSide := "no"
 	if e.crossSide == "no" {
 		otherSide = "yes"
@@ -321,21 +317,20 @@ func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
 	}
 
 	if otherIsAbove {
-		// Find the most recent rising edge for the other side
+		// 反向扫描 buffer，找另一侧最近一次上升沿
 		otherCrossIdx := e.findRecentCrossing(otherSide)
 		if otherCrossIdx >= 0 && otherCrossIdx >= e.cfg.MinPreSnaps {
 			return e.enterConfirming(otherCrossIdx, otherSide)
 		}
 	}
 
-	// Nothing pending → return to watching
+	// 无待处理穿越 → 回到 Watching
 	e.returnToWatching()
 	return nil
 }
 
-// findRecentCrossing scans snapBuffer backwards to find the most recent
-// rising edge (≤threshold → >threshold) for the given side.
-// Returns -1 if not found.
+// findRecentCrossing 反向扫描 snapBuffer，寻找指定 side 最近一次
+// 上升沿（≤阈值 → >阈值）。未找到返回 -1。
 func (e *Engine) findRecentCrossing(side string) int {
 	wasAbove := false
 	for i := len(e.snapBuffer) - 1; i >= 0; i-- {
@@ -358,7 +353,7 @@ func (e *Engine) findRecentCrossing(side string) int {
 	return -1
 }
 
-// returnToWatching resets the crossing state and transitions back to Watching.
+// returnToWatching 重置穿越状态并切换回 Watching。
 func (e *Engine) returnToWatching() {
 	e.state = stateWatching
 	e.crossSnap = nil
@@ -367,11 +362,10 @@ func (e *Engine) returnToWatching() {
 	e.confirmCount = 0
 }
 
-// fallbackAfterFailedConfirm implements the legacy first_crossing_only fallback:
-// after one side fails, try the other side's first crossing from the buffer.
-// Only used when AllowRetryCrossings=false.
+// fallbackAfterFailedConfirm 实现兼容模式的 fallback：一侧确认失败后，
+// 尝试 buffer 中另一侧的首次穿越。仅 AllowRetryCrossings=false 时使用。
 func (e *Engine) fallbackAfterFailedConfirm() *FlipSignal {
-	// Check if the other side has also crossed (earlier or at current tick)
+	// 检查另一侧是否也发生了穿越（更早或当前 tick）
 	if !e.yesTried && e.yesFirstCrossIdx >= 0 {
 		return e.enterConfirming(e.yesFirstCrossIdx, "yes")
 	}
@@ -379,7 +373,7 @@ func (e *Engine) fallbackAfterFailedConfirm() *FlipSignal {
 		return e.enterConfirming(e.noFirstCrossIdx, "no")
 	}
 
-	// Both sides tried or neither crossed → resume watching for future crossings
+	// 两侧均已尝试或均未穿越 → 回到 Watching 等待后续穿越
 	e.state = stateWatching
 	e.crossSnap = nil
 	e.crossSide = ""
@@ -388,25 +382,25 @@ func (e *Engine) fallbackAfterFailedConfirm() *FlipSignal {
 	return nil
 }
 
-// onConfirmed is called after the confirmation delay (ConfirmDelayTicks).
-// It computes the T+5s confirmation signal and the final score.
+// onConfirmed 在确认延迟（ConfirmDelayTicks）到达后被调用，
+// 计算 T+5s 确认期特征及最终复合评分。
 func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
-	// Compute other_delta — opposite-side price change
+	// 计算 other_delta —— 对面价格在确认期内的变化
 	var otherDelta float64
 	if e.crossSide == "yes" {
-		// YES>0.7, opposite is NO
+		// YES>0.7，对面是 NO
 		otherDelta = snap.NoPrice - e.crossSnap.NoPrice
 	} else {
-		// NO>0.7, opposite is YES
+		// NO>0.7，对面是 YES
 		otherDelta = snap.YesPrice - e.crossSnap.YesPrice
 	}
 
-	// Formula A: other_delta hard filter (default -999 = disabled, scoring handles it)
+	// Formula A: other_delta 硬过滤（默认 -999 = 禁用，由评分体系处理）
 	if otherDelta < e.cfg.ODHardFilter {
 		return nil
 	}
 
-	// Entry price = opposite side price at crossing time
+	// 入场价 = 穿越时刻对面价格
 	var entryPrice float64
 	if e.crossSide == "yes" {
 		entryPrice = e.crossSnap.NoPrice // buy NO, bet DOWN
@@ -414,22 +408,22 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		entryPrice = e.crossSnap.YesPrice // buy YES, bet UP
 	}
 
-	// BTC position (only when hist is ready)
+	// BTC 位置（仅历史数据就绪时）
 	e.btcPosition = 0.0
 	e.btcExtreme = false
 	if e.histRange.IsReady() {
 		e.btcPosition = BTCPosition(e.crossSnap.CurrentPrice, e.crossSnap.OpenPrice, e.histRange.AvgRange())
-		// Formula A: BTC divergence from PM = flip edge. PM and BTC agree = real trend.
+		// Formula A: BTC 与 PM 背离 = 翻转机会；PM 与 BTC 同向 = 真趋势。
 		if e.crossSide == "yes" {
-			// YES>0.7 (PM bullish), BTC down → PM overreacting
+			// YES>0.7（PM 看涨），BTC 下跌 → PM 过度反应
 			e.btcExtreme = e.btcPosition < e.cfg.BTCPosMin // btc_pos < -0.1
 		} else {
-			// NO>0.7 (PM bearish), BTC up → PM overreacting
+			// NO>0.7（PM 看跌），BTC 上涨 → PM 过度反应
 			e.btcExtreme = e.btcPosition > e.cfg.BTCPosMax // btc_pos > 0.1
 		}
 	}
 
-	// Compute composite score
+	// 计算复合评分
 	params := ScoreParams{
 		Side:           e.crossSide,
 		OtherDelta:     otherDelta,
@@ -470,29 +464,28 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 	}
 }
 
-// ── Dashboard getters ──
-// Engine fields are written only from the main market-loop goroutine.
-// Dashboard HTTP handlers read from a different goroutine; Go's memory
-// model guarantees eventual visibility for simple types, which is
-// sufficient for display purposes.
+// ── Dashboard 访问器 ──
+// Engine 字段仅在主市场循环 goroutine 中写入。
+// Dashboard HTTP handler 从另一 goroutine 读取；Go 内存模型对简单类型
+// 保证最终可见性，对展示用途已足够。
 
-// State returns the current engine state.
+// State 返回当前引擎状态。
 func (e *Engine) State() flipState { return e.state }
 
-// Generation returns the current cycle generation number.
+// Generation 返回当前周期的代数。
 func (e *Engine) Generation() int64 { return e.generation }
 
-// SnapCount returns the number of snapshots collected in the current cycle.
+// SnapCount 返回当前周期已采集的 snapshot 数量。
 func (e *Engine) SnapCount() int { return len(e.snapBuffer) }
 
-// CurrentSide returns the side being evaluated ("yes", "no", or "").
+// CurrentSide 返回当前正在评估的 side（"yes"、"no" 或 ""）。
 func (e *Engine) CurrentSide() string { return e.crossSide }
 
-// ConfirmTicksWaited returns how many ticks have elapsed since entering CONFIRMING.
+// ConfirmTicksWaited 返回进入 Confirming 状态后已等待的 tick 数。
 func (e *Engine) ConfirmTicksWaited() int { return e.confirmCount }
 
-// T0Features returns a snapshot of the T=0 features computed at crossing time.
-// Returns nil if no crossing is active.
+// T0Features 返回穿越时刻（T=0）计算的特征快照。
+// 无活跃穿越时返回 nil。
 func (e *Engine) T0Features() *T0Features {
 	if e.crossSnap == nil {
 		return nil
@@ -508,10 +501,10 @@ func (e *Engine) T0Features() *T0Features {
 	}
 }
 
-// IsDone returns true if this cycle already produced a signal.
+// IsDone 在当前周期已产生信号时返回 true。
 func (e *Engine) IsDone() bool { return e.doneThisGen }
 
-// StateLabel returns a human-readable label for the current engine state.
+// StateLabel 返回当前引擎状态的可读标签。
 func (e *Engine) StateLabel() string {
 	switch e.state {
 	case stateIdle:
@@ -527,10 +520,10 @@ func (e *Engine) StateLabel() string {
 	}
 }
 
-// Config returns a copy of the engine's running configuration.
+// Config 返回引擎运行配置的副本。
 func (e *Engine) Config() FlipConfig { return e.cfg }
 
-// markSideTried marks the given side as having been attempted this generation.
+// markSideTried 标记指定 side 在本周期内已尝试。
 func (e *Engine) markSideTried(side string) {
 	if side == "yes" {
 		e.yesTried = true

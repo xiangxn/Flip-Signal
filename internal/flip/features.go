@@ -3,13 +3,13 @@ package flip
 import "math"
 
 // ═══════════════════════════════════════════════════════════════
-// Feature extraction — pure functions matching backtest_flip_utils.py
+// 特征提取 —— 纯函数，与 backtest_flip_utils.py 对应
 // ═══════════════════════════════════════════════════════════════
 
-// PathEfficiency computes how directly price moved from open to current.
-// §2.2: path_eff = abs(lastPrice - openPrice) / (max(prices) - min(prices))
-//   ~1.0 = trending (price went straight, no pullback)
-//   ~0.0 = oscillating (price went back and forth, small net move)
+// PathEfficiency 计算价格从开盘到当前位置的路径效率。
+// §2.2: path_eff = |lastPrice - openPrice| / (max(prices) - min(prices))
+//   ~1.0 = 单边趋势（价格直走，无回调）
+//   ~0.0 = 来回振荡（价格往返，净位移小）
 func PathEfficiency(prePrices []float64, openPrice float64) float64 {
 	if len(prePrices) == 0 {
 		return 0
@@ -34,8 +34,8 @@ func PathEfficiency(prePrices []float64, openPrice float64) float64 {
 	return netMove / preRange
 }
 
-// TotalPath computes the cumulative tick-level path length.
-// §2.3 helper: Σ|p[i] - p[i-1]|
+// TotalPath 计算 tick 级累计路径长度。
+// §2.3 辅助函数: Σ|p[i] - p[i-1]|
 func TotalPath(prePrices []float64) float64 {
 	var total float64
 	for i := 1; i < len(prePrices); i++ {
@@ -44,9 +44,9 @@ func TotalPath(prePrices []float64) float64 {
 	return total
 }
 
-// NoiseRatio measures how choppy price movement is.
+// NoiseRatio 衡量价格运动的噪声程度。
 // §2.3: noise_ratio = total_path / net_move
-// Higher = more oscillation. Oscillation typically >5, trending typically <3.
+// 越高越振荡。振荡行情通常 >5，趋势行情通常 <3。
 func NoiseRatio(prePrices []float64, netMove float64) float64 {
 	totalPath := TotalPath(prePrices)
 	if netMove == 0 {
@@ -55,8 +55,8 @@ func NoiseRatio(prePrices []float64, netMove float64) float64 {
 	return totalPath / netMove
 }
 
-// CountFlips counts direction changes in the price series.
-// §2.4: ignores flat ticks (d==0).
+// CountFlips 统计价格序列中的方向切换次数。
+// §2.4: 忽略平盘 tick（d==0）。
 func CountFlips(prePrices []float64) int {
 	if len(prePrices) < 3 {
 		return 0
@@ -72,17 +72,17 @@ func CountFlips(prePrices []float64) int {
 	return flips
 }
 
-// IsOscillating checks whether price action is oscillating (all three conditions).
-// §2.5: path_eff ≤ threshold AND noise_ratio > threshold AND flips > threshold.
+// IsOscillating 判断价格是否处于振荡状态（三条件同时满足）。
+// §2.5: path_eff ≤ 阈值 AND noise_ratio > 阈值 AND flips > 阈值。
 func IsOscillating(pathEff, noiseRatio float64, flips int, cfg FlipConfig) bool {
 	return pathEff <= cfg.PathEffOscillating &&
 		noiseRatio > cfg.NoiseRatioOscillating &&
 		flips > cfg.FlipsOscillating
 }
 
-// RangeExpansion measures how far BTC has moved relative to historical average range.
-// §2.6: range_expansion = abs(price - openPrice) / histAvgRange
-// Tick-independent — works with any sampling frequency.
+// RangeExpansion 衡量 BTC 位移相对于历史平均振幅的倍数。
+// §2.6: range_expansion = |price - openPrice| / histAvgRange
+// Tick 无关 —— 适用于任意采样频率。
 func RangeExpansion(price, openPrice, histAvgRange float64) float64 {
 	if histAvgRange == 0 {
 		return 0
@@ -90,9 +90,9 @@ func RangeExpansion(price, openPrice, histAvgRange float64) float64 {
 	return math.Abs(price-openPrice) / histAvgRange
 }
 
-// BTCPosition expresses BTC displacement from open in units of historical avg range.
+// BTCPosition 以历史平均振幅为单位，表达 BTC 相对开盘价的位移。
 // §2.8: btc_position = (price - openPrice) / histAvgRange
-// +1.0 = BTC up 1x hist range, -1.0 = BTC down 1x hist range.
+// +1.0 = BTC 涨 1 倍历史振幅，-1.0 = BTC 跌 1 倍历史振幅。
 func BTCPosition(price, openPrice, histAvgRange float64) float64 {
 	if histAvgRange == 0 {
 		return 0

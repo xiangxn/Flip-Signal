@@ -1,13 +1,13 @@
 package flip
 
 // ═══════════════════════════════════════════════════════════════
-// Composite scoring — §2.10 / backtest_flip_scoring.py check_signal
+// 复合评分 —— §2.10 / backtest_flip_scoring.py check_signal
 // ═══════════════════════════════════════════════════════════════
 
-// ComputeFlipScore computes the multi-feature composite score (Formula A).
-// Returns (score, vetoed). vetoed=true means F0 veto (real breakout, don't trade).
+// ComputeFlipScore 计算多特征复合评分（Formula A）。
+// 返回 (score, vetoed)。vetoed=true 表示 F0 否决（真突破，不下注）。
 //
-// Max achievable score: 3+2+1+2+1+2+1 = 12 (up from 9).
+// 理论最高分: 3+2+1+2+1+2+1 = 12（此前为 9）。
 //
 //	F1v: OtherDelta > 0.05 → +3 (Formula A: new top tier)
 //	F1:  OtherDelta > 0.02 → +2 (Formula A: was 0.03 +4)
@@ -19,14 +19,14 @@ package flip
 //	F7:  BTC diverges from PM → +1 (Formula A: widened, hist ready only)
 //	F0:  RangeExpansion ≥ 2.0 → veto   (hist ready only)
 func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
-	// F0: Range expansion too large — real breakout, PM is right, don't bet against.
+	// F0: 振幅扩张过大 → 真突破，PM 判断正确，不宜反向下注。
 	if params.HistReady && params.RangeExpansion >= params.Cfg.RangeExpMax {
 		return 0, true
 	}
 
 	score = 0
 
-	// F1v/F1/F2: Opposite-side price change (T+5s confirmation) — Formula A 3-tier
+	// F1v/F1/F2: 对面价格变化（T+5s 确认）—— Formula A 三级评分
 	if params.OtherDelta > params.Cfg.OtherDeltaVStrong {
 		score += params.Cfg.WOtherD5VStrong
 	} else if params.OtherDelta > params.Cfg.OtherDeltaStrong {
@@ -35,25 +35,25 @@ func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 		score += params.Cfg.WOtherD5Weak
 	}
 
-	// F3: Oscillation pattern (trend exhaustion) — Formula A: +2
+	// F3: 振荡形态（趋势衰竭）—— Formula A: +2
 	if params.IsOscillating {
 		score += params.Cfg.WOscillating
 	}
 
-	// F4/F5: Cheap entry price (high payout ratio) — elif, no stacking
+	// F4/F5: 低价入场（高赔率）—— elif 互斥，不叠加
 	if params.EntryPrice < params.Cfg.EntryCheapStrong {
 		score += params.Cfg.WCheapEntryStr
 	} else if params.EntryPrice < params.Cfg.EntryCheapWeak {
 		score += params.Cfg.WCheapEntryWeak
 	}
 
-	// F6: BTC barely moved — PM overconfident, likely flip
+	// F6: BTC 几乎未动 → PM 过度自信，翻转概率高
 	if params.HistReady && params.RangeExpansion < params.Cfg.RangeExpThreshold {
 		score += params.Cfg.WRangeExpansion
 	}
 
-	// F7: BTC direction diverges from PM → flip edge (Formula A: widened)
-	// BTCExtreme is pre-computed by the engine using side-specific thresholds.
+	// F7: BTC 方向与 PM 背离 → 翻转机会（Formula A: 放宽）
+	// BTCExtreme 由引擎根据 side 特定阈值预先计算。
 	if params.HistReady && params.BTCExtreme {
 		score += params.Cfg.WBtcExtreme
 	}

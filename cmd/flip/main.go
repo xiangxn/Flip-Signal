@@ -1,17 +1,16 @@
-// Command flip runs the Flip Signal Detection paper trading engine.
+// Command flip 是 Flip Signal Detection 纸面交易引擎的入口。
 //
-// It connects to Binance WebSocket (aggTrade + depth20) and Polymarket
-// CLOB WebSocket (order books), generates 5-second ResearchSnapshots via
-// lab.Collector, detects >0.7 crossing signals using the flip.Engine
-// state machine, and records signals + P&L to a JSONL file.
+// 连接 Binance WebSocket（aggTrade + depth20）和 Polymarket CLOB WebSocket
+// （订单簿），通过 lab.Collector 每 5 秒生成 ResearchSnapshot，使用 flip.Engine
+// 状态机检测 >0.7 穿越信号，并将信号及盈亏记录到 JSONL 文件。
 //
-// Optionally also writes full event snapshots as lab data (-lab-output flag),
-// so you don't need to run cmd/lab separately.
+// 可选通过 -lab-output 输出完整事件快照（与 cmd/lab 格式一致），
+// 无需单独运行 cmd/lab。
 //
-// Read-only by default — generates a temporary wallet key for
-// Polymarket API access (data reading only, no trading).
+// 默认只读运行 —— 自动生成临时钱包密钥用于 Polymarket API 访问
+// （仅数据读取，不执行交易）。
 //
-// Usage:
+// 用法：
 //
 //	go run ./cmd/flip -output data/flip_signals.jsonl
 //	go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab
@@ -44,7 +43,7 @@ func init() {
 }
 
 func main() {
-	// ── CLI flags: 优先级最高，可覆盖所有配置来源 ──
+	// ── CLI 参数：优先级最高，可覆盖所有配置来源 ──
 	configPath := flag.String("config", "config.yaml", "配置文件路径（YAML）")
 	outputPath := flag.String("output", "", "Flip Signal JSONL 输出路径（覆盖配置文件）")
 	labOutputDir := flag.String("lab-output", "", "Lab 数据输出目录（覆盖配置文件）")
@@ -56,12 +55,12 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Graceful shutdown: runs on any return (including all ctx.Done paths),
-	// giving in-flight operations time to finish before resource cleanup.
+	// 优雅退出：在任何 return 路径（含全部 ctx.Done 分支）均执行，
+	// 为进行中的操作留出收尾时间后再清理资源。
 	defer func() {
-		log.Println("[Flip] Gracefully shutting down — waiting for in-flight operations (10s)...")
+		log.Println("[Flip] 正在优雅退出 —— 等待进行中的操作完成（10s）...")
 		time.Sleep(10 * time.Second)
-		log.Println("[Flip] Shutdown complete.")
+		log.Println("[Flip] 退出完成。")
 	}()
 
 	// ================================================================
@@ -91,13 +90,13 @@ func main() {
 	}
 
 	// ================================================================
-	// Polymarket client (read-only if no owner key configured)
+	// Polymarket 客户端（未配置 owner key 时只读运行）
 	// ================================================================
 	readOnly := false
 	if cfg.SDK.Polymarket.OwnerKey == "" {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
-			log.Fatalf("Failed to generate temporary key: %v", err)
+			log.Fatalf("生成临时密钥失败: %v", err)
 		}
 		cfg.SDK.Polymarket.OwnerKey = hex.EncodeToString(key)
 		readOnly = true
@@ -109,43 +108,43 @@ func main() {
 	}
 
 	// ================================================================
-	// Binance adapter
+	// Binance 行情适配器
 	// ================================================================
 	binance := feed.NewBinanceAdapterWithConfig(cfg.Binance)
 	go func() {
 		if err := binance.Start(ctx); err != nil {
-			log.Printf("[Flip] Binance start: %v", err)
+			log.Printf("[Flip] Binance 启动失败: %v", err)
 		}
 	}()
 
 	// ================================================================
-	// Polymarket order book adapter
+	// Polymarket 订单簿适配器
 	// ================================================================
 	bookAdapter := feed.NewOrderBookAdapterWithResolve(
 		cfg.SDK.Polymarket.ClobWSBaseURL, client,
 	)
 	bookAdapter.Start(ctx)
 
-	// Book tracking
+	// 订单簿 token 追踪
 	var (
 		yesTok string
 		noTok  string
 	)
 
 	// ================================================================
-	// Lab Collector (5s ResearchSnapshots)
+	// Lab 采集器（每 5 秒生成 ResearchSnapshot）
 	// ================================================================
 	collector := lab.NewCollector(binance)
 
 	// ================================================================
-	// Flip Engine & Recorder
+	// Flip 引擎与信号记录器
 	// ================================================================
 	flipCfg := cfg.Flip
 	histTracker := flip.NewHistRangeTracker(flipCfg.HistWindowN)
 
-	// Wait for initial Binance data before warming up hist range.
-	// Poll LatestData() every second instead of a blind sleep.
-	log.Println("[Flip] Waiting for initial Binance data...")
+	// 等待 Binance 初始数据就绪后再预热历史振幅。
+	// 每秒轮询 LatestData()，而非盲等固定时长。
+	log.Println("[Flip] 等待 Binance 初始数据...")
 	for i := 0; i < 30; i++ {
 		select {
 		case <-ctx.Done():
@@ -153,23 +152,23 @@ func main() {
 		case <-time.After(time.Second):
 		}
 		if btc := binance.LatestData(); btc.Price != 0 {
-			log.Printf("[Flip] Binance data ready after %ds (price=%.2f)", i+1, btc.Price)
+			log.Printf("[Flip] Binance 数据就绪，耗时 %ds（price=%.2f）", i+1, btc.Price)
 			break
 		}
 	}
 
-	// Warmup: fetch historical 5m klines for instant hist_avg_range
+	// 预热：拉取历史 5m K 线以初始化 hist_avg_range
 	histErr := make(chan error, 1)
 	go func() {
 		histErr <- histTracker.Warmup(cfg.Binance.RestBaseURL, cfg.Binance.Symbol)
 	}()
 	select {
 	case <-ctx.Done():
-		log.Println("[Flip] hist warmup interrupted")
+		log.Println("[Flip] 历史振幅预热被中断")
 		return
 	case err := <-histErr:
 		if err != nil {
-			log.Printf("[Flip] hist warmup failed: %v (F6/F7 will be degraded until enough cycles)", err)
+			log.Printf("[Flip] 历史振幅预热失败: %v（F6/F7 将在积累足够周期后退化可用）", err)
 		}
 	}
 
@@ -177,29 +176,29 @@ func main() {
 
 	flipRecorder, err := flip.NewFlipRecorder(cfg.Runtime.OutputPath)
 	if err != nil {
-		log.Fatalf("[Flip] recorder: %v", err)
+		log.Fatalf("[Flip] 信号记录器创建失败: %v", err)
 	}
 	defer func() {
 		if err := flipRecorder.Close(); err != nil {
-			log.Printf("[Flip] recorder close: %v", err)
+			log.Printf("[Flip] 信号记录器关闭异常: %v", err)
 		}
 	}()
 
-	// Optional lab data writer (same format as cmd/lab)
+	// 可选：Lab 数据写入器（格式与 cmd/lab 一致）
 	var labWriter *lab.Writer
 	if cfg.Runtime.LabOutputDir != "" {
 		labWriter, err = lab.NewWriter(cfg.Runtime.LabOutputDir)
 		if err != nil {
-			log.Fatalf("[Flip] lab writer: %v", err)
+			log.Fatalf("[Flip] Lab 写入器创建失败: %v", err)
 		}
 		defer func() {
 			if err := labWriter.Close(); err != nil {
-				log.Printf("[Flip] lab writer close: %v", err)
+				log.Printf("[Flip] Lab 写入器关闭异常: %v", err)
 			}
 		}()
 	}
 
-	// Optional HTTP dashboard
+	// 可选：HTTP Dashboard
 	if cfg.Runtime.DashboardAddr != "" {
 		mode := "live"
 		if readOnly {
@@ -207,23 +206,23 @@ func main() {
 		}
 		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, cfg.Runtime.Symbol, mode)
 		go dash.ListenAndServe(cfg.Runtime.DashboardAddr)
-		log.Printf("[Flip] Dashboard: http://0.0.0.0%s (accessible from any network interface)", cfg.Runtime.DashboardAddr)
+		log.Printf("[Flip] Dashboard: http://0.0.0.0%s（可通过任意网卡访问）", cfg.Runtime.DashboardAddr)
 	}
 
 	log.Println("========================================")
-	log.Println(" Flip Signal Detection — Paper Trading")
-	log.Printf(" Symbol: %s  |  Slug: %s  |  Output: %s",
+	log.Println(" Flip Signal Detection — 纸面交易")
+	log.Printf(" 交易对: %s  |  Slug: %s  |  输出: %s",
 		cfg.Runtime.Symbol, cfg.Runtime.SlugPrefix, cfg.Runtime.OutputPath)
 	if cfg.Runtime.LabOutputDir != "" {
-		log.Printf(" Lab data: %s (events JSONL)", cfg.Runtime.LabOutputDir)
+		log.Printf(" Lab 数据: %s（events JSONL）", cfg.Runtime.LabOutputDir)
 	}
-	log.Printf(" Config: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d multi_cross=%v",
+	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d multi_cross=%v",
 		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.ScoreEntry, flipCfg.ScoreAdd, flipCfg.AllowRetryCrossings)
-	log.Println(" Sources: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
+	log.Println(" 数据源: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
 	log.Println("========================================")
 
 	// ================================================================
-	// Market Cycle Loop
+	// 市场周期主循环
 	// ================================================================
 	var generation int64
 
@@ -234,13 +233,13 @@ func main() {
 		default:
 		}
 
-		// Step 1: Calculate next 5-min aligned boundary
+		// 步骤 1：计算下一个 5 分钟对齐边界
 		now := time.Now()
 		alignedTs := now.Unix() / lab.WindowSec * lab.WindowSec
 		nextStart := time.Unix(alignedTs, 0)
 		marketSlug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
 
-		// Step 2: Wait until window start + 2s
+		// 步骤 2：等待至窗口起点 + 2 秒
 		waitUntil := nextStart.Add(2 * time.Second)
 		if wait := time.Until(waitUntil); wait > 0 {
 			log.Printf("[Cycle] next window %s, waiting %v (slug=%s)",
@@ -252,7 +251,7 @@ func main() {
 			}
 		}
 
-		// Step 3: Fetch Binance kline open price (with timeout)
+		// 步骤 3：获取 Binance K 线开盘价（带超时）
 		klineDone := make(chan struct{}, 1)
 		go func() {
 			binance.FetchKlineOpenPrice()
@@ -261,18 +260,18 @@ func main() {
 		select {
 		case <-klineDone:
 		case <-time.After(5 * time.Second):
-			log.Printf("[Cycle] WARNING: kline fetch timeout, using current price")
+			log.Printf("[Cycle] ⚠️ K 线获取超时，使用当前价格代替")
 		}
 
 		btc := binance.LatestData()
 		openPrice := btc.OpenPrice
 		if openPrice == 0 {
 			openPrice = btc.Price
-			log.Printf("[Cycle] WARNING: kline open not available, using current price %.2f", openPrice)
+			log.Printf("[Cycle] ⚠️ K 线开盘价不可用，使用当前价格 %.2f 代替", openPrice)
 		}
 
-		// Step 4: Fetch Polymarket market → conditionId + token IDs
-		log.Printf("[Cycle] fetching market: %s", marketSlug)
+		// 步骤 4：获取 Polymarket 市场信息 → conditionId + token IDs
+		log.Printf("[Cycle] 获取市场信息: %s", marketSlug)
 		type marketResult struct {
 			data *gjson.Result
 			err  error
@@ -286,15 +285,15 @@ func main() {
 		var fetchErr error
 		select {
 		case <-ctx.Done():
-			log.Println("[Cycle] market fetch interrupted")
+			log.Println("[Cycle] 市场信息获取被中断")
 			return
 		case <-time.After(15 * time.Second):
-			fetchErr = fmt.Errorf("market fetch timeout (slug=%s)", marketSlug)
+			fetchErr = fmt.Errorf("市场信息获取超时 (slug=%s)", marketSlug)
 		case mr := <-marketCh:
 			marketData, fetchErr = mr.data, mr.err
 		}
 		if fetchErr != nil {
-			log.Printf("[Cycle] ERROR fetching market: %v — retrying in 5s", fetchErr)
+			log.Printf("[Cycle] ⚠️ 获取市场信息失败: %v —— 5 秒后重试", fetchErr)
 			select {
 			case <-ctx.Done():
 				return
@@ -305,7 +304,7 @@ func main() {
 
 		conditionID := marketData.Get("conditionId").String()
 
-		// Parse token IDs and outcomes
+		// 解析 token ID 和 outcome
 		var tokenIDs []string
 		clobRaw := marketData.Get("clobTokenIds").String()
 		for _, v := range gjson.Parse(clobRaw).Array() {
@@ -333,7 +332,7 @@ func main() {
 		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s",
 			conditionID, yesTokenID, noTokenID)
 
-		// Step 5: Subscribe to new tokens (unsubscribe old ones first)
+		// 步骤 5：订阅新 token（先取消旧订阅）
 		if yesTok != "" || noTok != "" {
 			var oldTokens []string
 			if yesTok != "" {
@@ -349,11 +348,11 @@ func main() {
 		yesTok = yesTokenID
 		noTok = noTokenID
 
-		// Step 6: Start event collection + flip engine
+		// 步骤 6：启动事件采集与翻转检测
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
 		generation++
 		flipEngine.Reset(generation)
-		log.Printf("[Cycle] event=%s open=%.2f collecting...", conditionID, openPrice)
+		log.Printf("[Cycle] event=%s open=%.2f 开始采集...", conditionID, openPrice)
 
 		ticker := time.NewTicker(5 * time.Second)
 		snapCount := 0
@@ -367,7 +366,7 @@ func main() {
 				return
 
 			case tickTime := <-ticker.C:
-				// Read latest Polymarket book prices (atomic, no channel overhead)
+				// 读取 Polymarket 最新订单簿价格（原子操作，无 channel 开销）
 				yb := bookAdapter.GetLatestBook(yesTok)
 				nb := bookAdapter.GetLatestBook(noTok)
 
@@ -379,11 +378,11 @@ func main() {
 				}
 				snapCount++
 
-				// ── Flip Signal Detection ──
+				// ── 翻转信号检测 ──
 				if sig := flipEngine.ProcessSnapshot(snap, generation); sig != nil {
 					sig.ConditionID = conditionID
 					if err := flipRecorder.RecordSignal(sig); err != nil {
-						log.Printf("[Flip] record error: %v", err)
+						log.Printf("[Flip] 信号记录失败: %v", err)
 					}
 					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f shares=%d | "+
 						"osc=%v path_eff=%.2f noise=%.1f flips=%d range_exp=%.1f btc_pos=%.2f other_d=%+.3f rem=%ds",
@@ -407,14 +406,14 @@ func main() {
 			}
 		}
 
-		// Step 7: Finalize event, persist lab data, update hist range, resolve
+		// 步骤 7：结束事件、持久化 Lab 数据、更新历史振幅、结算信号
 		event := collector.FinalizeEvent()
 		histTracker.AddRange(event.OpenPrice, event.ClosePrice)
 
-		// Persist full event snapshots if lab output is enabled
+		// 若启用 Lab 输出，持久化完整事件快照
 		if labWriter != nil {
 			if err := labWriter.Write(event); err != nil {
-				log.Printf("[Flip] lab write error: %v", err)
+				log.Printf("[Flip] Lab 写入失败: %v", err)
 			}
 		}
 
@@ -422,25 +421,25 @@ func main() {
 		if event.Outcome == 0 {
 			outcomeLabel = "UP"
 		}
-		log.Printf("[Event] %s done — open=%.2f close=%.2f outcome=%s snapshots=%d",
+		log.Printf("[Event] %s 完成 —— open=%.2f close=%.2f outcome=%s snapshots=%d",
 			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
 
-		// Resolve: outcome 0=Up, 1=Down
+		// 结算：outcome 0=Up, 1=Down
 		if err := flipRecorder.Resolve(event.ConditionID, event.Outcome); err != nil {
-			log.Printf("[Flip] resolve error: %v", err)
+			log.Printf("[Flip] 结算失败: %v", err)
 		}
 
-		// Unsubscribe old tokens
+		// 取消旧 token 订阅
 		bookAdapter.UnsubscribeTokens(tokenIDs...)
 	}
 }
 
-// ── Helpers ──
+// ── 辅助函数 ──
 
-// bestBid returns the best bid price from a Polymarket CLOB order book.
+// bestBid 从 Polymarket CLOB 订单簿中提取最优买价。
 //
-// Polymarket CLOB bids are sorted ascending: the LAST element is the
-// highest (best) bid. Returns 0 if the book is nil or empty.
+// Polymarket CLOB 的 bids 按价格升序排列：最后一个元素即最高（最优）
+// 买价。订单簿为 nil 或为空时返回 0。
 func bestBid(book *sdk.OrderBook) float64 {
 	if book == nil || len(book.Bids) == 0 {
 		return 0
@@ -448,18 +447,18 @@ func bestBid(book *sdk.OrderBook) float64 {
 	return book.Bids[len(book.Bids)-1].Price
 }
 
-// ── Config ──
+// ── 配置结构 ──
 
-// RuntimeConfig holds runtime parameters that can be overridden by CLI flags.
+// RuntimeConfig 保存可通过 CLI 参数覆盖的运行时参数。
 type RuntimeConfig struct {
-	Symbol        string `mapstructure:"symbol"`         // Binance trading pair
-	SlugPrefix    string `mapstructure:"slug_prefix"`    // Polymarket slug prefix
-	OutputPath    string `mapstructure:"output_path"`    // Flip signal JSONL output path
-	LabOutputDir  string `mapstructure:"lab_output_dir"` // Optional lab event output directory
-	DashboardAddr string `mapstructure:"dashboard_addr"` // HTTP dashboard listen address
+	Symbol        string `mapstructure:"symbol"`         // Binance 交易对
+	SlugPrefix    string `mapstructure:"slug_prefix"`    // Polymarket slug 前缀
+	OutputPath    string `mapstructure:"output_path"`    // Flip 信号 JSONL 输出路径
+	LabOutputDir  string `mapstructure:"lab_output_dir"` // 可选的 Lab 事件输出目录
+	DashboardAddr string `mapstructure:"dashboard_addr"` // HTTP Dashboard 监听地址
 }
 
-// AppConfig is the top-level configuration structure matching config.yaml.
+// AppConfig 是与 config.yaml 对应的顶层配置结构。
 type AppConfig struct {
 	Runtime RuntimeConfig      `mapstructure:"runtime"`
 	SDK     sdk.Config         `mapstructure:"sdk"`
@@ -467,15 +466,15 @@ type AppConfig struct {
 	Flip    flip.FlipConfig    `mapstructure:"flip"`
 }
 
-// loadConfig loads configuration with viper precedence:
+// loadConfig 按 viper 优先级加载配置：
 //
-//	代码默认值 (最低) ← config.yaml ← 环境变量 POLYMARKET_* (最高)
+//	代码默认值（最低）← config.yaml ← 环境变量 POLYMARKET_*（最高）
 //
-// CLI flags are applied separately in main() after loadConfig returns.
+// CLI 参数在 loadConfig 返回后由 main() 单独叠加。
 func loadConfig(configPath string) (*AppConfig, error) {
 	v := viper.New()
 
-	// ── 环境变量绑定（在 ReadInConfig 之前，确保优先级：env > file > default）──
+	// ── 环境变量绑定（在 ReadInConfig 之前执行，确保优先级：env > file > default）──
 
 	// POLYMARKET_* → sdk.polymarket.* / sdk.*
 	v.BindEnv("sdk.polymarket.owner_key", "POLYMARKET_OWNER_KEY")
@@ -491,9 +490,9 @@ func loadConfig(configPath string) (*AppConfig, error) {
 	v.BindEnv("runtime.output_path", "FLIP_OUTPUT")
 	v.BindEnv("runtime.lab_output_dir", "FLIP_LAB_OUTPUT")
 	v.BindEnv("runtime.dashboard_addr", "FLIP_DASHBOARD")
-	v.BindEnv("binance.symbol", "FLIP_SYMBOL") // 同步 binance 交易对
+	v.BindEnv("binance.symbol", "FLIP_SYMBOL") // 同步 Binance 交易对
 
-	// ── Step 1: 代码默认值（最低优先级）──
+	// ── 第 1 步：代码默认值（最低优先级）──
 	cfg := &AppConfig{
 		Runtime: RuntimeConfig{
 			Symbol:        "BTCUSDT",
@@ -506,11 +505,11 @@ func loadConfig(configPath string) (*AppConfig, error) {
 		Binance: feed.DefaultBinanceConfig(),
 		Flip:    flip.DefaultConfig(),
 	}
-	// SDK DefaultConfig 设了 dummy OwnerKey，置空以触发 read-only 模式
-	// （env POLYMARKET_OWNER_KEY 或配置文件可覆盖）
+	// SDK DefaultConfig 内置 dummy OwnerKey，此处置空以触发只读模式
+	// （可通过环境变量 POLYMARKET_OWNER_KEY 或配置文件覆盖）
 	cfg.SDK.Polymarket.OwnerKey = ""
 
-	// ── Step 2: 文件配置（覆盖默认值，env 绑定的变量自动优先）──
+	// ── 第 2 步：文件配置（覆盖默认值，env 绑定的变量自动享有更高优先级）──
 	if configPath != "" {
 		v.SetConfigFile(configPath)
 	} else {
@@ -521,17 +520,17 @@ func loadConfig(configPath string) (*AppConfig, error) {
 
 	if err := v.ReadInConfig(); err != nil {
 		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return nil, fmt.Errorf("read config file: %w", err)
+			return nil, fmt.Errorf("读取配置文件失败: %w", err)
 		}
-		log.Printf("[Config] 未找到配置文件 (%s)，使用代码默认值", configPath)
+		log.Printf("[Config] 未找到配置文件（%s），使用代码默认值", configPath)
 	} else {
 		log.Printf("[Config] 已加载配置文件: %s", v.ConfigFileUsed())
 	}
 
-	// Unmarshal 自动处理优先级: BindEnv > config file > struct default
-	// （只覆盖 viper 中存在对应值的字段）
+	// Unmarshal 自动按优先级合并：BindEnv > config file > struct default
+	// （仅覆盖 viper 中存在对应值的字段，不会清零未配置项）
 	if err := v.Unmarshal(cfg); err != nil {
-		return nil, fmt.Errorf("unmarshal config: %w", err)
+		return nil, fmt.Errorf("配置反序列化失败: %w", err)
 	}
 
 	return cfg, nil
