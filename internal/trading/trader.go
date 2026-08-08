@@ -242,10 +242,28 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		if len(openOrders) > 0 {
 			oo := openOrders[0]
 			filledShares = oo.SizeMatched
+
+			// 判断是否完全成交：使用 entryPrice（信号触发价）计算期望股数，
+			// 比 maxPrice（价格上限）更准确，避免阈值偏低导致过早判定为已成交。
+			expectedShares := ComputeShares(cfg.StakePerSignal, sig.EntryPrice)
+			fullyFilled := oo.Status == "MATCHED" || (expectedShares > 0 && oo.SizeMatched >= expectedShares)
+
 			if oo.SizeMatched > 0 {
-				avgFillPrice = cfg.StakePerSignal / oo.SizeMatched
+				if fullyFilled {
+					// 完全成交：均价 = 总投入 / 总股数
+					avgFillPrice = cfg.StakePerSignal / oo.SizeMatched
+				} else if oo.OriginalSize > 0 {
+					// 部分成交：按 OriginalSize（takerAmount）与实际成交比例估算实际花费
+					fillRatio := oo.SizeMatched / oo.OriginalSize
+					if fillRatio > 1.0 {
+						fillRatio = 1.0
+					}
+					actualCost := cfg.StakePerSignal * fillRatio
+					avgFillPrice = actualCost / oo.SizeMatched
+				}
 			}
-			if oo.Status == "MATCHED" || oo.SizeMatched >= ComputeShares(cfg.StakePerSignal, maxPrice) {
+
+			if fullyFilled {
 				orderState = OrderFilled
 			}
 		}
