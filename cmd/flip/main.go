@@ -146,9 +146,24 @@ func main() {
 	// ================================================================
 	var trader *trading.Trader
 	if !readOnly {
+		// 创建 TradeMonitor（实时追踪订单成交/状态变更）
+		var tradeMon *sdk.TradeMonitor
+		if cfg.SDK.Polymarket.CLOBCreds != nil {
+			tradeMon = sdk.NewTradeMonitor(
+				cfg.SDK.Polymarket.ClobWSBaseURL,
+				cfg.SDK.Polymarket.CLOBCreds,
+			)
+			go func() {
+				if err := tradeMon.Run(ctx); err != nil {
+					log.Printf("[Trading] TradeMonitor 异常: %v", err)
+				}
+			}()
+			log.Println("[Trading] 📡 TradeMonitor 已启动")
+		}
+
 		tradeClient := &trading.SdkClient{Client: client}
 		trader = trading.NewTrader(cfg.Trading, tradeClient, bookAdapter.SubscribeResolved())
-		if err := trader.Start(ctx); err != nil {
+		if err := trader.Start(ctx, tradeMon); err != nil {
 			log.Printf("[Trading] ⚠️ 交易记录器启动失败: %v", err)
 		}
 		if cfg.Trading.Enabled {
@@ -484,14 +499,16 @@ func main() {
 		log.Printf("[Event] %s 完成 —— open=%.2f close=%.2f outcome=%s snapshots=%d",
 			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
 
+		// 实盘结算（顺序关键：先对账 GTC 挂单，再结算信号，确保延迟成交的 PnL 正确）
+		if trader != nil {
+			if ei := trader.OnCycleEnd(event.ConditionID, event.Outcome); ei.Status != "" {
+				flipRecorder.UpdateExecution(event.ConditionID, ei.Status, ei.FilledShares, ei.AvgFillPrice)
+			}
+		}
+
 		// 结算：outcome 0=Up, 1=Down
 		if err := flipRecorder.Resolve(event.ConditionID, event.Outcome); err != nil {
 			log.Printf("[Flip] 结算失败: %v", err)
-		}
-
-		// 实盘结算
-		if trader != nil {
-			trader.OnCycleEnd(event.ConditionID, event.Outcome)
 		}
 
 		// 取消旧 token 订阅

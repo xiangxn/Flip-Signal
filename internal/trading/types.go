@@ -1,6 +1,6 @@
 // Package trading 实现 Flip Signal 的实盘交易执行层。
 //
-// 负责将 FlipSignal 映射为 Polymarket CLOB FAK 订单、跟踪成交、
+// 负责将 FlipSignal 映射为 Polymarket CLOB GTC 限价单、跟踪成交、
 // 依据真实市场结算计算 realized P&L，并施加风险控制。
 // 纯风险计算（risk.go / order.go）零外部依赖，SDK 依赖仅限 client.go。
 package trading
@@ -63,7 +63,7 @@ func (s OrderState) String() string {
 
 // ── 订单记录 ──
 
-// OrderRecord 一条 FAK 订单的完整记录。
+// OrderRecord 一条 GTC 订单的完整记录。
 type OrderRecord struct {
 	ID           string     `json:"id"`             // CLOB orderID（PostOrder 返回）
 	ConditionID  string     `json:"condition_id"`   // 所属市场
@@ -109,6 +109,24 @@ type ExecInfo struct {
 	FilledShares float64 // 实际成交股数
 	AvgFillPrice float64 // 实际成交均价
 }
+// pendingGtcOrder 记录已提交但尚未完全成交的 GTC 限价单上下文，
+// 供 TradeMonitor 事件循环和周期末对账使用（仅内存，不持久化）。
+type pendingGtcOrder struct {
+	OrderID     string       // CLOB order ID
+	TokenID     string       // 买入的 token ID
+	TokenSide   string       // "yes"/"no"
+	ConditionID string       // 所属市场
+	MaxPrice    float64      // 限价
+	StakeUSDC   float64      // 投入预算
+	Rec         *OrderRecord // 关联订单记录
+
+	// TradeMonitor 事件累积
+	FilledShares float64 // 已成交股数
+	TotalCost    float64 // 已花费 USDC（∑ trade.size × trade.price）
+	TradeCount   int     // 成交笔数
+	Status       string  // 最后收到的 order status (LIVE/MATCHED/CANCELED)
+}
+
 type ExecutionState struct {
 	Enabled          bool      `json:"enabled"`
 	DailyPnl         float64   `json:"daily_pnl"`
@@ -116,6 +134,7 @@ type ExecutionState struct {
 	DailyLimitHit    bool      `json:"daily_limit_hit"`
 	CooldownUntil    time.Time `json:"cooldown_until"`
 	CurrentCondition string    `json:"current_condition"`
-	Position         *Position `json:"position,omitempty"` // 当前未结算持仓
+	Position       *Position        `json:"position,omitempty"` // 当前未结算持仓
+	PendingOrder   *pendingGtcOrder `json:"-"`                  // 当前未成交 GTC 挂单（仅内存）
 	LastSkipReason   string    `json:"last_skip_reason"`
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
-// SignalToOrder 将 FlipSignal 映射为 FAK 订单参数（纯函数）。
+// SignalToOrder 将 FlipSignal 映射为 GTC 订单参数（纯函数）。
 //
 // 方向映射：
 //
@@ -32,7 +32,7 @@ func SignalToOrder(sig *flip.FlipSignal, yesTokenID, noTokenID string) (tokenID 
 	}
 }
 
-// CalcMaxPrice 计算 FAK 订单的价格上限（滑点保护）。
+// CalcMaxPrice 计算 GTC 限价单的限价（滑点保护）。
 //
 //	maxPrice = entryPrice × (1 + maxSlippage)
 //
