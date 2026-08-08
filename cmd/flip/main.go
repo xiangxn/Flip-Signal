@@ -118,7 +118,9 @@ func main() {
 
 	client := sdk.NewClient(&cfg.SDK)
 	if readOnly {
-		log.Println("[Flip] ⚠️  No POLYMARKET_OWNER_KEY — running READ-ONLY (paper trading)")
+		log.Println("[Flip] ⚠️  未配置 POLYMARKET_OWNER_KEY — 只读运行（纸面交易）")
+	} else {
+		log.Println("[Flip] 🔑 已配置私钥 — 实盘交易可用")
 	}
 
 	// ================================================================
@@ -154,6 +156,9 @@ func main() {
 				log.Printf("[Trading] ⚠️ 实盘启用失败: %v（保持禁用）", err)
 			}
 		}
+	}
+	if trader != nil {
+		defer trader.Close()
 	}
 
 	// 订单簿 token 追踪
@@ -230,20 +235,18 @@ func main() {
 	}
 
 	// 可选：HTTP Dashboard
+	mode := "paper"
+	if trader != nil && trader.Enabled() {
+		mode = "live"
+	}
 	if cfg.Runtime.DashboardAddr != "" {
-		mode := "paper"
-		if trader != nil && trader.Enabled() {
-			mode = "live"
-		} else if !readOnly {
-			mode = "live" // 有凭证但未启用实盘，仍显示为 live（可下单模式）
-		}
 		dash := dashboard.New(collector, flipEngine, histTracker, flipRecorder, binance, trader, cfg.Runtime.Symbol, mode)
 		go dash.ListenAndServe(cfg.Runtime.DashboardAddr)
 		log.Printf("[Flip] Dashboard: http://0.0.0.0%s（可通过任意网卡访问）", cfg.Runtime.DashboardAddr)
 	}
 
 	modeLabel := "纸面交易"
-	if trader != nil && trader.Enabled() {
+	if mode == "live" {
 		modeLabel = "实盘交易"
 	}
 	log.Println("========================================")

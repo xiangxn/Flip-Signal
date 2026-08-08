@@ -17,33 +17,33 @@ import (
 //
 // 并发模型：mu (sync.RWMutex) 保护所有状态字段。
 // 写路径：主市场循环（OnSignal/NewCycle/OnCycleEnd）、后台结算 goroutine、
-// Enable/Disable/ClosePosition（无 Dashboard handler，但预留）。
+// Enable/Disable/ClosePosition。
 type Trader struct {
-	mu       sync.RWMutex
-	cfg      TradingConfig
-	client   TradeClient
-	resolved <-chan *sdk.ResolvedInfo // WS 结算事件源
-	now      func() time.Time         // 可注入时钟（测试用，nil 则用 time.Now）
+	mu           sync.RWMutex
+	cfg          TradingConfig
+	client       TradeClient
+	resolved     <-chan *sdk.ResolvedInfo // WS 结算事件源
+	now          func() time.Time         // 可注入时钟（测试用，nil 则用 time.Now）
+	lastDayCheck time.Time                // 上次日切检查时间
 
-	exec       ExecutionState
-	orders     []*OrderRecord
-	positions  []Position
-	recorder   *TradeRecorder
-	liveOK     bool // 是否具备 CLOB 凭证（Enable 前置条件）
-	done       chan struct{}
+	exec      ExecutionState
+	orders    []*OrderRecord
+	positions []Position
+	recorder  *TradeRecorder
+	liveOK    bool // Enable() 调用后为 true
 }
 
 // NewTrader 构造 Trader。client 为 nil 时仅纸面可用。
 func NewTrader(cfg TradingConfig, client TradeClient, resolved <-chan *sdk.ResolvedInfo) *Trader {
 	return &Trader{
-		cfg:      cfg,
-		client:   client,
-		resolved: resolved,
-		now:      nil, // 用 time.Now
+		cfg:          cfg,
+		client:       client,
+		resolved:     resolved,
+		now:          nil,
+		lastDayCheck: time.Now(),
 		exec: ExecutionState{
 			Enabled: cfg.Enabled,
 		},
-		done: make(chan struct{}),
 	}
 }
 
@@ -65,10 +65,15 @@ func (t *Trader) Start(ctx context.Context) error {
 		return fmt.Errorf("创建交易记录器失败: %w", err)
 	}
 
-	// 后台：结算事件监听
 	go t.resolutionWatcher(ctx)
-
 	return nil
+}
+
+// Close 关闭 Trader，刷新并关闭交易记录器。
+func (t *Trader) Close() {
+	if t.recorder != nil {
+		t.recorder.Close()
+	}
 }
 
 // ── 运行时开关 ──
@@ -106,47 +111,56 @@ func (t *Trader) Enabled() bool {
 
 // ── 市场周期钩子 ──
 
-// NewCycle 在新市场周期开始时调用，记录当前 condition/token。
-func (t *Trader) NewCycle(conditionID, yesTokenID, noTokenID string) {
+// NewCycle 在新市场周期开始时调用。
+//
+//   - 检查并执行日切重置（DailyPnl/DailySignals/DailyLimitHit）
+//   - 处理上一周期遗留的未结算持仓（fallback 结算）
+//   - 记录当前 conditionID
+func (t *Trader) NewCycle(conditionID string, _ /*yesTokenID*/, _ /*noTokenID*/ string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
+
+	// ── 日切检查 ──
+	now := t.timeNow()
+	if IsNewDay(t.lastDayCheck, now) {
+		t.exec.DailyPnl = 0
+		t.exec.DailySignals = 0
+		t.exec.DailyLimitHit = false
+		t.lastDayCheck = now
+		log.Printf("[Trading] 📅 日切重置: dailyPnl=0 dailySignals=0")
+	}
+
 	t.exec.CurrentCondition = conditionID
-	// 存储 token ID 用于 OnSignal 查找
-	// （通过 exec 之外的方式传递——在 OnSignal 参数中直接传入）
-	_ = yesTokenID
-	_ = noTokenID
 }
 
 // OnSignal 在信号发射点调用，执行风控→FAK 下单→记录。
 //
-// yesTokenID / noTokenID 由调用方（main.go）传入，因为 Trader 不持有 orderbook adapter。
+// 锁仅在状态读写时持有，SDK 网络调用在锁外执行。
 func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) error {
+	// ── 阶段 1：锁内预检查 ──
 	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	// ── 风控闸门 ──
-	now := t.timeNow()
-	verdict := CheckRisk(t.exec, t.cfg, now)
+	verdict := CheckRisk(t.exec, t.cfg, t.timeNow())
 	if !verdict.OK {
-		t.exec.LastSkipReason = verdict.Reason
-		return fmt.Errorf("风控拒绝: %s", verdict.Reason)
+		reason := verdict.Reason
+		t.exec.LastSkipReason = reason
+		t.mu.Unlock()
+		return fmt.Errorf("风控拒绝: %s", reason)
 	}
 
-	// ── 信号→订单映射 ──
 	tokenID, tokenSide, err := SignalToOrder(sig, yesTokenID, noTokenID)
 	if err != nil {
 		t.exec.LastSkipReason = err.Error()
+		t.mu.Unlock()
 		return fmt.Errorf("信号映射失败: %w", err)
 	}
 
-	// ── 计算价格上限 ──
 	maxPrice := CalcMaxPrice(sig.EntryPrice, t.cfg.MaxSlippage)
 	if maxPrice <= 0 {
 		t.exec.LastSkipReason = "价格上限计算无效"
+		t.mu.Unlock()
 		return fmt.Errorf("价格上限无效: entry=%.4f slippage=%.2f", sig.EntryPrice, t.cfg.MaxSlippage)
 	}
 
-	// ── 记录订单 ──
 	rec := &OrderRecord{
 		ConditionID:  sig.ConditionID,
 		TokenID:      tokenID,
@@ -155,94 +169,112 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		Price:        maxPrice,
 		RequestedAmt: t.cfg.StakePerSignal,
 		State:        OrderPending,
-		CreatedAt:    now,
+		CreatedAt:    t.timeNow(),
 	}
 	t.orders = append(t.orders, rec)
 
-	// ── 纸面模式：记录但不提交 ──
-	if !t.liveOK || t.client == nil {
+	liveOK := t.liveOK
+	client := t.client
+	cfg := t.cfg
+	t.mu.Unlock()
+
+	// ── 阶段 2：锁外 SDK 调用 ──
+
+	// 纸面模式：仅记录，不提交
+	if !liveOK || client == nil {
+		t.mu.Lock()
 		rec.State = OrderFilled
-		rec.FilledShares = ComputeShares(t.cfg.StakePerSignal, sig.EntryPrice)
+		rec.FilledShares = ComputeShares(cfg.StakePerSignal, sig.EntryPrice)
 		rec.AvgFillPrice = sig.EntryPrice
 		rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(rec)
 		t.exec.DailySignals++
 		t.exec.LastSkipReason = ""
+		t.mu.Unlock()
 		log.Printf("[Trading] 📝 纸面信号记录: side=%s entry=%.4f shares=%.0f maxPrice=%.4f",
 			tokenSide, sig.EntryPrice, rec.FilledShares, maxPrice)
 		return nil
 	}
 
-	// ── 实盘：创建 FAK 市价单 ──
-	signedOrder, err := t.client.CreateMarketOrder(&orders.UserMarketOrder{
+	// 实盘：CreateMarketOrder
+	signedOrder, err := client.CreateMarketOrder(&orders.UserMarketOrder{
 		TokenID:   tokenID,
 		Price:     &maxPrice,
-		Amount:    t.cfg.StakePerSignal,
+		Amount:    cfg.StakePerSignal,
 		Side:      orders.BUY,
 		OrderType: orders.MARKET_FAK,
 	}, orders.CreateOrderOptions{})
 	if err != nil {
+		t.mu.Lock()
 		rec.State = OrderFailed
 		rec.ErrorMsg = fmt.Sprintf("CreateMarketOrder: %v", err)
 		rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
+		t.mu.Unlock()
 		return fmt.Errorf("创建订单失败: %w", err)
 	}
 
-	// ── 提交 FAK ──
-	resp, err := t.client.PostOrder(signedOrder, orders.FAK, false)
+	// PostOrder
+	resp, err := client.PostOrder(signedOrder, orders.FAK, false)
 	if err != nil {
+		t.mu.Lock()
 		rec.State = OrderFailed
 		rec.ErrorMsg = fmt.Sprintf("PostOrder: %v", err)
 		rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
+		t.mu.Unlock()
 		return fmt.Errorf("提交订单失败: %w", err)
 	}
 
 	orderID, success, errMsg := ParsePostOrderResp(resp)
+
+	// GetOpenOrders 查询成交
+	var filledShares, avgFillPrice float64
+	var orderState OrderState
+	if success && orderID != "" {
+		orderState = OrderSubmitted
+		openOrders, oErr := client.GetOpenOrders(&orders.OpenOrderParams{Id: &orderID}, true, nil)
+		if oErr != nil {
+			log.Printf("[Trading] ⚠️ 查询订单状态失败: %v", oErr)
+		}
+		if len(openOrders) > 0 {
+			oo := openOrders[0]
+			filledShares = oo.SizeMatched
+			if oo.SizeMatched > 0 {
+				avgFillPrice = cfg.StakePerSignal / oo.SizeMatched
+			}
+			if oo.Status == "MATCHED" || oo.SizeMatched >= ComputeShares(cfg.StakePerSignal, maxPrice) {
+				orderState = OrderFilled
+			}
+		}
+	} else {
+		orderState = OrderFailed
+	}
+
+	// ── 阶段 3：锁内状态更新 ──
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	rec.ID = orderID
+	rec.State = orderState
+	rec.FilledShares = filledShares
+	rec.AvgFillPrice = avgFillPrice
 	rec.UpdatedAt = t.timeNow()
-
-	if !success || orderID == "" {
-		rec.State = OrderFailed
+	if orderState == OrderFailed {
 		rec.ErrorMsg = errMsg
-		t.recorder.AppendOrder(rec)
-		t.exec.LastSkipReason = fmt.Sprintf("PostOrder 失败: %s", errMsg)
-		return fmt.Errorf("PostOrder 返回失败: %s", errMsg)
 	}
-
-	// ── 提交成功 → 查询成交状态 ──
-	rec.State = OrderSubmitted
-
-	openOrders, err := t.client.GetOpenOrders(&orders.OpenOrderParams{Id: &orderID}, true, nil)
-	if err != nil {
-		log.Printf("[Trading] ⚠️ 查询订单状态失败: %v", err)
-	}
-	if len(openOrders) > 0 {
-		oo := openOrders[0]
-		rec.FilledShares = oo.SizeMatched
-		if oo.SizeMatched > 0 && rec.FilledShares > 0 {
-			// 用请求金额和实际成交股数估算成交均价
-			rec.AvgFillPrice = t.cfg.StakePerSignal / oo.SizeMatched
-		}
-		if oo.Status == "MATCHED" || oo.SizeMatched >= ComputeShares(t.cfg.StakePerSignal, maxPrice) {
-			rec.State = OrderFilled
-		}
-	}
-
 	t.recorder.AppendOrder(rec)
 
-	// ── 建仓 ──
-	if rec.State == OrderFilled && rec.FilledShares > 0 {
+	if orderState == OrderFilled && filledShares > 0 {
 		pos := &Position{
 			ConditionID: sig.ConditionID,
 			TokenID:     tokenID,
 			TokenSide:   tokenSide,
-			Shares:      rec.FilledShares,
-			AvgPrice:    rec.AvgFillPrice,
-			CostUSDC:    rec.FilledShares * rec.AvgFillPrice,
+			Shares:      filledShares,
+			AvgPrice:    avgFillPrice,
+			CostUSDC:    filledShares * avgFillPrice,
 			OrderID:     orderID,
 			OpenedAt:    t.timeNow(),
 		}
@@ -250,79 +282,67 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 		log.Printf("[Trading] 🎯 实盘成交: side=%s shares=%.1f avgPrice=%.4f cost=%.2f orderID=%s",
 			tokenSide, pos.Shares, pos.AvgPrice, pos.CostUSDC, orderID)
 	} else {
-		log.Printf("[Trading] ⚠️ FAK 未完全成交: orderID=%s state=%v filled=%.1f",
-			orderID, rec.State, rec.FilledShares)
+		t.exec.LastSkipReason = fmt.Sprintf("FAK 未完全成交: state=%v filled=%.1f", orderState, filledShares)
+		log.Printf("[Trading] ⚠️ %s", t.exec.LastSkipReason)
 	}
 
 	t.exec.DailySignals++
-	t.exec.LastSkipReason = ""
 	return nil
 }
 
-// OnCycleEnd 市场结束时调用：等待结算。
+// OnCycleEnd 市场结束时调用。
 //
-// resolutionWatcher goroutine 在后台监听 WS 结算事件并自动结算匹配的持仓。
-// 此方法等待 ResolutionTimeoutSec 后检查是否已结算，未结算则回退到模拟 outcome。
-//
-// simulatedOutcome 来自 BTC 价格（0=Up 1=Down）。
+// 非阻塞：启动后台 goroutine 等待 WS 结算，超时后回退到模拟 outcome。
+// resolutionWatcher 在 WS 事件到达时即时结算，此处仅作兜底。
 func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) {
-	// 等待 WS 结算或超时
+	t.mu.RLock()
+	pos := t.exec.Position
+	t.mu.RUnlock()
+
+	if pos == nil || pos.ConditionID != conditionID {
+		return
+	}
+
+	// 启动后台兜底计时器（非阻塞）
 	timeout := time.Duration(t.cfg.ResolutionTimeoutSec) * time.Second
-	deadline := time.After(timeout)
+	go t.fallbackSettlementTimer(pos, simulatedOutcome, timeout)
+}
 
-	// 轮询检查是否已结算（resolutionWatcher 会处理）
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
+// fallbackSettlementTimer 在超时后检查持仓是否仍未结算，若是则回退到模拟结算。
+func (t *Trader) fallbackSettlementTimer(pos *Position, simulatedOutcome int, timeout time.Duration) {
+	select {
+	case <-time.After(timeout):
+		// 超时：检查是否已被 resolutionWatcher 结算
 		t.mu.RLock()
-		pos := t.exec.Position
+		currentPos := t.exec.Position
 		t.mu.RUnlock()
 
-		// 已无持仓 → 已结算
-		if pos == nil || pos.ConditionID != conditionID {
-			return
+		if currentPos == nil || currentPos.ConditionID != pos.ConditionID {
+			return // 已被 WS 结算
 		}
 
-		select {
-		case <-deadline:
-			// 超时：强制模拟结算
-			t.mu.RLock()
-			pos := t.exec.Position
-			t.mu.RUnlock()
-
-			if pos == nil || pos.ConditionID != conditionID {
-				return
-			}
-
-			log.Printf("[Trading] ⚠️ 结算超时 %v，使用模拟 outcome", timeout)
-			won := (pos.TokenSide == "yes" && simulatedOutcome == 0) ||
-				(pos.TokenSide == "no" && simulatedOutcome == 1)
-			outcomeStr := "Up"
-			if simulatedOutcome == 1 {
-				outcomeStr = "Down"
-			}
-			t.settleWithOutcome(pos, won, outcomeStr, "simulated_fallback")
-			return
-		case <-ticker.C:
-			// 继续轮询
-		}
+		won := (pos.TokenSide == "yes" && simulatedOutcome == 0) ||
+			(pos.TokenSide == "no" && simulatedOutcome == 1)
+		log.Printf("[Trading] ⚠️ 结算超时 %v，使用模拟 outcome", timeout)
+		t.settleWithOutcome(pos, won, "simulated_fallback")
 	}
 }
 
-// settleWithOutcome 按指定结果结算持仓。
-func (t *Trader) settleWithOutcome(pos *Position, won bool, outcomeStr, source string) {
+// settleWithOutcome 按指定结果结算持仓（调用方自行加锁）。
+func (t *Trader) settleWithOutcome(pos *Position, won bool, source string) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
+	// 防御：已经被结算过了
+	if t.exec.Position == nil || t.exec.Position.ConditionID != pos.ConditionID {
+		return
+	}
+
 	pos.Won = won
-	pos.Outcome = 0
-	if won && pos.TokenSide == "no" {
-		pos.Outcome = 1
-	} else if won && pos.TokenSide == "yes" {
-		pos.Outcome = 0
-	} else if !won && pos.TokenSide == "yes" {
-		pos.Outcome = 1
+	if pos.TokenSide == "no" {
+		pos.Outcome = 1 // 赌 DOWN
+	} else {
+		pos.Outcome = 0 // 赌 UP
 	}
 	pos.PnL = CalcPnL(pos.Shares, pos.AvgPrice, won)
 	pos.ResolutionSource = source
@@ -358,27 +378,27 @@ func (t *Trader) ClosePosition() (*Position, error) {
 	if t.exec.Position == nil {
 		return nil, fmt.Errorf("无持仓可平")
 	}
-	// TODO: 实现 market SELL
 	return nil, fmt.Errorf("手动平仓尚未实现")
 }
 
 // ── 后台 goroutine ──
 
-// resolutionWatcher 监听 WS 结算事件，结算匹配的持仓。
+// resolutionWatcher 监听 WS 结算事件，即时结算匹配的持仓。
 func (t *Trader) resolutionWatcher(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-t.done:
-			return
-		case info := <-t.resolved:
+		case info, ok := <-t.resolved:
+			if !ok {
+				return
+			}
 			t.mu.RLock()
 			pos := t.exec.Position
 			t.mu.RUnlock()
 			if pos != nil && info.Market == pos.ConditionID {
 				won := info.WinningAssetId == pos.TokenID
-				t.settleWithOutcome(pos, won, info.WinningOutcome, "ws")
+				t.settleWithOutcome(pos, won, "ws")
 			}
 		}
 	}
