@@ -279,6 +279,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) er
 			OpenedAt:    t.timeNow(),
 		}
 		t.exec.Position = pos
+		t.exec.LastSkipReason = ""
 		log.Printf("[Trading] 🎯 实盘成交: side=%s shares=%.1f avgPrice=%.4f cost=%.2f orderID=%s",
 			tokenSide, pos.Shares, pos.AvgPrice, pos.CostUSDC, orderID)
 	} else {
