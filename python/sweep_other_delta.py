@@ -181,8 +181,7 @@ def run_sweep(events, cfg, other_delta_hard_filter):
             signal = check_signal_sweep(event, side, cfg, other_delta_hard_filter)
             if signal is not None:
                 signals.append(signal)
-                if cfg.first_crossing_only:
-                    break
+                break  # 每事件最多一注
     return signals
 
 

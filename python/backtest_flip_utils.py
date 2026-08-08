@@ -388,7 +388,8 @@ def run_backtest(events: list[dict],
                  cfg: FlipBacktestConfig = None) -> tuple[list[FlipSignal], int, int]:
     """对全部事件运行回测，返回 (信号列表, 总事件数, 有效事件数)。
 
-    每个事件最多触发一次 (first_crossing_only)。
+    每个事件最多产生一个信号（每事件一注，YES 优先）。
+    多穿越重试由 cfg.allow_retry_crossings 控制（默认 True）。
     """
     if cfg is None:
         cfg = DEFAULT_CONFIG
@@ -405,13 +406,12 @@ def run_backtest(events: list[dict],
         if event.get("hist_avg_range") is None:
             continue
 
-        # Step 1: 寻找第一次 >0.7 穿越 (两边都检查)
+        # Step 1: YES 优先，每事件最多一注
         for side in ("yes", "no"):
             signal = check_signal(event, side, cfg)
             if signal is not None:
                 signals.append(signal)
-                if cfg.first_crossing_only:
-                    break  # 每个事件最多触发一次
+                break  # 每事件最多一注
 
     return signals, total, active
 

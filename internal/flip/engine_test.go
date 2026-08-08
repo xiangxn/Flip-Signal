@@ -553,31 +553,31 @@ func TestEngine_SkipEarlyCrossing(t *testing.T) {
 	eng := NewEngine(cfg, ht)
 	eng.Reset(1)
 
-	// Early crossing at rem=270 (>=260) — should NOT be tracked
+	// Early crossing at rem=270 (>=260) — should NOT set wasAbove
 	snapEarly := makeTestSnap(0.75, 0.30, 50000, 50000, 270)
 	eng.ProcessSnapshot(snapEarly, 1)
-	if eng.yesFirstCrossIdx != -1 {
-		t.Errorf("early YES crossing (rem=270 >= %d) should not be tracked", cfg.MaxRemainingSec)
+	if eng.yesWasAbove {
+		t.Errorf("early YES crossing (rem=270 >= %d) should not set yesWasAbove", cfg.MaxRemainingSec)
 	}
-	if eng.noFirstCrossIdx != -1 {
-		t.Errorf("early NO crossing at rem=270: noPrice=0.30 < 0.7, should not be tracked anyway")
+	if eng.noWasAbove {
+		t.Error("early: noPrice=0.30 < 0.7, noWasAbove should be false")
 	}
 
 	// Also verify early NO crossing is skipped
 	snapEarlyNO := makeTestSnap(0.30, 0.75, 50000, 50000, 265)
 	eng.ProcessSnapshot(snapEarlyNO, 1)
-	if eng.noFirstCrossIdx != -1 {
-		t.Errorf("early NO crossing (rem=265 >= %d) should not be tracked", cfg.MaxRemainingSec)
+	if eng.noWasAbove {
+		t.Errorf("early NO crossing (rem=265 >= %d) should not set noWasAbove", cfg.MaxRemainingSec)
 	}
 
-	// Later crossing at rem=250 (<260) — SHOULD be tracked
+	// Later crossing at rem=250 (<260) — SHOULD be detected as rising edge
 	snapValid := makeTestSnap(0.80, 0.20, 50010, 50000, 250)
 	eng.ProcessSnapshot(snapValid, 1)
-	if eng.yesFirstCrossIdx < 0 {
-		t.Error("valid YES crossing (rem=250 < 260) should be tracked")
+	if !eng.yesWasAbove {
+		t.Error("valid YES crossing (rem=250 < 260) should set yesWasAbove")
 	}
-	if eng.noFirstCrossIdx != -1 {
-		t.Error("noPrice=0.20 < 0.7, NO should not be tracked")
+	if eng.noWasAbove {
+		t.Error("noPrice=0.20 < 0.7, noWasAbove should still be false")
 	}
 }
 
@@ -852,9 +852,10 @@ func TestEngine_VetoNoiseRatio(t *testing.T) {
 }
 
 func TestEngine_MinPreSnapsNotEnough_RetriesOnNextTick(t *testing.T) {
-	// When the first crossing has too few pre-snaps, the side is marked tried
-	// and the engine falls back. nPre is fixed by crossing index so it can
-	// never increase — marking tried is correct (same as quality vetoes).
+	// Multi-crossing mode: when the first crossing has too few pre-snaps,
+	// the engine returns to Watching. A later crossing with enough pre-snaps
+	// will be retried (unlike legacy first_crossing_only which marks the side
+	// as permanently tried).
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 5
 	ht := NewHistRangeTracker(18)
@@ -879,18 +880,27 @@ func TestEngine_MinPreSnapsNotEnough_RetriesOnNextTick(t *testing.T) {
 	if sig != nil {
 		t.Error("expected nil when MinPreSnaps not met")
 	}
-	// YES is marked tried (crossing too early, can't improve nPre)
-	if !eng.yesTried {
-		t.Error("yesTried should be true — MinPreSnaps failure is definitive for this crossing")
-	}
-	// Falls back to Watching (NO hasn't crossed)
+	// Multi-crossing: the engine returns to Watching (side is NOT exhausted)
 	if eng.state != stateWatching {
 		t.Errorf("expected stateWatching after MinPreSnaps fail, got %d", eng.state)
 	}
 
-	// A later YES crossing will be ignored (first_crossing_only, yesTried=true)
-	sig2 := eng.ProcessSnapshot(makeTestSnap(0.80, 0.20, 50070, openPrice, 215), 1)
+	// A later YES crossing SHOULD be retried (multi-crossing mode).
+	// Feed a few more snapshots so the next crossing has nPre >= 5.
+	for i := 0; i < 3; i++ {
+		price := openPrice + float64(i+3)*10
+		snap := makeTestSnap(0.6, 0.3, price, openPrice, 220-i*5)
+		eng.ProcessSnapshot(snap, 1)
+	}
+	// Now YES crossed again with nPre >= 5 — should enter confirming.
+	sig2 := eng.ProcessSnapshot(makeTestSnap(0.80, 0.30, 50070, openPrice, 215), 1)
+	// The engine should be in Confirming (or Done if confirmation already buffered).
+	if eng.state != stateConfirming {
+		t.Errorf("expected stateConfirming on retry crossing, got %d", eng.state)
+	}
 	if sig2 != nil {
-		t.Error("expected nil — YES was already tried (first_crossing_only)")
+		// It's fine if it produces a signal synchronously (buffered confirmation).
+		// What matters is it was NOT ignored.
+		t.Log("retry crossing produced a signal (buffered confirmation)")
 	}
 }

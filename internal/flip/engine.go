@@ -20,8 +20,12 @@ type T0Features struct {
 }
 
 // Engine detects flip signals from a stream of ResearchSnapshots.
-// It implements the Python backtest first_crossing_only logic exactly:
-// check YES first → if signal, done; else check NO → if signal, done.
+//
+// Multi-crossing mode (AllowRetryCrossings=true, default):
+// Every rising edge (>0.7) triggers observation; the first crossing that
+// passes scoring wins. One bet per event. YES-first priority.
+//
+// Legacy mode (AllowRetryCrossings=false): first crossing only per side.
 //
 // Usage per market cycle:
 //
@@ -43,7 +47,12 @@ type Engine struct {
 	generation   int64
 	doneThisGen  bool
 
-	// first_crossing_only tracking (matches Python: try YES, then NO)
+	// Multi-crossing: rising-edge detection (≤threshold → >threshold)
+	// Replaces the old first_crossing_only fields (yesFirstCrossIdx, noFirstCrossIdx, yesTried, noTried).
+	yesWasAbove bool // YES was > threshold in previous snapshot
+	noWasAbove  bool // NO was > threshold in previous snapshot
+
+	// Legacy first_crossing_only tracking (only used when AllowRetryCrossings=false)
 	yesFirstCrossIdx int  // index in snapBuffer of first YES >0.7, -1 if none
 	noFirstCrossIdx  int  // index in snapBuffer of first NO >0.7, -1 if none
 	yesTried         bool // YES side was attempted & failed this generation
@@ -81,6 +90,9 @@ func (e *Engine) Reset(generation int64) {
 	e.generation = generation
 	e.doneThisGen = false
 
+	e.yesWasAbove = false
+	e.noWasAbove = false
+
 	e.yesFirstCrossIdx = -1
 	e.noFirstCrossIdx = -1
 	e.yesTried = false
@@ -98,44 +110,60 @@ func (e *Engine) Reset(generation int64) {
 // ProcessSnapshot processes one ResearchSnapshot. Returns a FlipSignal if
 // all conditions are met, nil otherwise.
 //
-// Matches Python backtest first_crossing_only:
-//   - YES checked first, if signal produced → done
-//   - If YES fails, NO is checked (including past crossings in buffer)
-//   - If NO also fails → resume watching for new crossings
+// Multi-crossing mode (AllowRetryCrossings=true, default):
+//   - Detects rising edges (≤threshold → >threshold) for both YES and NO.
+//   - Each rising edge triggers observation; the first crossing that passes
+//     all pre-checks AND scoring wins. Once a bet is placed, the cycle ends.
+//   - If confirmation fails, checks whether the other side crossed during
+//     the wait and tries it; otherwise returns to watching.
+//
+// Legacy mode (AllowRetryCrossings=false): first crossing only per side.
 func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSignal {
 	if gen != e.generation || e.doneThisGen {
 		return nil
 	}
 
 	// Always append to buffer so it reflects full cycle history.
-	// When falling back from a failed confirmation, the buffer already
-	// contains the confirmation tick and earlier crossings.
 	bufIdx := len(e.snapBuffer)
 	e.snapBuffer = append(e.snapBuffer, snap)
 
-	// Track first crossing per side regardless of state (so crossings
-	// during CONFIRMING are not lost for later fallback).
-	// §2.1: remaining_sec >= MaxRemainingSec → window too early, skip (same level as >0.7)
-	if e.yesFirstCrossIdx < 0 && snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec {
-		e.yesFirstCrossIdx = bufIdx
-	}
-	if e.noFirstCrossIdx < 0 && snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec {
-		e.noFirstCrossIdx = bufIdx
-	}
+	// Rising-edge detection for both sides (§2.1: remaining_sec < MaxRemainingSec)
+	yesIsAbove := snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+	noIsAbove := snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+
+	yesRisingEdge := yesIsAbove && !e.yesWasAbove
+	noRisingEdge := noIsAbove && !e.noWasAbove
+
+	e.yesWasAbove = yesIsAbove
+	e.noWasAbove = noIsAbove
 
 	switch e.state {
 	case stateIdle:
 		return nil
 
 	case stateWatching:
-		// Try YES first (match Python order), then NO.
-		// enterConfirming may return a signal synchronously if the confirmation
-		// tick is already buffered (happens after fallback).
-		if !e.yesTried && e.yesFirstCrossIdx >= 0 {
-			return e.enterConfirming(e.yesFirstCrossIdx, "yes")
-		}
-		if !e.noTried && e.noFirstCrossIdx >= 0 {
-			return e.enterConfirming(e.noFirstCrossIdx, "no")
+		if e.cfg.AllowRetryCrossings {
+			// Multi-crossing: try every rising edge, YES-first priority
+			if yesRisingEdge && bufIdx >= e.cfg.MinPreSnaps {
+				return e.enterConfirming(bufIdx, "yes")
+			}
+			if noRisingEdge && bufIdx >= e.cfg.MinPreSnaps {
+				return e.enterConfirming(bufIdx, "no")
+			}
+		} else {
+			// Legacy: track first crossing per side, try YES then NO once each
+			if e.yesFirstCrossIdx < 0 && yesIsAbove {
+				e.yesFirstCrossIdx = bufIdx
+			}
+			if e.noFirstCrossIdx < 0 && noIsAbove {
+				e.noFirstCrossIdx = bufIdx
+			}
+			if !e.yesTried && e.yesFirstCrossIdx >= 0 {
+				return e.enterConfirming(e.yesFirstCrossIdx, "yes")
+			}
+			if !e.noTried && e.noFirstCrossIdx >= 0 {
+				return e.enterConfirming(e.noFirstCrossIdx, "no")
+			}
 		}
 		return nil
 
@@ -148,8 +176,8 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 				e.doneThisGen = true
 				return sig
 			}
-			// Confirmation failed — try the other side (Python fallback)
-			return e.fallbackAfterFailedConfirm()
+			// Confirmation failed — try the other side or return to watching
+			return e.afterFailedConfirm(snap)
 		}
 		return nil
 
@@ -161,16 +189,17 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 
 // enterConfirming transitions to CONFIRMING state using the crossing at the
 // given buffer index. Computes all T=0 features from snapshots up to crossIdx.
+//
+// In multi-crossing mode (AllowRetryCrossings=true): veto failures on this
+// crossing don't exhaust the side — future rising edges will retry. Only
+// a successfully scored signal (score ≥ ScoreEntry) ends the cycle.
 func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	crossSnap := e.snapBuffer[crossIdx]
 
 	// Check minimum pre-snapshots (including crossing snap).
-	// nPre = crossIdx+1 is fixed — later ticks can't increase it.
-	// Mark tried and fallback so the other side gets a chance.
 	nPre := crossIdx + 1 // snapshots up to and including crossing
 	if nPre < e.cfg.MinPreSnaps {
-		e.markSideTried(side)
-		return e.fallbackAfterFailedConfirm()
+		return e.handleEnterFail(side)
 	}
 
 	// Extract pre-prices from snap buffer up to crossing
@@ -194,17 +223,14 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	}
 	preRange := preHigh - preLow
 	if preRange == 0 {
-		// All prices identical — invalid data for this crossing, mark tried & fallback
-		e.markSideTried(side)
-		return e.fallbackAfterFailedConfirm()
+		return e.handleEnterFail(side)
 	}
 
 	e.pathEff = netMove / preRange
 
 	// path_eff too low → trend unclear, veto
 	if e.pathEff < e.cfg.PathEffVetoMin {
-		e.markSideTried(side)
-		return e.fallbackAfterFailedConfirm()
+		return e.handleEnterFail(side)
 	}
 
 	totalPathVal := TotalPath(prePrices)
@@ -216,8 +242,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 
 	// high noise ratio → PM price unstable, veto
 	if e.noiseRatio > e.cfg.NoiseRatioVetoMax {
-		e.markSideTried(side)
-		return e.fallbackAfterFailedConfirm()
+		return e.handleEnterFail(side)
 	}
 
 	e.flips = CountFlips(prePrices)
@@ -230,14 +255,10 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 
 	// F0: Range expansion too large — real breakout, PM is right, veto
 	if e.histRange.IsReady() && e.rangeExpansion >= e.cfg.RangeExpMax {
-		e.markSideTried(side)
-		return e.fallbackAfterFailedConfirm()
+		return e.handleEnterFail(side)
 	}
 
-	// All pre-checks passed — mark side as tried
-	e.markSideTried(side)
-
-	// Save crossing state
+	// All pre-checks passed — save crossing state
 	e.crossSnap = crossSnap
 	e.crossSide = side
 	e.crossIdx = crossIdx
@@ -254,8 +275,8 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 			e.doneThisGen = true
 			return sig
 		}
-		// This side failed too — try fallback again
-		return e.fallbackAfterFailedConfirm()
+		// This side failed — try the other side or return to watching
+		return e.afterFailedConfirm(e.snapBuffer[confIdx])
 	}
 
 	// Normal path: wait for the confirmation tick to arrive
@@ -263,9 +284,92 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	return nil
 }
 
-// fallbackAfterFailedConfirm implements the Python first_crossing_only fallback:
+// handleEnterFail handles a veto during enterConfirming. In multi-crossing mode
+// this crossing is abandoned but the side is not exhausted; in legacy mode the
+// side is marked as tried.
+func (e *Engine) handleEnterFail(side string) *FlipSignal {
+	if !e.cfg.AllowRetryCrossings {
+		e.markSideTried(side)
+		return e.fallbackAfterFailedConfirm()
+	}
+	// Multi-crossing: this crossing failed, return to watching for the next rising edge
+	e.returnToWatching()
+	return nil
+}
+
+// afterFailedConfirm handles the situation when a side's confirmation fails to
+// produce a signal. In multi-crossing mode it checks whether the other side
+// crossed during the confirmation window and tries it; otherwise returns to
+// watching. In legacy mode it delegates to fallbackAfterFailedConfirm.
+func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
+	if !e.cfg.AllowRetryCrossings {
+		return e.fallbackAfterFailedConfirm()
+	}
+
+	// Multi-crossing: check if the other side is currently above threshold
+	// (crossed during our confirmation window)
+	otherSide := "no"
+	if e.crossSide == "no" {
+		otherSide = "yes"
+	}
+
+	otherIsAbove := false
+	if otherSide == "yes" {
+		otherIsAbove = snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+	} else {
+		otherIsAbove = snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+	}
+
+	if otherIsAbove {
+		// Find the most recent rising edge for the other side
+		otherCrossIdx := e.findRecentCrossing(otherSide)
+		if otherCrossIdx >= 0 && otherCrossIdx >= e.cfg.MinPreSnaps {
+			return e.enterConfirming(otherCrossIdx, otherSide)
+		}
+	}
+
+	// Nothing pending → return to watching
+	e.returnToWatching()
+	return nil
+}
+
+// findRecentCrossing scans snapBuffer backwards to find the most recent
+// rising edge (≤threshold → >threshold) for the given side.
+// Returns -1 if not found.
+func (e *Engine) findRecentCrossing(side string) int {
+	wasAbove := false
+	for i := len(e.snapBuffer) - 1; i >= 0; i-- {
+		s := e.snapBuffer[i]
+		var price float64
+		if side == "yes" {
+			price = s.YesPrice
+		} else {
+			price = s.NoPrice
+		}
+		isAbove := price > e.cfg.TriggerThreshold && s.RemainingSec < e.cfg.MaxRemainingSec
+		if wasAbove && !isAbove {
+			return i + 1 // rising edge at next snapshot
+		}
+		wasAbove = isAbove
+	}
+	if wasAbove {
+		return 0 // very first snapshot was already above threshold
+	}
+	return -1
+}
+
+// returnToWatching resets the crossing state and transitions back to Watching.
+func (e *Engine) returnToWatching() {
+	e.state = stateWatching
+	e.crossSnap = nil
+	e.crossSide = ""
+	e.crossIdx = 0
+	e.confirmCount = 0
+}
+
+// fallbackAfterFailedConfirm implements the legacy first_crossing_only fallback:
 // after one side fails, try the other side's first crossing from the buffer.
-// If the other side hasn't crossed yet, resume WATCHING to catch future crossings.
+// Only used when AllowRetryCrossings=false.
 func (e *Engine) fallbackAfterFailedConfirm() *FlipSignal {
 	// Check if the other side has also crossed (earlier or at current tick)
 	if !e.yesTried && e.yesFirstCrossIdx >= 0 {

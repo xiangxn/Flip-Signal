@@ -158,6 +158,12 @@ flip:
   # 默认值: 0.7
   trigger_threshold: 0.7
 
+  # 多穿越重试模式
+  # true  = 每个向上穿越 0.7 的上升沿都触发检测，首个评分通过者下注（新行为，推荐）
+  # false = 仅首次穿越触发检测（旧行为，兼容）
+  # 默认值: true
+  allow_retry_crossings: true
+
   # 穿越前最少 snapshot 数，确保有足够的前置数据
   # 默认值: 5（5 × 5s = 25s 预热）
   min_pre_snaps: 5
