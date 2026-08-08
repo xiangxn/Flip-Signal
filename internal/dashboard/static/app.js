@@ -145,8 +145,8 @@ async function fetchState() {
     document.getElementById('stat-wr').textContent = (d.win_rate * 100).toFixed(1) + '%';
     document.getElementById('stat-pending').textContent = d.pending_count;
 
-    // PnL 优先使用 Trader 累计（纸面/实盘统一），无 Trader 时用 FlipRecorder
-    const pnl = d.trader_cumulative_pnl ?? d.cumulative_pnl;
+    // PnL 来自 FlipRecorder（已通过 UpdateExecution 同步了纸面/实盘的成交数据）
+    const pnl = d.cumulative_pnl;
     const pnlEl = document.getElementById('stat-pnl');
     pnlEl.textContent = (pnl >= 0 ? '+' : '') + pnl.toFixed(4);
     pnlEl.className = 'value ' + (pnl >= 0 ? 'val-green' : 'val-red');
