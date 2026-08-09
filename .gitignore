@@ -1,11 +1,10 @@
 data
 data_*
 
+.env
 __pycache__
 venv
 reports
 dist
-
-deploy.sh
 
 config.yaml

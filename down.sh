@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+source .env
+
 # 用法: ./down.sh <btc|eth>
 #   btc — 下载 /root/lastrading/data 到 ./data
 #   eth — 下载 /root/lastrading/eth/data 到 ./data
@@ -26,5 +28,5 @@ case "$SYMBOL" in
 esac
 
 echo "正在从 $REMOTE_DIR 下载到 ./data ..."
-scp -r -o ProxyCommand="nc -X 5 -x 127.0.0.1:1080 %h %p" root@23.94.67.168:"$REMOTE_DIR" ./data
+scp -r -o ProxyCommand="nc -X 5 -x 127.0.0.1:1080 %h %p" root@"$SERVER_IP":"$REMOTE_DIR" ./data
 echo "下载完成。"
