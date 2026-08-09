@@ -349,7 +349,6 @@ type traderResponse struct {
 	DailyPnl      float64              `json:"daily_pnl"`
 	DailySignals  int                  `json:"daily_signals"`
 	DailyLimitHit bool                 `json:"daily_limit_hit"`
-	CooldownUntil string               `json:"cooldown_until"`
 	HasPosition   bool                 `json:"has_position"`
 	CumulativePnl float64              `json:"cumulative_pnl"`
 	TotalTrades   int                  `json:"total_trades"`
@@ -373,7 +372,6 @@ func (s *State) handleTrader(w http.ResponseWriter, r *http.Request) {
 		DailyPnl:      ts.DailyPnl,
 		DailySignals:  ts.DailySignals,
 		DailyLimitHit: ts.DailyLimitHit,
-		CooldownUntil: ts.CooldownUntil.Format(time.RFC3339),
 		HasPosition:   ts.Position != nil,
 		CumulativePnl: cumPnl,
 		TotalTrades:   len(positions),

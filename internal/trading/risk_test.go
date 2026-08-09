@@ -31,30 +31,6 @@ func TestCheckRisk_DailyPnlExceedsMaxLoss(t *testing.T) {
 	}
 }
 
-func TestCheckRisk_Cooldown(t *testing.T) {
-	now := time.Now()
-	es := ExecutionState{
-		Enabled:       true,
-		CooldownUntil: now.Add(5 * time.Minute),
-	}
-	v := CheckRisk(es, DefaultConfig(), now, "")
-	if v.OK {
-		t.Fatal("expected rejection during cooldown")
-	}
-}
-
-func TestCheckRisk_CooldownExpired(t *testing.T) {
-	now := time.Now()
-	es := ExecutionState{
-		Enabled:       true,
-		CooldownUntil: now.Add(-1 * time.Second),
-	}
-	v := CheckRisk(es, DefaultConfig(), now, "")
-	if !v.OK {
-		t.Fatal("expected pass when cooldown expired, got: " + v.Reason)
-	}
-}
-
 func TestCheckRisk_OpenPosition(t *testing.T) {
 	es := ExecutionState{
 		Enabled:  true,

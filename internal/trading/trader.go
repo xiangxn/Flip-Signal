@@ -425,11 +425,6 @@ func (t *Trader) settleWithOutcome(pos *Position, won bool, source string) {
 	t.exec.DailyPnl += pos.PnL
 	t.exec.Position = nil
 
-	// 亏损冷却
-	if pos.PnL < 0 {
-		t.exec.CooldownUntil = t.timeNow().Add(time.Duration(t.cfg.CooldownAfterLossSec) * time.Second)
-	}
-
 	// 日亏检查
 	if t.exec.DailyPnl <= -t.cfg.MaxDailyLoss {
 		t.exec.DailyLimitHit = true

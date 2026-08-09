@@ -332,10 +332,6 @@ trading:
   # 默认值: 10.0
   max_daily_loss: 10.0
 
-  # 亏损后冷却（秒）：一笔亏损结算后暂停下单
-  # 默认值: 300
-  cooldown_after_loss_sec: 300
-
   # 结算等待真实 outcome 超时（秒）：市场结束后等待 WS 结算事件，
   # 超时回退到模拟 BTC outcome（记录 resolution_source=simulated_fallback）
   # 默认值: 300

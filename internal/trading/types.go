@@ -16,7 +16,6 @@ type TradingConfig struct {
 	StakePerSignal       float64 `mapstructure:"stake_per_signal"`       // 每信号投入 USDC
 	MaxSlippage          float64 `mapstructure:"max_slippage"`           // 滑点容忍（价格上限 = entry×(1+slippage)）
 	MaxDailyLoss         float64 `mapstructure:"max_daily_loss"`         // 日亏上限 USDC，触发后当日停止
-	CooldownAfterLossSec int     `mapstructure:"cooldown_after_loss_sec"` // 亏损后冷却秒数
 	ResolutionTimeoutSec int     `mapstructure:"resolution_timeout_sec"` // WS 结算等待超时秒数
 }
 
@@ -28,7 +27,6 @@ func DefaultConfig() TradingConfig {
 		StakePerSignal:       5.0,
 		MaxSlippage:          0.07,
 		MaxDailyLoss:         10.0,
-		CooldownAfterLossSec: 300,
 		ResolutionTimeoutSec: 300,
 	}
 }
@@ -132,7 +130,6 @@ type ExecutionState struct {
 	DailyPnl         float64   `json:"daily_pnl"`
 	DailySignals     int       `json:"daily_signals"`
 	DailyLimitHit    bool      `json:"daily_limit_hit"`
-	CooldownUntil    time.Time `json:"cooldown_until"`
 	CurrentCondition string    `json:"current_condition"`
 	Position       *Position        `json:"position,omitempty"` // 当前未结算持仓
 	PendingOrder   *pendingGtcOrder `json:"-"`                  // 当前未成交 GTC 挂单（仅内存）

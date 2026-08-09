@@ -22,8 +22,7 @@ func Reject(reason string) RiskVerdict { return RiskVerdict{OK: false, Reason: r
 //
 //	1. 未启用 → "实盘未启用"
 //	2. 日亏达上限 → "日亏上限已触发，本日停止"
-//	3. 亏损冷却中 → "亏损冷却中"
-//	4. 同一事件已有持仓 → "同一事件已有未结算持仓"
+//	3. 同一事件已有持仓 → "同一事件已有未结算持仓"
 //
 // conditionID 为当前信号的所属市场。仅当已有持仓且属于同一市场时拒绝，
 // 不同事件的持仓不互相阻塞（GTC 异步成交导致前一事件可能未结算）。
@@ -36,10 +35,6 @@ func CheckRisk(es ExecutionState, cfg TradingConfig, now time.Time, conditionID 
 	}
 	if es.DailyPnl <= -cfg.MaxDailyLoss {
 		return Reject(fmt.Sprintf("日亏已达上限 %.2f USDC，本日停止", cfg.MaxDailyLoss))
-	}
-	if now.Before(es.CooldownUntil) {
-		remaining := es.CooldownUntil.Sub(now).Round(time.Second)
-		return Reject(fmt.Sprintf("亏损冷却中，剩余 %v", remaining))
 	}
 	if es.Position != nil && es.Position.ConditionID == conditionID {
 		return Reject("同一事件已有未结算持仓")
