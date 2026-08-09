@@ -4,6 +4,16 @@
 
 所有可调参数集中在此文件，方便调参。
 参数说明对应 docs/flip_backtest_plan.md §2 和 §4。
+
+支持的市场: BTC, ETH
+
+各市场参数独立预设:
+  - DEFAULT_CONFIG     BTC 回测参数 (Formula A 优化值)
+  - ETH_CONFIG         ETH 回测参数 (初始值与 BTC 相同，待独立调参)
+
+用法:
+  python backtest_flip_scoring.py --profile btc --data ../data/btc/
+  python backtest_flip_scoring.py --profile eth --data ../data/eth/
 """
 
 from dataclasses import dataclass
@@ -70,4 +80,5 @@ class FlipBacktestConfig:
 
 
 # 默认配置实例
-DEFAULT_CONFIG = FlipBacktestConfig()
+DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 回测参数 (Formula A 优化值)
+ETH_CONFIG = FlipBacktestConfig()       # ETH 回测参数 (初始值与 BTC 相同，待独立调参)

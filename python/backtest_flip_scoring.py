@@ -23,7 +23,7 @@ from pathlib import Path
 # 确保可以从 python/ 目录运行
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG
+from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG, ETH_CONFIG
 from backtest_flip_utils import (
     load_events_from_dir,
     run_backtest,
@@ -39,8 +39,8 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
-        "--data", default="../data",
-        help="JSONL 数据目录 (默认: ../data/)"
+        "--data", default="../data/btc/",
+        help="JSONL 数据目录 (默认: ../data/btc/)"
     )
     parser.add_argument(
         "--export", default=None,
@@ -49,6 +49,10 @@ def main():
     parser.add_argument(
         "--verbose", "-v", action="store_true",
         help="打印每笔信号详情"
+    )
+    parser.add_argument(
+        "--profile", choices=["btc", "eth"], default="btc",
+        help="参数预设 (默认: btc)"
     )
     args = parser.parse_args()
 
@@ -68,8 +72,8 @@ def main():
     print(f"  → 有历史振幅数据: {n_with_hist}/{len(events)}")
 
     # ── 运行回测 ──
-    cfg = DEFAULT_CONFIG
-    print(f"\n运行回测 (trigger>{cfg.trigger_threshold}, "
+    cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+    print(f"\n运行回测 [{args.profile.upper()}] (trigger>{cfg.trigger_threshold}, "
           f"confirm_delay={cfg.confirm_delay_ticks}tick, "
           f"score_entry≥{cfg.score_entry})...")
     signals, total_events, active_events = run_backtest(events, cfg)

@@ -39,7 +39,7 @@ func init() {
 }
 
 func main() {
-	outputDir := flag.String("output", "data/lab", "Output directory for event JSONL files")
+	outputDir := flag.String("output", "data/btc", "Output directory for event JSONL files")
 	symbol := flag.String("symbol", "BTCUSDT", "Binance trading pair")
 	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug prefix")
 	flag.Parse()
@@ -138,7 +138,7 @@ func main() {
 	}()
 
 	log.Println("========================================")
-	log.Println(" Feature Research Lab — BTC 5-min data")
+	log.Printf(" Feature Research %s data", *slugPrefix)
 	log.Printf(" Symbol: %s  |  Slug: %s  |  Output: %s", *symbol, *slugPrefix, *outputDir)
 	log.Println(" Sources: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
 	log.Println("========================================")

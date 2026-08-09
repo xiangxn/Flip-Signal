@@ -6,6 +6,7 @@ Analyze BTC post-crossing behavior, flip sub-types,
 and whether flips are predictable before market close.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -15,11 +16,13 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "lab"
+from backtest_flip_config import DEFAULT_CONFIG, ETH_CONFIG
 
-def load_all_events():
+
+def load_all_events(data_dir):
+    data_path = Path(data_dir)
     events = []
-    for f in sorted(DATA_DIR.glob("events_*.jsonl")):
+    for f in sorted(data_path.glob("events_*.jsonl")):
         with open(f) as fp:
             for line in fp:
                 line = line.strip()
@@ -168,11 +171,18 @@ def analyze_post_crossing_btc(event, favored_side):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Deep Flip Analysis")
+    parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+    parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+    args = parser.parse_args()
+
+    cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+
     print("=" * 80)
-    print("DEEP FLIP ANALYSIS - BTC POST-CROSSING BEHAVIOR")
+    print(f"DEEP FLIP ANALYSIS [{args.profile.upper()}] - POST-CROSSING BEHAVIOR")
     print("=" * 80)
 
-    events = load_all_events()
+    events = load_all_events(args.data)
 
     # Analyze each event that has a side > 0.7
     results = []

@@ -3,15 +3,23 @@
 Sweep other_delta hard filter thresholds to find optimal setting.
 """
 
+import argparse
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backtest_flip_config import FlipBacktestConfig
+from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG, ETH_CONFIG
 from backtest_flip_utils import load_events_from_dir, run_backtest
 
+parser = argparse.ArgumentParser(description="other_delta 阈值扫描")
+parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+args = parser.parse_args()
+
+cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+
 # Load data once
-events = load_events_from_dir("../data/lab/")
+events = load_events_from_dir(args.data)
 print(f"Loaded {len(events)} events")
 
 # Sweep other_delta thresholds
@@ -88,9 +96,9 @@ def check_signal_sweep(event, side, cfg, other_delta_hard_filter):
     oscillating = is_oscillating(pre_prices, open_price, cfg)
 
     # Hard filters (keeping these)
-    if noise_ratio_val > 3.0:
+    if noise_ratio_val > cfg.noise_ratio_veto_max:
         return None
-    if path_eff < 0.4:
+    if path_eff < cfg.path_eff_veto_min:
         return None
 
     # Range expansion
@@ -185,10 +193,10 @@ def run_sweep(events, cfg, other_delta_hard_filter):
     return signals
 
 
-# Run sweep
-cfg = DEFAULT_CONFIG
+# Run sweep (cfg already set from --profile args above)
 
-print(f"\n{'other_delta':>12s}  {'signals':>7s}  {'win_rate':>8s}  {'total_pnl':>9s}  {'avg_score':>7s}  {'avg_entry':>9s}  {'win/loss':>9s}  {'avg_other_d':>11s}")
+print(f"\n[{args.profile.upper()}] other_delta 阈值扫描")
+print(f"{'other_delta':>12s}  {'signals':>7s}  {'win_rate':>8s}  {'total_pnl':>9s}  {'avg_score':>7s}  {'avg_entry':>9s}  {'win/loss':>9s}  {'avg_other_d':>11s}")
 print("-" * 100)
 
 for thresh in [-100.0, -0.05, -0.03, -0.02, -0.015, -0.01, -0.005, 0.0, 0.005, 0.01, 0.015, 0.02, 0.025, 0.03, 0.035, 0.04, 0.05]:

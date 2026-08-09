@@ -6,17 +6,19 @@ Focus: Entry price optimization, BTC runway analysis,
 and combined signal filtering.
 """
 
+import argparse
 import json
 import numpy as np
 from pathlib import Path
 from collections import defaultdict
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "lab"
+from backtest_flip_config import DEFAULT_CONFIG, ETH_CONFIG
 
 
-def load_all_events():
+def load_all_events(data_dir):
+    data_path = Path(data_dir)
     events = []
-    for f in sorted(DATA_DIR.glob("events_*.jsonl")):
+    for f in sorted(data_path.glob("events_*.jsonl")):
         with open(f) as fp:
             for line in fp:
                 line = line.strip()
@@ -416,8 +418,15 @@ Strategy C: "Target Price Stall"
 
 
 def main():
-    events = load_all_events()
-    print(f"Loaded {len(events)} events")
+    parser = argparse.ArgumentParser(description="Final Strategy Analysis")
+    parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+    parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+    args = parser.parse_args()
+
+    cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+
+    events = load_all_events(args.data)
+    print(f"Loaded {len(events)} events [{args.profile.upper()}]")
 
     data = analyze_entry_price_vs_flip(events)
     analyze_btc_runway(data)

@@ -8,6 +8,7 @@ for reversal signals before deciding to fade.
 Also: test combined pre-crossing + post-crossing filters.
 """
 
+import argparse
 import json
 import os
 import sys
@@ -17,12 +18,13 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "lab"
+from backtest_flip_config import DEFAULT_CONFIG, ETH_CONFIG
 
 
-def load_all_events():
+def load_all_events(data_dir):
+    data_path = Path(data_dir)
     events = []
-    for f in sorted(DATA_DIR.glob("events_*.jsonl")):
+    for f in sorted(data_path.glob("events_*.jsonl")):
         with open(f) as fp:
             for line in fp:
                 line = line.strip()
@@ -426,11 +428,18 @@ def simulate_combined_filter(events):
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Flip Strategy Optimization")
+    parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+    parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+    args = parser.parse_args()
+
+    cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+
     print("=" * 80)
-    print("FLIP STRATEGY OPTIMIZATION")
+    print(f"FLIP STRATEGY OPTIMIZATION [{args.profile.upper()}]")
     print("=" * 80)
 
-    events = load_all_events()
+    events = load_all_events(args.data)
     print(f"Loaded {len(events)} events")
 
     simulate_combined_filter(events)

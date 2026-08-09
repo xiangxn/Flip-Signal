@@ -15,7 +15,7 @@ const chart = new Chart(ctx, {
     labels: [],
     datasets: [
       {
-        label: 'BTC',
+        label: 'Price',
         data: [],
         borderColor: '#58a6ff',
         backgroundColor: 'rgba(88,166,255,0.05)',

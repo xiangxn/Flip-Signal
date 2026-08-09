@@ -4,12 +4,13 @@
 并找到最优阈值让各个特征都能"说话"。
 """
 
+import argparse
 import sys, json, math
 from pathlib import Path
 from collections import defaultdict
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG
+from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG, ETH_CONFIG
 from backtest_flip_utils import (
     load_events_from_dir, compute_hist_avg_range,
     compute_path_efficiency, compute_pre_range, compute_noise_ratio,
@@ -19,8 +20,14 @@ from backtest_flip_utils import (
 
 import os
 os.chdir(Path(__file__).resolve().parent)
-events = load_events_from_dir("../data/lab/")
-cfg = DEFAULT_CONFIG
+
+parser = argparse.ArgumentParser(description="特征分析")
+parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+args = parser.parse_args()
+
+cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+events = load_events_from_dir(args.data)
 
 # ── Collect ALL candidates that pass basic filters (noise, path_eff, range_exp_max) ──
 
@@ -59,10 +66,10 @@ for event in events:
         noise_ratio_val = compute_noise_ratio(pre_prices, net_move)
         flips_val = compute_flips(pre_prices)
 
-        # Only filter noise > 3.0 and path_eff < 0.4 (keep range_exp for analysis)
-        if noise_ratio_val > 3.0:
+        # Only filter noise and path_eff (keep range_exp for analysis)
+        if noise_ratio_val > cfg.noise_ratio_veto_max:
             continue
-        if path_eff < 0.4:
+        if path_eff < cfg.path_eff_veto_min:
             continue
 
         range_expansion = compute_range_expansion(cross_snap["price"], open_price,

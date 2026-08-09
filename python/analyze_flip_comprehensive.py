@@ -13,6 +13,7 @@ outcome mapping:
   1 = NO token won (BTC went DOWN)
 """
 
+import argparse
 import json
 import os
 import sys
@@ -22,20 +23,21 @@ from pathlib import Path
 import numpy as np
 from scipy import stats
 
+from backtest_flip_config import DEFAULT_CONFIG, ETH_CONFIG
+
 # --- Data Loading ---
 
-DATA_DIR = Path(__file__).parent.parent / "data" / "lab"
-
-def load_all_events():
-    """Load all events from data/lab/"""
+def load_all_events(data_dir):
+    """Load all events from data_dir"""
+    data_path = Path(data_dir)
     events = []
-    for f in sorted(DATA_DIR.glob("events_*.jsonl")):
+    for f in sorted(data_path.glob("events_*.jsonl")):
         with open(f) as fp:
             for line in fp:
                 line = line.strip()
                 if line:
                     events.append(json.loads(line))
-    print(f"Loaded {len(events)} events from {len(list(DATA_DIR.glob('events_*.jsonl')))} files")
+    print(f"Loaded {len(events)} events from {len(list(data_path.glob('events_*.jsonl')))} files")
     return events
 
 
@@ -340,11 +342,18 @@ def extract_crossing_features(event_info):
 # --- Main Analysis ---
 
 def main():
+    parser = argparse.ArgumentParser(description="Comprehensive Flip Analysis")
+    parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+    parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+    args = parser.parse_args()
+
+    cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+
     print("=" * 80)
-    print("COMPREHENSIVE FLIP ANALYSIS")
+    print(f"COMPREHENSIVE FLIP ANALYSIS [{args.profile.upper()}]")
     print("=" * 80)
 
-    events = load_all_events()
+    events = load_all_events(args.data)
     event_infos = [classify_event(e) for e in events]
 
     # ---- PART 1: Overall Statistics ----

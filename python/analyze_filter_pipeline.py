@@ -3,11 +3,12 @@
 Detailed analysis: how many signals are killed by each filter stage.
 """
 
+import argparse
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG
+from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG, ETH_CONFIG
 from backtest_flip_utils import (
     load_events_from_dir, compute_hist_avg_range,
     compute_path_efficiency, compute_pre_range, compute_noise_ratio,
@@ -15,8 +16,13 @@ from backtest_flip_utils import (
     compute_btc_position, compute_other_delta,
 )
 
-events = load_events_from_dir("../data/lab/")
-cfg = DEFAULT_CONFIG
+parser = argparse.ArgumentParser(description="过滤管线分析")
+parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+args = parser.parse_args()
+
+cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+events = load_events_from_dir(args.data)
 
 # Track filter stats
 stats = {
@@ -75,10 +81,10 @@ for event in events:
         noise_ratio_val = compute_noise_ratio(pre_prices, net_move)
 
         # Track which filters block
-        if noise_ratio_val > 3.0:
+        if noise_ratio_val > cfg.noise_ratio_veto_max:
             stats["noise_gt_3"] += 1
             continue
-        if path_eff < 0.4:
+        if path_eff < cfg.path_eff_veto_min:
             stats["path_eff_lt_0.4"] += 1
             continue
 

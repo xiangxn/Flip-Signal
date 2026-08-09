@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """分析 remaining_sec 对胜率的影响"""
+import argparse
 import sys, os
 from pathlib import Path
 os.chdir(Path(__file__).resolve().parent)
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backtest_flip_config import FlipBacktestConfig
+from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG, ETH_CONFIG
 from backtest_flip_utils import (
     load_events_from_dir, compute_hist_avg_range,
     compute_path_efficiency, compute_pre_range, compute_noise_ratio,
@@ -13,8 +14,13 @@ from backtest_flip_utils import (
     compute_btc_position, compute_other_delta,
 )
 
-events = load_events_from_dir("../data/lab/")
-cfg = FlipBacktestConfig()
+parser = argparse.ArgumentParser(description="remaining_sec 分析")
+parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+args = parser.parse_args()
+
+cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+events = load_events_from_dir(args.data)
 
 candidates = []
 for event in events:
@@ -40,9 +46,9 @@ for event in events:
             continue
         path_eff = compute_path_efficiency(pre_prices, open_price)
         noise_ratio_val = compute_noise_ratio(pre_prices, net_move)
-        if noise_ratio_val > 3.0:
+        if noise_ratio_val > cfg.noise_ratio_veto_max:
             continue
-        if path_eff < 0.4:
+        if path_eff < cfg.path_eff_veto_min:
             continue
         range_expansion = compute_range_expansion(cross_snap["price"], open_price, event.get("hist_avg_range"))
         if range_expansion is not None and range_expansion >= cfg.range_exp_max:

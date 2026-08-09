@@ -4,11 +4,12 @@
 如果去掉这道硬过滤, 有多少能过 score ≥ 5?
 """
 
+import argparse
 import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG
+from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG, ETH_CONFIG
 from backtest_flip_utils import (
     load_events_from_dir, compute_hist_avg_range,
     compute_path_efficiency, compute_pre_range, compute_noise_ratio,
@@ -16,8 +17,13 @@ from backtest_flip_utils import (
     compute_btc_position, compute_other_delta,
 )
 
-events = load_events_from_dir("../data/lab/")
-cfg = DEFAULT_CONFIG
+parser = argparse.ArgumentParser(description="other_delta 硬过滤影响分析")
+parser.add_argument("--data", default="../data/btc/", help="JSONL 数据目录 (默认: ../data/btc/)")
+parser.add_argument("--profile", choices=["btc", "eth"], default="btc", help="参数预设 (默认: btc)")
+args = parser.parse_args()
+
+cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
+events = load_events_from_dir(args.data)
 
 # Pass 1: find all candidates that reach other_delta stage (pass all other hard filters)
 # and track what happens at scoring
