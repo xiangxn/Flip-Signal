@@ -145,7 +145,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 
 	// ── 阶段 1：锁内预检查 ──
 	t.mu.Lock()
-	verdict := CheckRisk(t.exec, t.cfg, t.timeNow())
+	verdict := CheckRisk(t.exec, t.cfg, t.timeNow(), sig.ConditionID)
 	if !verdict.OK {
 		reason := verdict.Reason
 		t.exec.LastSkipReason = reason

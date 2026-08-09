@@ -7,7 +7,7 @@ import (
 
 func TestCheckRisk_NotEnabled(t *testing.T) {
 	es := ExecutionState{Enabled: false}
-	v := CheckRisk(es, DefaultConfig(), time.Now())
+	v := CheckRisk(es, DefaultConfig(), time.Now(), "")
 	if v.OK {
 		t.Fatal("expected rejection when not enabled")
 	}
@@ -15,7 +15,7 @@ func TestCheckRisk_NotEnabled(t *testing.T) {
 
 func TestCheckRisk_DailyLimitHit(t *testing.T) {
 	es := ExecutionState{Enabled: true, DailyLimitHit: true}
-	v := CheckRisk(es, DefaultConfig(), time.Now())
+	v := CheckRisk(es, DefaultConfig(), time.Now(), "")
 	if v.OK {
 		t.Fatal("expected rejection when daily limit hit")
 	}
@@ -25,7 +25,7 @@ func TestCheckRisk_DailyPnlExceedsMaxLoss(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MaxDailyLoss = 10.0
 	es := ExecutionState{Enabled: true, DailyPnl: -10.0}
-	v := CheckRisk(es, cfg, time.Now())
+	v := CheckRisk(es, cfg, time.Now(), "")
 	if v.OK {
 		t.Fatal("expected rejection when daily pnl <= -maxDailyLoss")
 	}
@@ -37,7 +37,7 @@ func TestCheckRisk_Cooldown(t *testing.T) {
 		Enabled:       true,
 		CooldownUntil: now.Add(5 * time.Minute),
 	}
-	v := CheckRisk(es, DefaultConfig(), now)
+	v := CheckRisk(es, DefaultConfig(), now, "")
 	if v.OK {
 		t.Fatal("expected rejection during cooldown")
 	}
@@ -49,7 +49,7 @@ func TestCheckRisk_CooldownExpired(t *testing.T) {
 		Enabled:       true,
 		CooldownUntil: now.Add(-1 * time.Second),
 	}
-	v := CheckRisk(es, DefaultConfig(), now)
+	v := CheckRisk(es, DefaultConfig(), now, "")
 	if !v.OK {
 		t.Fatal("expected pass when cooldown expired, got: " + v.Reason)
 	}
@@ -60,15 +60,21 @@ func TestCheckRisk_OpenPosition(t *testing.T) {
 		Enabled:  true,
 		Position: &Position{ConditionID: "0x123"},
 	}
-	v := CheckRisk(es, DefaultConfig(), time.Now())
+	// 同一事件：应拒绝
+	v := CheckRisk(es, DefaultConfig(), time.Now(), "0x123")
 	if v.OK {
-		t.Fatal("expected rejection when position is open")
+		t.Fatal("expected rejection for same condition ID")
+	}
+	// 不同事件：应放行
+	v2 := CheckRisk(es, DefaultConfig(), time.Now(), "0x456")
+	if !v2.OK {
+		t.Fatalf("expected pass for different condition ID, got: %s", v2.Reason)
 	}
 }
 
 func TestCheckRisk_Pass(t *testing.T) {
 	es := ExecutionState{Enabled: true}
-	v := CheckRisk(es, DefaultConfig(), time.Now())
+	v := CheckRisk(es, DefaultConfig(), time.Now(), "")
 	if !v.OK {
 		t.Fatalf("expected pass, got: %s", v.Reason)
 	}

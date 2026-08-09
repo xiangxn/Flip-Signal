@@ -3,6 +3,7 @@ package dashboard
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -241,14 +242,13 @@ func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
 	resolved := s.Recorder.ResolvedSignals()
 	pending := s.Recorder.PendingSignals()
 
-	// Merge: resolved first (newest first), then pending
+	// 全部信号按时间倒序排列（最新在前），避免 map 遍历顺序不确定与 resolve 时序不一致。
 	all := make([]*flip.FlipSignal, 0, len(resolved)+len(pending))
-	for i := len(resolved) - 1; i >= 0; i-- {
-		all = append(all, resolved[i])
-	}
-	for _, sig := range pending {
-		all = append(all, sig)
-	}
+	all = append(all, resolved...)
+	all = append(all, pending...)
+	sort.Slice(all, func(i, j int) bool {
+		return all[i].Time.After(all[j].Time)
+	})
 
 	if len(all) > limit {
 		all = all[:limit]
