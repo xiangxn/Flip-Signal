@@ -56,7 +56,7 @@ func (t *Trader) timeNow() time.Time {
 
 // ── 生命周期 ──
 
-// Start 启动后台 goroutine（结算事件监听 + TradeMonitor 事件循环），并初始化 recorder。
+// Start 启动后台 goroutine（TradeMonitor 事件循环），并初始化 recorder。
 // tradeMon 为 nil 时仅纸面可用（事件循环不启动）。
 func (t *Trader) Start(ctx context.Context, tradeMon *sdk.TradeMonitor) error {
 	var err error
@@ -298,7 +298,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 //   - 兜底：若 PendingOrder 存在但 TradeMonitor 未收到事件，用 GetOpenOrders 查询
 //   - 返回 ExecInfo 供调用方在结算前回填 FlipRecorder
 //   - 不启动 fallback 定时器：结算由 ResolutionPoller 异步轮询 Polmyarket gamma API 驱动
-func (t *Trader) OnCycleEnd(conditionID string, simulatedOutcome int) ExecInfo {
+func (t *Trader) OnCycleEnd(conditionID string) ExecInfo {
 	var result ExecInfo
 
 	t.mu.RLock()

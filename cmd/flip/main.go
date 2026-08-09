@@ -243,7 +243,7 @@ func main() {
 		client.FetchMarketBySlug,
 		10*time.Second, // 每 10s 轮询一次
 		func(conditionID string, outcome int) {
-			// 结算 Trader 持仓（WS 可能已先行结算，ResolveByOutcome 会做去重）
+			// 结算 Trader 持仓（ResolveByOutcome 内置去重，重复调用安全）
 			if trader != nil {
 				trader.ResolveByOutcome(conditionID, outcome)
 			}
@@ -312,6 +312,11 @@ func main() {
 		now := time.Now()
 		alignedTs := now.Unix() / lab.WindowSec * lab.WindowSec
 		nextStart := time.Unix(alignedTs, 0)
+		// 进程启动后首个周期或时钟漂移：若当前窗口已开始超过 10 秒，
+		// 跳过残窗，对齐到下一个完整窗口
+		if now.Sub(nextStart) > 10*time.Second {
+			nextStart = nextStart.Add(time.Duration(lab.WindowSec) * time.Second)
+		}
 		marketSlug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
 
 		// 步骤 2：等待至窗口起点 + 2 秒
@@ -454,6 +459,11 @@ func main() {
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
+					// Binance 数据不可用，仍检查窗口是否结束以防空转
+					if tickTime.Unix() >= nextStart.Unix()+lab.WindowSec {
+						ticker.Stop()
+						break collectLoop
+					}
 					continue
 				}
 				snapCount++
@@ -521,7 +531,7 @@ func main() {
 
 		// 实盘交易对账（顺序关键：先对账 GTC 挂单，确保成交数据已回填至 FlipRecorder）
 		if trader != nil {
-			if ei := trader.OnCycleEnd(event.ConditionID, event.Outcome); ei.Status != "" {
+			if ei := trader.OnCycleEnd(event.ConditionID); ei.Status != "" {
 				flipRecorder.UpdateExecution(event.ConditionID, ei.Status, ei.FilledShares, ei.AvgFillPrice)
 			}
 		}
@@ -530,8 +540,6 @@ func main() {
 		// 待 umaResolutionStatus=="resolved" 且 outcomePrices 包含 "1" 时自动触发 Resolve
 		resolutionPoller.Register(event.ConditionID, marketSlug)
 
-		// 取消旧 token 订阅
-		bookAdapter.UnsubscribeTokens(tokenIDs...)
 	}
 }
 

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/xiangxn/go-polymarket-sdk/utils"
 )
 
 // ResolveHandler 结算回调：当 Polymarket gamma API 确认市场已结算时调用。
@@ -148,15 +149,15 @@ func (rp *ResolutionPoller) checkResolved(p *PendingResolution) (bool, int) {
 
 	// 解析 outcomePrices：取值为 "1" 的索引决定结果
 	// outcomePrices[0] → YES token, outcomePrices[1] → NO token
-	outcomePrices := result.Get("outcomePrices").Array()
+	outcomePrices := utils.GetStringArray(result, "outcomePrices")
 	if len(outcomePrices) < 2 {
 		log.Printf("[ResolutionPoller] ⚠️ 市场 %s umaResolutionStatus=resolved 但 outcomePrices 不足 2 个元素",
 			p.ConditionID)
 		return false, 0
 	}
 
-	price0 := outcomePrices[0].String() // YES token 价格
-	price1 := outcomePrices[1].String() // NO token 价格
+	price0 := outcomePrices[0] // YES token 价格
+	price1 := outcomePrices[1] // NO token 价格
 
 	// 必须严格为 "1"，不能靠 >0.9 判断
 	if price0 == "1" {
