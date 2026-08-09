@@ -235,6 +235,26 @@ func main() {
 		}
 	}()
 
+	// ================================================================
+	// 结算轮询器：异步轮询 Polymarket gamma API，确认市场结算后再 Resolve
+	// 替代原有的 BTC 价格模拟结算（fallbackSettlementTimer）
+	// ================================================================
+	resolutionPoller := trading.NewResolutionPoller(
+		client.FetchMarketBySlug,
+		10*time.Second, // 每 10s 轮询一次
+		func(conditionID string, outcome int) {
+			// 结算 Trader 持仓（WS 可能已先行结算，ResolveByOutcome 会做去重）
+			if trader != nil {
+				trader.ResolveByOutcome(conditionID, outcome)
+			}
+			// 结算 Flip Signal
+			if err := flipRecorder.Resolve(conditionID, outcome); err != nil {
+				log.Printf("[Flip] 结算失败: %v", err)
+			}
+		},
+	)
+	go resolutionPoller.Run(ctx)
+
 	// 可选：Lab 数据写入器（格式与 cmd/lab 一致）
 	var labWriter *lab.Writer
 	if cfg.Runtime.LabOutputDir != "" {
@@ -499,17 +519,16 @@ func main() {
 		log.Printf("[Event] %s 完成 —— open=%.2f close=%.2f outcome=%s snapshots=%d",
 			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
 
-		// 实盘结算（顺序关键：先对账 GTC 挂单，再结算信号，确保延迟成交的 PnL 正确）
+		// 实盘交易对账（顺序关键：先对账 GTC 挂单，确保成交数据已回填至 FlipRecorder）
 		if trader != nil {
 			if ei := trader.OnCycleEnd(event.ConditionID, event.Outcome); ei.Status != "" {
 				flipRecorder.UpdateExecution(event.ConditionID, ei.Status, ei.FilledShares, ei.AvgFillPrice)
 			}
 		}
 
-		// 结算：outcome 0=Up, 1=Down
-		if err := flipRecorder.Resolve(event.ConditionID, event.Outcome); err != nil {
-			log.Printf("[Flip] 结算失败: %v", err)
-		}
+		// 注册异步结算：由 ResolutionPoller 轮询 Polymarket gamma API，
+		// 待 closed==true 且 outcomePrices==0/1 时自动触发 Resolve
+		resolutionPoller.Register(event.ConditionID, marketSlug)
 
 		// 取消旧 token 订阅
 		bookAdapter.UnsubscribeTokens(tokenIDs...)
