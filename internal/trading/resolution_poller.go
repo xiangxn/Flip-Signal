@@ -131,6 +131,7 @@ func (rp *ResolutionPoller) pollAll() {
 }
 
 // checkResolved 查询 gamma API 判断市场是否已结算。
+// 这个只针对Polymarket的结果判定，不同预测市场有可能是不同的需要针对调整
 // 返回 (已结算, outcome)。
 func (rp *ResolutionPoller) checkResolved(p *PendingResolution) (bool, int) {
 	result, err := rp.fetchMarket(p.MarketSlug)
