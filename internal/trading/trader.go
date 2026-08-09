@@ -511,6 +511,12 @@ func (t *Trader) processTrade(trade *sdkModel.WSTrade) {
 		return
 	}
 
+	// 同一笔成交 Polymarket 会按生命周期推送多条事件（MATCHED → MINED → CONFIRMED），
+	// 仅处理首次 MATCHED 事件，避免重复累积。
+	if trade.Status != "MATCHED" {
+		return
+	}
+
 	// 累积成交数据
 	pending.FilledShares += trade.Size
 	pending.TotalCost += trade.Size * trade.Price
@@ -573,9 +579,11 @@ func (t *Trader) processOrder(order *sdkModel.WSOrder) {
 			}
 		}
 
-		// 更新订单记录并持久化
+		// 更新订单记录并持久化。
+		// 以 processTrade 累积的 FilledShares 为准（已通过 Status 过滤去重），
+		// order.SizeMatched 仅在上方 fallback 中作为兜底使用，不直接写入记录。
 		pending.Rec.State = OrderFilled
-		pending.Rec.FilledShares = order.SizeMatched
+		pending.Rec.FilledShares = pending.FilledShares
 		if pending.FilledShares > 0 {
 			pending.Rec.AvgFillPrice = pending.TotalCost / pending.FilledShares
 		}
