@@ -527,7 +527,7 @@ func main() {
 		}
 
 		// 注册异步结算：由 ResolutionPoller 轮询 Polymarket gamma API，
-		// 待 closed==true 且 outcomePrices==0/1 时自动触发 Resolve
+		// 待 umaResolutionStatus=="resolved" 且 outcomePrices 包含 "1" 时自动触发 Resolve
 		resolutionPoller.Register(event.ConditionID, marketSlug)
 
 		// 取消旧 token 订阅
