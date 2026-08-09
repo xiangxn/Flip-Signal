@@ -71,6 +71,13 @@ func (r *FlipRecorder) UpdateExecution(conditionID, execStatus string, filledSha
 	sig.ExecStatus = execStatus
 	sig.FilledShares = filledShares
 	sig.AvgFillPrice = avgFillPrice
+
+	// 成交后同步 Shares 为实际成交股数，确保 Dashboard 显示与 Polymarket 持仓一致。
+	// 实盘路径：订单按 maxPrice（含滑点）计算 size，与 sig.Shares（按 entryPrice 计算）存在偏差；
+	// 纸面路径：entryPrice 即成交价，两者一致，此更新为无操作。
+	if execStatus == "filled" && filledShares > 0 {
+		sig.Shares = filledShares
+	}
 }
 
 // Resolve 计算待结算信号的 won/pnl 并写入结算记录。
