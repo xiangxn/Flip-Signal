@@ -204,6 +204,12 @@ table.info td:last-child { text-align: right; font-weight: 500; }
 .cross-item .bool-true  { color: var(--green); }
 .cross-item .bool-false { color: var(--text-muted); }
 
+/* 未通过的特征：红边框 */
+.cross-item.feature-fail {
+  border-color: var(--red);
+  box-shadow: inset 0 0 0 1px rgba(248,81,73,0.15);
+}
+
 /* ── Signal table ── */
 .signal-panel {
   background: var(--surface);

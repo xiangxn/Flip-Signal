@@ -18,6 +18,11 @@ type T0Features struct {
 	RangeExpansion float64 `json:"range_expansion"`
 	BTCPosition    float64 `json:"btc_position"`
 	BTCExtreme     bool    `json:"btc_extreme"`
+
+	// 评分阶段特征（仅在 onConfirmed 中填充，失败穿越诊断用）
+	OtherDelta float64 `json:"other_delta,omitempty"`
+	EntryPrice float64 `json:"entry_price,omitempty"`
+	Score      int     `json:"score,omitempty"`
 }
 
 // Engine 从 ResearchSnapshot 流中检测翻转信号。
@@ -63,6 +68,11 @@ type Engine struct {
 	retryCount   int        // 本周期内进入 Confirming 的次数
 	lastFailedT0 *T0Features // 最近一次失败穿越的 T=0 特征（Dashboard 展示用）
 
+	// 最近一次失败穿越的评分数据（onConfirmed 中保存，诊断用）
+	lastFailedOtherDelta float64
+	lastFailedEntryPrice float64
+	lastFailedScore      int
+
 	// T=0 特征值（enterConfirming 中计算，onConfirmed 中读取）
 	pathEff        float64
 	noiseRatio     float64
@@ -105,6 +115,9 @@ func (e *Engine) Reset(generation int64) {
 
 	e.retryCount = 0
 	e.lastFailedT0 = nil
+	e.lastFailedOtherDelta = 0
+	e.lastFailedEntryPrice = 0
+	e.lastFailedScore = 0
 
 	e.pathEff = 0
 	e.noiseRatio = 0
@@ -376,6 +389,9 @@ func (e *Engine) returnToWatching() {
 			RangeExpansion: e.rangeExpansion,
 			BTCPosition:    e.btcPosition,
 			BTCExtreme:     e.btcExtreme,
+			OtherDelta:     e.lastFailedOtherDelta,
+			EntryPrice:     e.lastFailedEntryPrice,
+			Score:          e.lastFailedScore,
 		}
 	}
 	e.state = stateWatching
@@ -420,6 +436,8 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 
 	// Formula A: other_delta 硬过滤（默认 -999 = 禁用，由评分体系处理）
 	if otherDelta < e.cfg.ODHardFilter {
+		e.lastFailedOtherDelta = otherDelta
+		e.lastFailedScore = 0
 		return nil
 	}
 
@@ -461,6 +479,9 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 
 	score, vetoed := ComputeFlipScore(params)
 	if vetoed || score < e.cfg.ScoreEntry {
+		e.lastFailedOtherDelta = otherDelta
+		e.lastFailedEntryPrice = entryPrice
+		e.lastFailedScore = score
 		return nil
 	}
 

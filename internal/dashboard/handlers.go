@@ -58,6 +58,18 @@ type stateResponse struct {
 	RetryCount          int          `json:"retry_count"`
 	CrossFeatures       *crossDetail `json:"cross_features"`       // 当前 Confirming 中
 	LastFailedFeatures  *crossDetail `json:"last_failed_features"` // 最近一次失败穿越（多穿越模式诊断用）
+
+	// Config thresholds for feature pass/fail evaluation（前端诊断用）
+	PathEffVetoMinCfg    float64 `json:"path_eff_veto_min_cfg"`
+	NoiseRatioVetoMaxCfg float64 `json:"noise_ratio_veto_max_cfg"`
+	RangeExpMaxCfg       float64 `json:"range_exp_max_cfg"`
+	RangeExpThresholdCfg float64 `json:"range_exp_threshold_cfg"`
+	OtherDeltaVStrongCfg float64 `json:"other_delta_vstrong_cfg"`
+	OtherDeltaStrongCfg  float64 `json:"other_delta_strong_cfg"`
+	OtherDeltaWeakCfg    float64 `json:"other_delta_weak_cfg"`
+	EntryCheapStrongCfg  float64 `json:"entry_cheap_strong_cfg"`
+	EntryCheapWeakCfg    float64 `json:"entry_cheap_weak_cfg"`
+	ScoreEntryCfg        int     `json:"score_entry_cfg"`
 }
 
 type crossDetail struct {
@@ -70,6 +82,11 @@ type crossDetail struct {
 	BTCPosition        float64 `json:"btc_position"`
 	BTCExtreme         bool    `json:"btc_extreme"`
 	ConfirmTicksWaited int     `json:"confirm_ticks_waited"`
+
+	// 评分阶段特征（LastFailed 中填充，诊断用）
+	OtherDelta float64 `json:"other_delta,omitempty"`
+	EntryPrice float64 `json:"entry_price,omitempty"`
+	Score      int     `json:"score,omitempty"`
 }
 
 type signalsResponse struct {
@@ -179,6 +196,19 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	}
 	resp.FailedCount = failedCount
 
+	// Config thresholds for frontend feature pass/fail evaluation
+	cfg := s.Engine.Config()
+	resp.PathEffVetoMinCfg = cfg.PathEffVetoMin
+	resp.NoiseRatioVetoMaxCfg = cfg.NoiseRatioVetoMax
+	resp.RangeExpMaxCfg = cfg.RangeExpMax
+	resp.RangeExpThresholdCfg = cfg.RangeExpThreshold
+	resp.OtherDeltaVStrongCfg = cfg.OtherDeltaVStrong
+	resp.OtherDeltaStrongCfg = cfg.OtherDeltaStrong
+	resp.OtherDeltaWeakCfg = cfg.OtherDeltaWeak
+	resp.EntryCheapStrongCfg = cfg.EntryCheapStrong
+	resp.EntryCheapWeakCfg = cfg.EntryCheapWeak
+	resp.ScoreEntryCfg = cfg.ScoreEntry
+
 	// ── Trader 执行状态（纸面/实盘统一）──
 	if s.Trader != nil {
 		ts := s.Trader.Status()
@@ -225,6 +255,9 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 			RangeExpansion: t0.RangeExpansion,
 			BTCPosition:    t0.BTCPosition,
 			BTCExtreme:     t0.BTCExtreme,
+			OtherDelta:     t0.OtherDelta,
+			EntryPrice:     t0.EntryPrice,
+			Score:          t0.Score,
 		}
 	}
 
