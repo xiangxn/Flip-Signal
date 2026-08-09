@@ -96,7 +96,7 @@ type Position struct {
 	Won              bool      `json:"won"`
 	PnL              float64   `json:"pnl"`
 	Outcome          int       `json:"outcome"`           // 0=Up 1=Down
-	ResolutionSource string    `json:"resolution_source"` // "ws" | "simulated_fallback"
+	ResolutionSource string    `json:"resolution_source"` // "poller"（ResolutionPoller 通过 gamma API 确认后结算）
 }
 
 // ── 运行期状态快照 ──

@@ -23,8 +23,7 @@ type Trader struct {
 	mu           sync.RWMutex
 	cfg          TradingConfig
 	client       TradeClient
-	resolved     <-chan *sdk.ResolvedInfo // WS 结算事件源
-	now          func() time.Time         // 可注入时钟（测试用，nil 则用 time.Now）
+	now          func() time.Time // 可注入时钟（测试用，nil 则用 time.Now）
 	lastDayCheck time.Time                // 上次日切检查时间
 
 	exec      ExecutionState
@@ -35,11 +34,10 @@ type Trader struct {
 }
 
 // NewTrader 构造 Trader。client 为 nil 时仅纸面可用。
-func NewTrader(cfg TradingConfig, client TradeClient, resolved <-chan *sdk.ResolvedInfo) *Trader {
+func NewTrader(cfg TradingConfig, client TradeClient) *Trader {
 	return &Trader{
 		cfg:          cfg,
 		client:       client,
-		resolved:     resolved,
 		now:          nil,
 		lastDayCheck: time.Now(),
 		exec: ExecutionState{
@@ -67,7 +65,6 @@ func (t *Trader) Start(ctx context.Context, tradeMon *sdk.TradeMonitor) error {
 		return fmt.Errorf("创建交易记录器失败: %w", err)
 	}
 
-	go t.resolutionWatcher(ctx)
 	if tradeMon != nil {
 		go t.tradeEventLoop(ctx, tradeMon.SubscribeEvents())
 	}
@@ -477,29 +474,6 @@ func (t *Trader) ClosePosition() (*Position, error) {
 		return nil, fmt.Errorf("无持仓可平")
 	}
 	return nil, fmt.Errorf("手动平仓尚未实现")
-}
-
-// ── 后台 goroutine ──
-
-// resolutionWatcher 监听 WS 结算事件，即时结算匹配的持仓。
-func (t *Trader) resolutionWatcher(ctx context.Context) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case info, ok := <-t.resolved:
-			if !ok {
-				return
-			}
-			t.mu.RLock()
-			pos := t.exec.Position
-			t.mu.RUnlock()
-			if pos != nil && info.Market == pos.ConditionID {
-				won := info.WinningAssetId == pos.TokenID
-				t.settleWithOutcome(pos, won, "ws")
-			}
-		}
-	}
 }
 
 // ── TradeMonitor 事件循环 ──

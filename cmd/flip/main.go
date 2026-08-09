@@ -136,7 +136,7 @@ func main() {
 	// ================================================================
 	// Polymarket 订单簿适配器
 	// ================================================================
-	bookAdapter := feed.NewOrderBookAdapterWithResolve(
+	bookAdapter := feed.NewOrderBookAdapter(
 		cfg.SDK.Polymarket.ClobWSBaseURL, client,
 	)
 	bookAdapter.Start(ctx)
@@ -162,7 +162,7 @@ func main() {
 		}
 
 		tradeClient := &trading.SdkClient{Client: client}
-		trader = trading.NewTrader(cfg.Trading, tradeClient, bookAdapter.SubscribeResolved())
+		trader = trading.NewTrader(cfg.Trading, tradeClient)
 		if err := trader.Start(ctx, tradeMon); err != nil {
 			log.Printf("[Trading] ⚠️ 交易记录器启动失败: %v", err)
 		}

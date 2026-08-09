@@ -85,7 +85,7 @@ func main() {
 	// ================================================================
 	// Polymarket order book adapter
 	// ================================================================
-	bookAdapter := feed.NewOrderBookAdapterWithResolve(
+	bookAdapter := feed.NewOrderBookAdapter(
 		cfg.SDK.Polymarket.ClobWSBaseURL, client,
 	)
 	bookAdapter.Start(ctx)

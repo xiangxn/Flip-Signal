@@ -24,15 +24,6 @@ func NewOrderBookAdapter(wsBaseURL string, client *sdk.PolymarketClient) *OrderB
 	}
 }
 
-// NewOrderBookAdapterWithResolve is like NewOrderBookAdapter but with
-// customFeatureEnabled=true, which enables market_resolved events on the WebSocket.
-func NewOrderBookAdapterWithResolve(wsBaseURL string, client *sdk.PolymarketClient) *OrderBookAdapter {
-	return &OrderBookAdapter{
-		monitor:     sdk.NewMarketMonitor(wsBaseURL, true, client, true),
-		orderBookCh: make(chan *sdk.OrderBook, 4096),
-	}
-}
-
 // SubscribeTokens subscribes to order book updates for the given token IDs.
 func (o *OrderBookAdapter) SubscribeTokens(tokens ...string) {
 	o.monitor.SubscribeTokens(tokens...)
@@ -41,11 +32,6 @@ func (o *OrderBookAdapter) SubscribeTokens(tokens ...string) {
 // UnsubscribeTokens unsubscribes from order book updates for the given token IDs.
 func (o *OrderBookAdapter) UnsubscribeTokens(tokens ...string) {
 	o.monitor.UnsubscribeTokens(tokens...)
-}
-
-// SubscribeResolved returns a channel that receives market resolution events.
-func (o *OrderBookAdapter) SubscribeResolved() <-chan *sdk.ResolvedInfo {
-	return o.monitor.SubscribeResolved()
 }
 
 // GetLatestBook returns the most recent order book for a token ID from the
