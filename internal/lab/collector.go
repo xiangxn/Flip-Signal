@@ -42,8 +42,11 @@ type Collector struct {
 }
 
 // NewCollector 创建绑定到 BinanceAdapter 的采集器。
-// tickIntervalSec 为采样间隔（秒），典型值 1 或 5。
+// tickIntervalSec 为采样间隔（秒），典型值 1 或 5，≤0 时回退为默认值。
 func NewCollector(binance *feed.BinanceAdapter, tickIntervalSec int) *Collector {
+	if tickIntervalSec <= 0 {
+		tickIntervalSec = DefaultTickIntervalSec
+	}
 	// 按采样间隔缩放价格历史容量，保持 ~75s 回溯时长不变。
 	// 5s 间隔 → 15 点，1s 间隔 → 75 点。
 	maxP := maxPriceHistoryAt5s * 5 / tickIntervalSec
