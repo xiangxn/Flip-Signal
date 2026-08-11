@@ -185,7 +185,7 @@ func main() {
 	// ================================================================
 	// Lab 采集器（每 5 秒生成 ResearchSnapshot）
 	// ================================================================
-	collector := lab.NewCollector(binance)
+	collector := lab.NewCollector(binance, 5) // trading engine always uses 5s
 
 	// ================================================================
 	// Flip 引擎与信号记录器

@@ -3,11 +3,13 @@
 // organizes them into 5-minute BTC events for offline feature analysis in Python.
 package lab
 
-// ResearchSnapshot captures market state at ~5-second intervals.
+// ResearchSnapshot captures market state at configurable tick intervals
+// (default 5s, or 1s with -interval=1).
 // Design principle (PRD2 §5.2): facts only, no pre-computed features.
 //
-// Field names kept for Python backward-compatibility; semantics are now per-tick
-// (each tick ≈ 5s) rather than per-second.
+// Field names kept for Python backward-compatibility; "5s" / "10s" in field names
+// reflect accumulation periods at the default 5s interval — at 1s, they represent
+// 1s / 2s accumulations respectively.
 type ResearchSnapshot struct {
 	Timestamp    int64 `json:"ts"`
 	RemainingSec int   `json:"remaining_sec"`
@@ -66,5 +68,5 @@ type Event struct {
 // WindowSec is the duration of one BTC event window in seconds.
 const WindowSec = 300 // 5 minutes
 
-// TickIntervalSec is the snapshot interval in seconds.
-const TickIntervalSec = 5
+// DefaultTickIntervalSec is the default snapshot interval in seconds.
+const DefaultTickIntervalSec = 5

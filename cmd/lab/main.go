@@ -1,16 +1,17 @@
-// Command lab runs the Feature Research Lab data collector.
+// lab 是特征研究实验室的数据采集器。
 //
-// It connects to Binance WebSocket (aggTrade + depth20) and Polymarket
-// CLOB WebSocket (order books), generates 1-second pure-fact
-// ResearchSnapshots, groups them into 5-minute Events identified by
-// Polymarket conditionId, and writes events as JSONL to disk.
+// 连接 Binance WebSocket (aggTrade + depth20) 和 Polymarket
+// CLOB WebSocket (order books)，以可配置的采样间隔生成
+// ResearchSnapshot，按 Polymarket conditionId 归类为 5 分钟 Event，
+// 并以 JSONL 格式写入磁盘。
 //
 // Usage:
 //
-//	go run ./cmd/lab -output data/lab -symbol BTCUSDT
+//	go run ./cmd/lab -output data/btc -symbol BTCUSDT
+//	go run ./cmd/lab -output data/btc_1s -interval 1   # 1 秒采样
 //
-// Read-only by default — generates a temporary wallet key for
-// Polymarket API access (data reading only, no trading).
+// 默认只读模式 —— 未配置私钥时自动生成临时钱包，
+// 仅用于 Polymarket API 数据读取，不进行任何交易。
 package main
 
 import (
@@ -39,23 +40,22 @@ func init() {
 }
 
 func main() {
-	outputDir := flag.String("output", "data/btc", "Output directory for event JSONL files")
-	symbol := flag.String("symbol", "BTCUSDT", "Binance trading pair")
-	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug prefix")
+	outputDir := flag.String("output", "data/btc", "事件 JSONL 输出目录")
+	symbol := flag.String("symbol", "BTCUSDT", "Binance 交易对")
+	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug 前缀")
+	tickInterval := flag.Int("interval", lab.DefaultTickIntervalSec, "采样间隔（秒），典型值 1 或 5")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// ================================================================
-	// Polymarket client (read-only if no owner key configured)
-	// ================================================================
+	// ── Polymarket 客户端（未配置私钥则自动生成临时密钥，只读模式）──
 	cfg := loadConfig()
 	readOnly := false
 	if cfg.SDK.Polymarket.OwnerKey == "" {
 		key := make([]byte, 32)
 		if _, err := rand.Read(key); err != nil {
-			log.Fatalf("Failed to generate temporary key: %v", err)
+			log.Fatalf("生成临时密钥失败: %v", err)
 		}
 		cfg.SDK.Polymarket.OwnerKey = hex.EncodeToString(key)
 		readOnly = true
@@ -63,12 +63,10 @@ func main() {
 
 	client := sdk.NewClient(&cfg.SDK)
 	if readOnly {
-		log.Println("[Lab] ⚠️  No POLYMARKET_OWNER_KEY — running READ-ONLY")
+		log.Println("[Lab] ⚠️  未配置 POLYMARKET_OWNER_KEY —— 只读模式运行")
 	}
 
-	// ================================================================
-	// Binance adapter
-	// ================================================================
+	// ── Binance 适配器 ──
 	binanceCfg := feed.BinanceConfig{
 		Symbol: *symbol,
 		// StreamBaseURL: "wss://stream.binance.com:9443",
@@ -78,19 +76,17 @@ func main() {
 	binance := feed.NewBinanceAdapterWithConfig(binanceCfg)
 	go func() {
 		if err := binance.Start(ctx); err != nil {
-			log.Printf("[Lab] Binance start: %v", err)
+			log.Printf("[Lab] Binance 启动失败: %v", err)
 		}
 	}()
 
-	// ================================================================
-	// Polymarket order book adapter
-	// ================================================================
+	// ── Polymarket 订单簿适配器 ──
 	bookAdapter := feed.NewOrderBookAdapter(
 		cfg.SDK.Polymarket.ClobWSBaseURL, client,
 	)
 	bookAdapter.Start(ctx)
 
-	// Book tracking: goroutine updates, tick loop reads under RLock.
+	// 订单簿追踪：goroutine 写入，tick 循环加 RLock 读取
 	var (
 		bookMu  sync.RWMutex
 		yesBook *sdk.OrderBook
@@ -115,7 +111,7 @@ func main() {
 				case noTok:
 					noBook = book
 				default:
-					log.Printf("[Book] UNMATCHED token=%s (want YES=%s NO=%s)",
+					log.Printf("[Book] 未匹配 token=%s (期望 YES=%s NO=%s)",
 						book.AssetId, yesTok, noTok)
 				}
 				bookMu.Unlock()
@@ -123,51 +119,48 @@ func main() {
 		}
 	}()
 
-	// ================================================================
-	// Collector & Writer
-	// ================================================================
-	collector := lab.NewCollector(binance)
+	// ── 采集器 & 写入器 ──
+	collector := lab.NewCollector(binance, *tickInterval)
 	writer, err := lab.NewWriter(*outputDir)
 	if err != nil {
-		log.Fatalf("[Lab] writer: %v", err)
+		log.Fatalf("[Lab] writer 创建失败: %v", err)
 	}
 	defer func() {
 		if err := writer.Close(); err != nil {
-			log.Printf("[Lab] writer close: %v", err)
+			log.Printf("[Lab] writer 关闭失败: %v", err)
 		}
 	}()
 
 	log.Println("========================================")
-	log.Printf(" Feature Research %s data", *slugPrefix)
-	log.Printf(" Symbol: %s  |  Slug: %s  |  Output: %s", *symbol, *slugPrefix, *outputDir)
-	log.Println(" Sources: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
+	log.Printf(" 特征研究实验室 — %s 数据采集", *slugPrefix)
+	log.Printf(" 交易对: %s  |  Slug: %s  |  输出: %s  |  间隔: %ds",
+		*symbol, *slugPrefix, *outputDir, *tickInterval)
+	log.Println(" 数据源: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
 	log.Println("========================================")
 
-	// Wait for initial data
-	log.Println("[Lab] Waiting for initial data...")
+	// 等待初始数据就绪
+	log.Println("[Lab] 等待初始数据...")
 	time.Sleep(3 * time.Second)
 
-	// ================================================================
-	// Market Cycle Loop
-	// ================================================================
+	// ── 市场周期循环 ──
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[Lab] Shutting down...")
+			log.Println("[Lab] 正在关闭...")
 			return
 		default:
 		}
 
-		// Step 1: Calculate next 5-min aligned boundary
+		// 步骤 1: 计算下一个 5 分钟对齐边界
 		now := time.Now()
 		alignedTs := now.Unix() / lab.WindowSec * lab.WindowSec
 		nextStart := time.Unix(alignedTs, 0)
 		marketSlug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
 
-		// Step 2: Wait until window start + 2s
+		// 步骤 2: 等待到窗口开始 + 2 秒
 		waitUntil := nextStart.Add(2 * time.Second)
 		if wait := time.Until(waitUntil); wait > 0 {
-			log.Printf("[Cycle] next window %s, waiting %v (slug=%s)",
+			log.Printf("[Cycle] 下一个窗口 %s, 等待 %v (slug=%s)",
 				nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second), marketSlug)
 			select {
 			case <-ctx.Done():
@@ -176,21 +169,21 @@ func main() {
 			}
 		}
 
-		// Step 3: Fetch Binance kline open price
+		// 步骤 3: 获取 Binance K 线开盘价
 		binance.FetchKlineOpenPrice()
 
 		btc := binance.LatestData()
 		openPrice := btc.OpenPrice
 		if openPrice == 0 {
 			openPrice = btc.Price
-			log.Printf("[Cycle] WARNING: kline open not available, using current price %.2f", openPrice)
+			log.Printf("[Cycle] ⚠️  K 线开盘价不可用，使用当前价 %.2f", openPrice)
 		}
 
-		// Step 4: Fetch Polymarket market → conditionId + token IDs
-		log.Printf("[Cycle] fetching market: %s", marketSlug)
+		// 步骤 4: 获取 Polymarket 市场信息 → conditionId + token IDs
+		log.Printf("[Cycle] 获取市场: %s", marketSlug)
 		marketData, err := client.FetchMarketBySlug(marketSlug)
 		if err != nil {
-			log.Printf("[Cycle] ERROR fetching market: %v — retrying in 5s", err)
+			log.Printf("[Cycle] 获取市场失败: %v —— 5s 后重试", err)
 			select {
 			case <-ctx.Done():
 				return
@@ -201,7 +194,7 @@ func main() {
 
 		conditionID := marketData.Get("conditionId").String()
 
-		// Parse token IDs and outcomes
+		// 解析 token ID 和 outcomes
 		var tokenIDs []string
 		clobRaw := marketData.Get("clobTokenIds").String()
 		for _, v := range gjson.Parse(clobRaw).Array() {
@@ -229,7 +222,7 @@ func main() {
 		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s",
 			conditionID, yesTokenID, noTokenID)
 
-		// Step 5: Subscribe to new tokens (unsub old ones first)
+		// 步骤 5: 订阅新 token（先取消旧订阅）
 		if yesTok != "" || noTok != "" {
 			var oldTokens []string
 			if yesTok != "" {
@@ -249,11 +242,11 @@ func main() {
 		noBook = nil
 		bookMu.Unlock()
 
-		// Step 6: Start event collection
+		// 步骤 6: 启动事件采集
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
-		log.Printf("[Cycle] event=%s open=%.2f collecting...", conditionID, openPrice)
+		log.Printf("[Cycle] event=%s open=%.2f 开始采集...", conditionID, openPrice)
 
-		ticker := time.NewTicker(5 * time.Second)
+		ticker := time.NewTicker(time.Duration(*tickInterval) * time.Second)
 		snapCount := 0
 		lastLogRemaining := 0
 
@@ -265,7 +258,7 @@ func main() {
 				return
 
 			case tickTime := <-ticker.C:
-				// Read latest Polymarket book prices
+				// 读取最新的 Polymarket 订单簿价格
 				bookMu.RLock()
 				yb := yesBook
 				nb := noBook
@@ -293,28 +286,28 @@ func main() {
 			}
 		}
 
-		// Step 7: Finalize and persist
+		// 步骤 7: 封存并持久化事件
 		event := collector.FinalizeEvent()
 		outcomeLabel := "DOWN/Flat"
 		if event.Outcome == 0 {
 			outcomeLabel = "UP"
 		}
-		log.Printf("[Event] %s done — open=%.2f close=%.2f outcome=%s snapshots=%d",
+		log.Printf("[Event] %s 完成 — open=%.2f close=%.2f outcome=%s snapshots=%d",
 			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
 
 		if err := writer.Write(event); err != nil {
-			log.Printf("[Writer] ERROR: %v", err)
+			log.Printf("[Writer] 写入失败: %v", err)
 		}
 	}
 }
 
-// ---- helpers ----
+// ---- 辅助函数 ----
 
 func bestBid(book *sdk.OrderBook) float64 {
 	if book == nil || len(book.Bids) == 0 {
 		return 0
 	}
-	// Polymarket CLOB: bids sorted ascending, best (highest) is last
+	// Polymarket CLOB: bids 升序排列，最优（最高）出价在最后
 	return book.Bids[len(book.Bids)-1].Price
 }
 
@@ -330,7 +323,7 @@ func maxLatency(yb, nb *sdk.OrderBook) int64 {
 	return max
 }
 
-// ---- config ----
+// ---- 配置 ----
 
 type appConfig struct {
 	SDK sdk.Config `mapstructure:"sdk"`
@@ -348,7 +341,7 @@ func loadConfig() *appConfig {
 			},
 		},
 	}
-	// Environment variable overrides (same as cmd/mqs)
+	// 环境变量覆盖
 	if v := os.Getenv("POLYMARKET_OWNER_KEY"); v != "" {
 		cfg.SDK.Polymarket.OwnerKey = v
 	}

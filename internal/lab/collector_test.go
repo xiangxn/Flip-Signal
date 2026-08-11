@@ -9,7 +9,7 @@ import (
 
 func TestCollector_StartEventAndFinalize(t *testing.T) {
 	binance := feed.NewBinanceAdapter() // won't connect — just need the struct
-	c := NewCollector(binance)
+	c := NewCollector(binance, 5)
 
 	c.StartEvent("0xtest", time.Now().Unix(), 50000.0)
 
@@ -44,7 +44,7 @@ func TestCollector_StartEventAndFinalize(t *testing.T) {
 
 func TestCollector_FinalizeEvent_UpOutcome(t *testing.T) {
 	binance := feed.NewBinanceAdapter()
-	c := NewCollector(binance)
+	c := NewCollector(binance, 5)
 
 	c.StartEvent("0xup", time.Now().Unix(), 50000.0)
 
@@ -64,7 +64,7 @@ func TestCollector_FinalizeEvent_UpOutcome(t *testing.T) {
 
 func TestCollector_UpdatePolymarket(t *testing.T) {
 	binance := feed.NewBinanceAdapter()
-	c := NewCollector(binance)
+	c := NewCollector(binance, 5)
 
 	c.UpdatePolymarket(0.45, 0.55, 150)
 
@@ -81,7 +81,7 @@ func TestCollector_UpdatePolymarket(t *testing.T) {
 
 func TestCollector_SnapshotsCopy(t *testing.T) {
 	binance := feed.NewBinanceAdapter()
-	c := NewCollector(binance)
+	c := NewCollector(binance, 5)
 
 	c.StartEvent("0xcopy", time.Now().Unix(), 50000.0)
 
