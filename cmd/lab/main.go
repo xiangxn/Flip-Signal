@@ -271,7 +271,7 @@ func main() {
 				nb := noBook
 				bookMu.RUnlock()
 
-				collector.UpdatePolymarket(bestBid(yb), bestBid(nb))
+				collector.UpdatePolymarket(bestBid(yb), bestBid(nb), maxLatency(yb, nb))
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
@@ -316,6 +316,18 @@ func bestBid(book *sdk.OrderBook) float64 {
 	}
 	// Polymarket CLOB: bids sorted ascending, best (highest) is last
 	return book.Bids[len(book.Bids)-1].Price
+}
+
+// maxLatency 返回两个订单簿中延迟较大的值（毫秒）。
+func maxLatency(yb, nb *sdk.OrderBook) int64 {
+	var max int64
+	if yb != nil && yb.Latency > max {
+		max = yb.Latency
+	}
+	if nb != nil && nb.Latency > max {
+		max = nb.Latency
+	}
+	return max
 }
 
 // ---- config ----

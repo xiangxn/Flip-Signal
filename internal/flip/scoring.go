@@ -19,6 +19,11 @@ package flip
 //	F7:  BTC diverges from PM → +1 (Formula A: widened, hist ready only)
 //	F0:  RangeExpansion ≥ 2.0 → veto   (hist ready only)
 func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
+	// L0: 订单簿延迟过大 → 数据不可信，一票否决。
+	if params.Cfg.MaxLatencyMs > 0 && params.OrderBookLatency > params.Cfg.MaxLatencyMs {
+		return 0, true
+	}
+
 	// F0: 振幅扩张过大 → 真突破，PM 判断正确，不宜反向下注。
 	if params.HistReady && params.RangeExpansion >= params.Cfg.RangeExpMax {
 		return 0, true

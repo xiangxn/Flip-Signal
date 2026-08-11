@@ -60,6 +60,9 @@ type FlipConfig struct {
 	// ── 入场阈值 (§2.10) ──
 	ScoreEntry int `mapstructure:"score_entry"` // ≥ this → open 1 share (5)
 	ScoreAdd   int `mapstructure:"score_add"`   // ≥ this → add 2 shares (99 = disabled)
+
+	// ── 订单簿延迟风控 ──
+	MaxLatencyMs int64 `mapstructure:"max_latency_ms"` // 订单簿延迟超过此值（毫秒）则信号不可信，0=禁用 (0)
 }
 
 // DefaultConfig 返回与 backtest_flip_config.py Formula A 一致的配置。
@@ -97,6 +100,7 @@ func DefaultConfig() FlipConfig {
 		WBtcExtreme:           1,
 		ScoreEntry:            5,
 		ScoreAdd:              99, // disabled (5s data scoring not fine-grained enough)
+		MaxLatencyMs:          0,  // 0=disabled, 建议值 300ms
 	}
 }
 
@@ -142,6 +146,9 @@ type FlipSignal struct {
 	// 结算时填充
 	Won bool    `json:"won"`
 	PnL float64 `json:"pnl"`
+
+	// 数据质量
+	OrderBookLatency int64 `json:"order_book_latency,omitempty"` // 订单簿最大延迟（毫秒），诊断用
 }
 
 // ── 评分输入 ──
@@ -154,7 +161,8 @@ type ScoreParams struct {
 	EntryPrice     float64
 	RangeExpansion float64
 	BTCPosition    float64
-	BTCExtreme     bool // pre-computed by engine (BTC diverges from PM direction)
+	BTCExtreme     bool  // pre-computed by engine (BTC diverges from PM direction)
 	HistReady      bool
+	OrderBookLatency int64 // 订单簿最大延迟（毫秒），用于延迟风控
 	Cfg            FlipConfig
 }

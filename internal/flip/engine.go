@@ -1,6 +1,7 @@
 package flip
 
 import (
+	"log"
 	"math"
 	"time"
 
@@ -74,13 +75,14 @@ type Engine struct {
 	lastFailedScore      int
 
 	// T=0 特征值（enterConfirming 中计算，onConfirmed 中读取）
-	pathEff        float64
-	noiseRatio     float64
-	flips          int
-	oscillating    bool
-	rangeExpansion float64
-	btcPosition    float64
-	btcExtreme     bool
+	pathEff          float64
+	noiseRatio       float64
+	flips            int
+	oscillating      bool
+	rangeExpansion   float64
+	btcPosition      float64
+	btcExtreme       bool
+	orderBookLatency int64 // 穿越时刻订单簿延迟（毫秒），用于风控
 }
 
 // NewEngine 创建一个新的翻转检测引擎。
@@ -126,6 +128,7 @@ func (e *Engine) Reset(generation int64) {
 	e.rangeExpansion = 0
 	e.btcPosition = 0
 	e.btcExtreme = false
+	e.orderBookLatency = 0
 }
 
 // ProcessSnapshot 处理一个 ResearchSnapshot。满足全部条件时返回 FlipSignal，否则返回 nil。
@@ -284,6 +287,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	e.crossSide = side
 	e.crossIdx = crossIdx
 	e.confirmCount = 0
+	e.orderBookLatency = crossSnap.OrderBookLatency // 穿越时刻订单簿延迟，用于风控
 
 	// 若确认 tick 已在 buffer 中（回退到另一侧更早穿越时会出现），
 	// 则同步评估 —— 对应 Python check_signal 一次性拥有全部数据。
@@ -466,19 +470,31 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 
 	// 计算复合评分
 	params := ScoreParams{
-		Side:           e.crossSide,
-		OtherDelta:     otherDelta,
-		IsOscillating:  e.oscillating,
-		EntryPrice:     entryPrice,
-		RangeExpansion: e.rangeExpansion,
-		BTCPosition:    e.btcPosition,
-		BTCExtreme:     e.btcExtreme,
-		HistReady:      e.histRange.IsReady(),
-		Cfg:            e.cfg,
+		Side:             e.crossSide,
+		OtherDelta:       otherDelta,
+		IsOscillating:    e.oscillating,
+		EntryPrice:       entryPrice,
+		RangeExpansion:   e.rangeExpansion,
+		BTCPosition:      e.btcPosition,
+		BTCExtreme:       e.btcExtreme,
+		HistReady:        e.histRange.IsReady(),
+		OrderBookLatency: e.orderBookLatency,
+		Cfg:              e.cfg,
 	}
 
 	score, vetoed := ComputeFlipScore(params)
-	if vetoed || score < e.cfg.ScoreEntry {
+	if vetoed {
+		// 延迟否决时输出日志
+		if e.cfg.MaxLatencyMs > 0 && e.orderBookLatency > e.cfg.MaxLatencyMs {
+			log.Printf("[Flip] 🐢 延迟否决: latency=%dms > max=%dms, side=%s entry=%.3f",
+				e.orderBookLatency, e.cfg.MaxLatencyMs, e.crossSide, entryPrice)
+		}
+		e.lastFailedOtherDelta = otherDelta
+		e.lastFailedEntryPrice = entryPrice
+		e.lastFailedScore = score
+		return nil
+	}
+	if score < e.cfg.ScoreEntry {
 		e.lastFailedOtherDelta = otherDelta
 		e.lastFailedEntryPrice = entryPrice
 		e.lastFailedScore = score
@@ -503,7 +519,8 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		RangeExpansion: e.rangeExpansion,
 		BTCPosition:    e.btcPosition,
 		BTCExtreme:     e.btcExtreme,
-		OtherDelta:     otherDelta,
+		OtherDelta:        otherDelta,
+		OrderBookLatency:  e.orderBookLatency,
 	}
 }
 

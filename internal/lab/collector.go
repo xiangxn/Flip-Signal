@@ -21,8 +21,9 @@ type Collector struct {
 	prices []float64
 
 	// Polymarket prices (updated externally via UpdatePolymarket before each Tick)
-	yesPrice float64
-	noPrice  float64
+	yesPrice          float64
+	noPrice           float64
+	orderBookLatency  int64
 
 	// Current event state
 	conditionID string
@@ -40,10 +41,12 @@ func NewCollector(binance *feed.BinanceAdapter) *Collector {
 	}
 }
 
-// UpdatePolymarket sets the latest YES/NO prices from Polymarket order books.
-func (c *Collector) UpdatePolymarket(yesPrice, noPrice float64) {
+// UpdatePolymarket sets the latest YES/NO prices and order book latency from Polymarket.
+// latencyMs is the max latency across YES/NO order books (milliseconds).
+func (c *Collector) UpdatePolymarket(yesPrice, noPrice float64, latencyMs int64) {
 	c.yesPrice = yesPrice
 	c.noPrice = noPrice
+	c.orderBookLatency = latencyMs
 }
 
 // StartEvent begins a new 5-minute event window.
@@ -56,6 +59,7 @@ func (c *Collector) StartEvent(conditionID string, startTime int64, openPrice fl
 	c.prices = c.prices[:0]
 	c.yesPrice = 0
 	c.noPrice = 0
+	c.orderBookLatency = 0
 }
 
 // Tick generates a ResearchSnapshot for the current moment.
@@ -106,8 +110,9 @@ func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 		Volatility30s: c.computeVolatilityTicks(6), // 6 ticks = 30s
 		BidDepth:        btc.BidDepth5,
 		AskDepth:        btc.AskDepth5,
-		YesPrice:        c.yesPrice,
-		NoPrice:         c.noPrice,
+		YesPrice:         c.yesPrice,
+		NoPrice:          c.noPrice,
+		OrderBookLatency: c.orderBookLatency,
 	}
 
 	c.snapshots = append(c.snapshots, snap)

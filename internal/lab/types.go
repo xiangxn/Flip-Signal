@@ -37,6 +37,9 @@ type ResearchSnapshot struct {
 	// --- Polymarket YES/NO mid prices ---
 	YesPrice float64 `json:"yes_price"`
 	NoPrice  float64 `json:"no_price"`
+
+	// --- 订单簿数据质量 ---
+	OrderBookLatency int64 `json:"order_book_latency,omitempty"` // YES/NO 订单簿最大延迟（毫秒）
 }
 
 // Event represents one 5-minute BTC cycle — the fundamental research unit.

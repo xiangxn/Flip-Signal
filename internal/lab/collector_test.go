@@ -66,13 +66,16 @@ func TestCollector_UpdatePolymarket(t *testing.T) {
 	binance := feed.NewBinanceAdapter()
 	c := NewCollector(binance)
 
-	c.UpdatePolymarket(0.45, 0.55)
+	c.UpdatePolymarket(0.45, 0.55, 150)
 
 	if c.yesPrice != 0.45 {
 		t.Errorf("yesPrice: expected 0.45, got %.2f", c.yesPrice)
 	}
 	if c.noPrice != 0.55 {
 		t.Errorf("noPrice: expected 0.55, got %.2f", c.noPrice)
+	}
+	if c.orderBookLatency != 150 {
+		t.Errorf("orderBookLatency: expected 150, got %d", c.orderBookLatency)
 	}
 }
 

@@ -461,7 +461,7 @@ func main() {
 				yb := bookAdapter.GetLatestBook(yesTok)
 				nb := bookAdapter.GetLatestBook(noTok)
 
-				collector.UpdatePolymarket(bestBid(yb), bestBid(nb))
+				collector.UpdatePolymarket(bestBid(yb), bestBid(nb), maxLatency(yb, nb))
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
@@ -562,5 +562,18 @@ func bestBid(book *sdk.OrderBook) float64 {
 		return 0
 	}
 	return book.Bids[len(book.Bids)-1].Price
+}
+
+// maxLatency 返回两个订单簿中延迟较大的值（毫秒）。
+// 用于将订单簿数据质量传递到 Flip 引擎进行风控。
+func maxLatency(yb, nb *sdk.OrderBook) int64 {
+	var max int64
+	if yb != nil && yb.Latency > max {
+		max = yb.Latency
+	}
+	if nb != nil && nb.Latency > max {
+		max = nb.Latency
+	}
+	return max
 }
 
