@@ -56,7 +56,6 @@ type TradingConfig struct {
     MaxSlippage          float64 // 滑点容忍（默认 0.07 = 7%）
     MaxDailyLoss         float64 // 日亏上限 USDC（默认 10.0）
     CooldownAfterLossSec int     // 亏损后冷却秒数（默认 300）
-    ResolutionTimeoutSec int     // WS 结算等待超时秒数（默认 300）
 }
 ```
 
@@ -185,16 +184,15 @@ OnSignal
 ## 7. 结算
 
 ```
-OnCycleEnd(conditionID, simulatedOutcome)
+OnCycleEnd(conditionID)
   │
   ├── 无持仓 → 返回
   └── 有持仓：
-       ├── 启动 timer（ResolutionTimeoutSec, 默认 300s）
-       ├── 监听 WS Resolved 事件（bookAdapter.SubscribeResolved()）
-       ├── 收到 → settleWithOutcome("ws")
-       └── 超时 → settleWithOutcome("simulated_fallback")
-          DailyPnl += PnL
-          若亏损 → CooldownUntil = now + CooldownAfterLossSec
+       ├── GTC 挂单对账（TradeMonitor 已实时追踪）
+       ├── 创建 Position 并注册到 ResolutionPoller
+       └── ResolutionPoller 异步轮询 gamma API 等待结算
+          ├── umaResolutionStatus=="resolved" → settleWithOutcome("poller")
+          └── 不设超时：持续轮询直到 Polymarket 完成结算
 ```
 
 纸面路径 flipRecorder.Resolve() 保持不变，两条 P&L 各自独立。
@@ -270,7 +268,6 @@ trading:
   max_slippage: 0.07           # 7%
   max_daily_loss: 10.0
   cooldown_after_loss_sec: 300
-  resolution_timeout_sec: 300
 ```
 
 ### 10.2 CLI flags

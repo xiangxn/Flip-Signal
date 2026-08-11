@@ -346,8 +346,3 @@ trading:
   #   "FAK" — 市价单即刻执行，未成交部分立即取消（适合时间敏感的信号交易）
   # 默认值: "GTC"
   order_strategy: "GTC"
-
-  # 结算等待真实 outcome 超时（秒）：市场结束后等待 WS 结算事件，
-  # 超时回退到模拟 BTC outcome（记录 resolution_source=simulated_fallback）
-  # 默认值: 300
-  resolution_timeout_sec: 300

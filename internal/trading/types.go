@@ -15,9 +15,8 @@ type TradingConfig struct {
 	OutputPath           string  `mapstructure:"output_path"`            // 交易记录 JSONL 路径
 	StakePerSignal       float64 `mapstructure:"stake_per_signal"`       // 每信号投入 USDC
 	MaxSlippage          float64 `mapstructure:"max_slippage"`           // 滑点容忍（价格上限 = entry×(1+slippage)）
-	MaxDailyLoss         float64 `mapstructure:"max_daily_loss"`         // 日亏上限 USDC，触发后当日停止
-	ResolutionTimeoutSec int     `mapstructure:"resolution_timeout_sec"` // WS 结算等待超时秒数
-	OrderStrategy        string  `mapstructure:"order_strategy"`         // 下单策略："GTC"（挂单等待成交）或 "FAK"（即刻市价成交，剩余取消）
+	MaxDailyLoss  float64 `mapstructure:"max_daily_loss"`  // 日亏上限 USDC，触发后当日停止
+	OrderStrategy string  `mapstructure:"order_strategy"` // 下单策略："GTC"（挂单等待成交）或 "FAK"（即刻市价成交，剩余取消）
 }
 
 // DefaultConfig 返回安全的默认 TradingConfig。
@@ -27,9 +26,8 @@ func DefaultConfig() TradingConfig {
 		OutputPath:           "data/trades.jsonl",
 		StakePerSignal:       5.0,
 		MaxSlippage:          0.07,
-		MaxDailyLoss:         10.0,
-		ResolutionTimeoutSec: 300,
-		OrderStrategy:        "GTC",
+		MaxDailyLoss:  10.0,
+		OrderStrategy: "GTC",
 	}
 }
 
