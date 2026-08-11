@@ -409,8 +409,14 @@ func main() {
 			}
 		}
 
-		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s",
-			conditionID, yesTokenID, noTokenID)
+		// 预热 SDK 缓存：从 gamma API 响应中提取 tickSize / negRisk / feeRate，
+		// 注入 SDK 内部缓存，避免 CreateOrder 时额外网络请求（下单延迟敏感）。
+		trading.PrefetchTokenInfo(client, marketData, tokenIDs)
+
+		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s negRisk=%v tickSize=%s",
+			conditionID, yesTokenID, noTokenID,
+			marketData.Get("negRisk").Bool(),
+			marketData.Get("orderPriceMinTickSize").String())
 
 		// 步骤 5：订阅新 token 并通知实盘新周期
 		if yesTok != "" || noTok != "" {
