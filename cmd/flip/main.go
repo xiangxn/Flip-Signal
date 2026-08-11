@@ -492,7 +492,9 @@ func main() {
 
 					// ── 交易执行（纸面/实盘统一路径）──
 					if trader != nil {
-						execInfo, err := trader.OnSignal(sig, yesTok, noTok)
+						yesBook := trading.OrderBookToSummary(yb)
+						noBook := trading.OrderBookToSummary(nb)
+						execInfo, err := trader.OnSignal(sig, yesTok, noTok, yesBook, noBook)
 						if err != nil {
 							log.Printf("[Trading] ⚠️ 信号未执行: %v", err)
 						}

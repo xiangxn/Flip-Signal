@@ -317,7 +317,7 @@ trading:
   # 默认值: data/trades.jsonl
   output_path: "data/trades.jsonl"
 
-  # 每信号投入 USDC（FAK 市价单的 Amount 参数）
+  # 每信号投入 USDC
   # 也可通过命令行 -stake flag 覆盖
   # 默认值: 5.0
   stake_per_signal: 5.0
@@ -331,6 +331,12 @@ trading:
   # 也可通过命令行 -max-loss flag 覆盖
   # 默认值: 10.0
   max_daily_loss: 10.0
+
+  # 下单策略：
+  #   "GTC" — 限价单挂在订单簿上等待对手方成交（默认，保守）
+  #   "FAK" — 市价单即刻执行，未成交部分立即取消（适合时间敏感的信号交易）
+  # 默认值: "GTC"
+  order_strategy: "GTC"
 
   # 结算等待真实 outcome 超时（秒）：市场结束后等待 WS 结算事件，
   # 超时回退到模拟 BTC outcome（记录 resolution_source=simulated_fallback）

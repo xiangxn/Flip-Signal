@@ -12,7 +12,7 @@ type TradeClient interface {
 	CreateOrder(userOrder *orders.UserOrder, options orders.CreateOrderOptions) (*orders.SignedOrder, error)
 
 	// CreateMarketOrder 创建并签名一个市价单（不提交）。
-	CreateMarketOrder(userMarketOrder *orders.UserMarketOrder, options orders.CreateOrderOptions) (*orders.SignedOrder, error)
+	CreateMarketOrder(userMarketOrder *orders.UserMarketOrder, options orders.CreateOrderOptions, book *sdk.OrderBookSummary) (*orders.SignedOrder, error)
 
 	// PostOrder 提交已签名订单到 CLOB。orderType 决定执行语义（GTC/FOK/FAK 等）。
 	PostOrder(order *orders.SignedOrder, orderType orders.OrderType, deferExec bool) (*gjson.Result, error)
@@ -35,8 +35,8 @@ func (s *SdkClient) CreateOrder(u *orders.UserOrder, o orders.CreateOrderOptions
 }
 
 // CreateMarketOrder 委托给 SDK。
-func (s *SdkClient) CreateMarketOrder(u *orders.UserMarketOrder, o orders.CreateOrderOptions) (*orders.SignedOrder, error) {
-	return s.Client.CreateMarketOrder(u, o)
+func (s *SdkClient) CreateMarketOrder(u *orders.UserMarketOrder, o orders.CreateOrderOptions, book *sdk.OrderBookSummary) (*orders.SignedOrder, error) {
+	return s.Client.CreateMarketOrder(u, o, book)
 }
 
 // PostOrder 委托给 SDK。

@@ -17,8 +17,13 @@ import (
 //   - feeSchedule.rate: 手续费率（bps）
 //
 // 这些值与 token 无关（同一市场内 YES/NO 共享），对 tokenIDs 中所有 token
-// 统一设置。
+// 统一设置。先清空旧缓存避免 map 无限增长，再注入新周期数据。
 func PrefetchTokenInfo(client *sdk.PolymarketClient, marketData *gjson.Result, tokenIDs []string) {
+	// 清理上一周期的缓存，防止 tokenID 对应的 map 无限增长
+	client.ClearTickSizes()
+	client.ClearFeeRates()
+	client.ClearNegRisk()
+
 	// tickSize：gamma 返回的是字符串，需转为 float64
 	if tsStr := marketData.Get("orderPriceMinTickSize").String(); tsStr != "" {
 		ts, err := strconv.ParseFloat(tsStr, 64)

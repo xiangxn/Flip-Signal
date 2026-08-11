@@ -140,7 +140,7 @@ func (t *Trader) NewCycle(conditionID string, _ /*yesTokenID*/, _ /*noTokenID*/ 
 //
 // 返回 ExecInfo 供调用方回填 FlipRecorder（纸面/实盘路径统一）。
 // 锁仅在状态读写时持有，SDK 网络调用在锁外执行。
-func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (ExecInfo, error) {
+func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, yesBook, noBook *sdk.OrderBookSummary) (ExecInfo, error) {
 	failInfo := ExecInfo{Status: "failed"}
 
 	// ── 阶段 1：锁内预检查 ──
@@ -216,19 +216,16 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 		return ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: sig.EntryPrice}, nil
 	}
 
-	// 实盘：GTC 限价单
-	size := ComputeShares(cfg.StakePerSignal, maxPrice)
-	uo := orders.UserOrder{
-		TokenID: tokenID,
-		Price:   maxPrice,
-		Size:    size,
-		Side:    orders.BUY,
-	}
-	signedOrder, err := client.CreateOrder(&uo, orders.CreateOrderOptions{})
+	// 实盘：按策略构建订单（GTC 限价单 / FAK 市价单）
+	// 根据要买入的 token 选择对应的订单簿，FAK 时透传给 CreateMarketOrder
+	book := pickBook(tokenSide, yesBook, noBook)
+	signedOrder, orderType, orderedShares, err := BuildOrder(
+		client, cfg.OrderStrategy, tokenID, maxPrice, cfg.StakePerSignal, book,
+	)
 	if err != nil {
 		t.mu.Lock()
 		rec.State = OrderFailed
-		rec.ErrorMsg = fmt.Sprintf("CreateOrder: %v", err)
+		rec.ErrorMsg = fmt.Sprintf("BuildOrder(%s): %v", cfg.OrderStrategy, err)
 		rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
@@ -236,8 +233,8 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 		return failInfo, fmt.Errorf("创建订单失败: %w", err)
 	}
 
-	// PostOrder（GTC）
-	resp, err := client.PostOrder(signedOrder, orders.GTC, false)
+	// PostOrder
+	resp, err := client.PostOrder(signedOrder, orderType, false)
 	if err != nil {
 		t.mu.Lock()
 		rec.State = OrderFailed
@@ -246,7 +243,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Size: %.4f", err, uo.Price, uo.Size)
+		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Strategy: %s", err, maxPrice, cfg.OrderStrategy)
 	}
 
 	orderID, success, errMsg := ParsePostOrderResp(resp)
@@ -285,8 +282,8 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string) (E
 	t.exec.LastSkipReason = ""
 	t.exec.DailySignals++
 
-	log.Printf("[Trading] 📝 GTC 订单已挂单: side=%s price=%.4f size=%.0f orderID=%s",
-		tokenSide, maxPrice, size, orderID)
+	log.Printf("[Trading] 📝 %s 订单已提交: side=%s price=%.4f shares=%.0f orderID=%s",
+		cfg.OrderStrategy, tokenSide, maxPrice, orderedShares, orderID)
 	return ExecInfo{Status: "pending"}, nil
 }
 
@@ -663,4 +660,19 @@ func (t *Trader) Orders(limit int) []OrderRecord {
 		out[i] = *t.orders[start+i]
 	}
 	return out
+}
+
+// pickBook 根据 tokenSide 选择对应的订单簿。
+//
+//	tokenSide=="yes" → 买入 YES token → 用 yesBook
+//	tokenSide=="no"  → 买入 NO token  → 用 noBook
+func pickBook(tokenSide string, yesBook, noBook *sdk.OrderBookSummary) *sdk.OrderBookSummary {
+	switch tokenSide {
+	case "yes":
+		return yesBook
+	case "no":
+		return noBook
+	default:
+		return nil
+	}
 }
