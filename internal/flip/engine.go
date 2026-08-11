@@ -21,9 +21,10 @@ type T0Features struct {
 	BTCExtreme     bool    `json:"btc_extreme"`
 
 	// 评分阶段特征（仅在 onConfirmed 中填充，失败穿越诊断用）
-	OtherDelta float64 `json:"other_delta,omitempty"`
-	EntryPrice float64 `json:"entry_price,omitempty"`
-	Score      int     `json:"score,omitempty"`
+	OtherDelta       float64 `json:"other_delta,omitempty"`
+	EntryPrice       float64 `json:"entry_price,omitempty"`
+	Score            int     `json:"score,omitempty"`
+	OrderBookLatency int64   `json:"order_book_latency,omitempty"` // 穿越时刻订单簿延迟（毫秒）
 }
 
 // Engine 从 ResearchSnapshot 流中检测翻转信号。
@@ -385,17 +386,18 @@ func (e *Engine) returnToWatching() {
 	// 保存本次失败穿越的 T=0 特征供 Dashboard 诊断用
 	if e.crossSnap != nil {
 		e.lastFailedT0 = &T0Features{
-			Side:           e.crossSide,
-			PathEff:        e.pathEff,
-			NoiseRatio:     e.noiseRatio,
-			Flips:          e.flips,
-			Oscillating:    e.oscillating,
-			RangeExpansion: e.rangeExpansion,
-			BTCPosition:    e.btcPosition,
-			BTCExtreme:     e.btcExtreme,
-			OtherDelta:     e.lastFailedOtherDelta,
-			EntryPrice:     e.lastFailedEntryPrice,
-			Score:          e.lastFailedScore,
+			Side:             e.crossSide,
+			PathEff:          e.pathEff,
+			NoiseRatio:       e.noiseRatio,
+			Flips:            e.flips,
+			Oscillating:      e.oscillating,
+			RangeExpansion:   e.rangeExpansion,
+			BTCPosition:      e.btcPosition,
+			BTCExtreme:       e.btcExtreme,
+			OtherDelta:       e.lastFailedOtherDelta,
+			EntryPrice:       e.lastFailedEntryPrice,
+			Score:            e.lastFailedScore,
+			OrderBookLatency: e.orderBookLatency,
 		}
 	}
 	e.state = stateWatching
@@ -468,6 +470,9 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		}
 	}
 
+	// 取穿越时刻与确认时刻延迟的最大值，防止确认 tick 延迟飙升漏检
+	latency := max(e.orderBookLatency, snap.OrderBookLatency)
+
 	// 计算复合评分
 	params := ScoreParams{
 		Side:             e.crossSide,
@@ -478,16 +483,16 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		BTCPosition:      e.btcPosition,
 		BTCExtreme:       e.btcExtreme,
 		HistReady:        e.histRange.IsReady(),
-		OrderBookLatency: e.orderBookLatency,
+		OrderBookLatency: latency,
 		Cfg:              e.cfg,
 	}
 
 	score, vetoed := ComputeFlipScore(params)
 	if vetoed {
 		// 延迟否决时输出日志
-		if e.cfg.MaxLatencyMs > 0 && e.orderBookLatency > e.cfg.MaxLatencyMs {
+		if e.cfg.MaxLatencyMs > 0 && latency > e.cfg.MaxLatencyMs {
 			log.Printf("[Flip] 🐢 延迟否决: latency=%dms > max=%dms, side=%s entry=%.3f",
-				e.orderBookLatency, e.cfg.MaxLatencyMs, e.crossSide, entryPrice)
+				latency, e.cfg.MaxLatencyMs, e.crossSide, entryPrice)
 		}
 		e.lastFailedOtherDelta = otherDelta
 		e.lastFailedEntryPrice = entryPrice
@@ -519,8 +524,8 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		RangeExpansion: e.rangeExpansion,
 		BTCPosition:    e.btcPosition,
 		BTCExtreme:     e.btcExtreme,
-		OtherDelta:        otherDelta,
-		OrderBookLatency:  e.orderBookLatency,
+		OtherDelta:     otherDelta,
+		OrderBookLatency: latency,
 	}
 }
 
@@ -551,14 +556,15 @@ func (e *Engine) T0Features() *T0Features {
 		return nil
 	}
 	return &T0Features{
-		Side:           e.crossSide,
-		PathEff:        e.pathEff,
-		NoiseRatio:     e.noiseRatio,
-		Flips:          e.flips,
-		Oscillating:    e.oscillating,
-		RangeExpansion: e.rangeExpansion,
-		BTCPosition:    e.btcPosition,
-		BTCExtreme:     e.btcExtreme,
+		Side:             e.crossSide,
+		PathEff:          e.pathEff,
+		NoiseRatio:       e.noiseRatio,
+		Flips:            e.flips,
+		Oscillating:      e.oscillating,
+		RangeExpansion:   e.rangeExpansion,
+		BTCPosition:      e.btcPosition,
+		BTCExtreme:       e.btcExtreme,
+		OrderBookLatency: e.orderBookLatency,
 	}
 }
 

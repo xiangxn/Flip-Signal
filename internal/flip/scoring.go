@@ -5,10 +5,12 @@ package flip
 // ═══════════════════════════════════════════════════════════════
 
 // ComputeFlipScore 计算多特征复合评分（Formula A）。
-// 返回 (score, vetoed)。vetoed=true 表示 F0 否决（真突破，不下注）。
+// 返回 (score, vetoed)。vetoed=true 表示否决（不下注）。
 //
 // 理论最高分: 3+2+1+2+1+2+1 = 12（此前为 9）。
 //
+//	L0:  OrderBookLatency > MaxLatencyMs → veto（延迟风控，数据不可信）
+//	F0:  RangeExpansion ≥ 2.0 → veto   (hist ready only, 真突破)
 //	F1v: OtherDelta > 0.05 → +3 (Formula A: new top tier)
 //	F1:  OtherDelta > 0.02 → +2 (Formula A: was 0.03 +4)
 //	F2:  OtherDelta > 0.01 → +1 (Formula A: was +2)
@@ -17,7 +19,6 @@ package flip
 //	F5:  EntryPrice < 0.25 → +1
 //	F6:  RangeExpansion < 0.5 → +2 (hist ready only)
 //	F7:  BTC diverges from PM → +1 (Formula A: widened, hist ready only)
-//	F0:  RangeExpansion ≥ 2.0 → veto   (hist ready only)
 func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 	// L0: 订单簿延迟过大 → 数据不可信，一票否决。
 	if params.Cfg.MaxLatencyMs > 0 && params.OrderBookLatency > params.Cfg.MaxLatencyMs {

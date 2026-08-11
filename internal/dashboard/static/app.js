@@ -196,6 +196,7 @@ async function fetchState() {
         ['BTC Position', f.btc_position.toFixed(2)],
         ['BTC Extreme', f.btc_extreme ? '✓' : '✗'],
         ['Confirm Ticks', f.confirm_ticks_waited],
+        ['Latency', (f.order_book_latency || 0) + 'ms'],
       ];
       cg.innerHTML = items.map(([l, v]) => {
         let cls = '';
@@ -225,6 +226,7 @@ async function fetchState() {
           case 'Other Delta':  return rawVal <= d.other_delta_weak_cfg;
           case 'Entry Price':  return rawVal >= d.entry_cheap_weak_cfg;
           case 'Score':        return rawVal < d.score_entry_cfg;
+          case 'Latency':      return d.max_latency_ms_cfg > 0 && rawVal > d.max_latency_ms_cfg;
           default:             return false;
         }
       };
@@ -239,6 +241,7 @@ async function fetchState() {
         ['Range Exp.',    f.range_expansion.toFixed(2),        f.range_expansion,          true],
         ['BTC Position',  f.btc_position.toFixed(2),           f.btc_position,             false],
         ['BTC Extreme',   f.btc_extreme ? '✓' : '✗',          f.btc_extreme,              true],
+        ['Latency',       (f.order_book_latency || 0) + 'ms',  f.order_book_latency || 0,  true],
       ];
 
       // 附加评分阶段特征（仅当 onConfirmed 已执行时存在）
@@ -307,6 +310,7 @@ async function fetchSignals() {
       let execHtml = '<span class="pending">&hellip;</span>';
       if (s.exec_status === 'filled') execHtml = '<span class="won">&#10003;</span>';
       else if (s.exec_status === 'failed') execHtml = '<span class="lost">&#10007;</span>';
+      const latMs = s.order_book_latency || 0;
       return `<tr>
         <td>${t}</td>
         <td class="${sideCls}">${s.side.toUpperCase()}</td>
@@ -320,6 +324,7 @@ async function fetchSignals() {
         <td>${s.range_expansion?.toFixed(2) || '-'}</td>
         <td>${s.btc_position?.toFixed(2) || '-'}</td>
         <td>${s.other_delta?.toFixed(3) || '-'}</td>
+        <td>${latMs}ms</td>
         <td>${wl}</td>
         <td class="${pnlCls}">${pnl}</td>
       </tr>`;

@@ -70,6 +70,7 @@ type stateResponse struct {
 	EntryCheapStrongCfg  float64 `json:"entry_cheap_strong_cfg"`
 	EntryCheapWeakCfg    float64 `json:"entry_cheap_weak_cfg"`
 	ScoreEntryCfg        int     `json:"score_entry_cfg"`
+	MaxLatencyMsCfg      int64   `json:"max_latency_ms_cfg"`
 }
 
 type crossDetail struct {
@@ -84,9 +85,10 @@ type crossDetail struct {
 	ConfirmTicksWaited int     `json:"confirm_ticks_waited"`
 
 	// 评分阶段特征（LastFailed 中填充，诊断用）
-	OtherDelta float64 `json:"other_delta,omitempty"`
-	EntryPrice float64 `json:"entry_price,omitempty"`
-	Score      int     `json:"score,omitempty"`
+	OtherDelta       float64 `json:"other_delta,omitempty"`
+	EntryPrice       float64 `json:"entry_price,omitempty"`
+	Score            int     `json:"score,omitempty"`
+	OrderBookLatency int64   `json:"order_book_latency,omitempty"` // 订单簿延迟（毫秒）
 }
 
 type signalsResponse struct {
@@ -208,6 +210,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	resp.EntryCheapStrongCfg = cfg.EntryCheapStrong
 	resp.EntryCheapWeakCfg = cfg.EntryCheapWeak
 	resp.ScoreEntryCfg = cfg.ScoreEntry
+	resp.MaxLatencyMsCfg = cfg.MaxLatencyMs
 
 	// ── Trader 执行状态（纸面/实盘统一）──
 	if s.Trader != nil {
@@ -240,6 +243,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 				BTCPosition:        t0.BTCPosition,
 				BTCExtreme:         t0.BTCExtreme,
 				ConfirmTicksWaited: s.Engine.ConfirmTicksWaited(),
+				OrderBookLatency:   t0.OrderBookLatency,
 			}
 		}
 	}
@@ -247,17 +251,18 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	// 最近一次失败穿越的特征（多穿越模式下诊断用）
 	if t0 := s.Engine.LastFailedT0(); t0 != nil {
 		resp.LastFailedFeatures = &crossDetail{
-			Side:           t0.Side,
-			PathEff:        t0.PathEff,
-			NoiseRatio:     t0.NoiseRatio,
-			Flips:          t0.Flips,
-			IsOscillating:  t0.Oscillating,
-			RangeExpansion: t0.RangeExpansion,
-			BTCPosition:    t0.BTCPosition,
-			BTCExtreme:     t0.BTCExtreme,
-			OtherDelta:     t0.OtherDelta,
-			EntryPrice:     t0.EntryPrice,
-			Score:          t0.Score,
+			Side:             t0.Side,
+			PathEff:          t0.PathEff,
+			NoiseRatio:       t0.NoiseRatio,
+			Flips:            t0.Flips,
+			IsOscillating:    t0.Oscillating,
+			RangeExpansion:   t0.RangeExpansion,
+			BTCPosition:      t0.BTCPosition,
+			BTCExtreme:       t0.BTCExtreme,
+			OtherDelta:       t0.OtherDelta,
+			EntryPrice:       t0.EntryPrice,
+			Score:            t0.Score,
+			OrderBookLatency: t0.OrderBookLatency,
 		}
 	}
 
