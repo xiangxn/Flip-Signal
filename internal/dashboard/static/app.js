@@ -237,7 +237,6 @@ async function fetchState() {
         ['Side',          f.side,                              f.side,                     false],
         ['Path Eff',      f.path_eff.toFixed(3),               f.path_eff,                 true],
         ['Noise Ratio',   f.noise_ratio.toFixed(2),            f.noise_ratio,              true],
-        ['Flips',         f.flips,                             f.flips,                    false],
         ['Oscillating',   f.is_oscillating ? '✓' : '✗',       f.is_oscillating,           true],
         ['Range Exp.',    f.range_expansion.toFixed(2),        f.range_expansion,          true],
         ['BTC Position',  f.btc_position.toFixed(2),           f.btc_position,             false],
@@ -253,7 +252,7 @@ async function fetchState() {
         items.push(['Entry Price', f.entry_price.toFixed(3),   f.entry_price,              true]);
       }
       if (f.score !== undefined) {
-        items.push(['Score',       f.score,                    f.score,                    true]);
+        items.push(['Score',       f.score + '/' + scoreEntryCfg, f.score,                 true]);
       }
 
       fg.innerHTML = items.map(([l, v, raw, evaluable]) => {
@@ -297,7 +296,7 @@ async function fetchSignals() {
 
     tb.innerHTML = d.signals.map(s => {
       const t = new Date(s.time).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-      let wl = '<span class="pending">…</span>';
+      let wl = '<span class="pending">-</span>';
       let pnl = '-';
       let pnlCls = '';
       if (s.resolved_at) {
