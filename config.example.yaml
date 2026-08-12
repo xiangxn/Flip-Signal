@@ -218,8 +218,8 @@ flip:
 
   # 确认等待 tick 数（1 tick = 5s）
   # 穿越后等待此 tick 数，再采样对手盘价格计算 other_delta
-  # 默认值: 5（从 1 改为 5，给对面价格 25s 确认反弹）
-  confirm_delay_ticks: 5
+  # 默认值: 2（从 5 改为 2：25s 时对面已充分反弹但入场价跑掉，FAK 无法成交）
+  confirm_delay_ticks: 2
 
   # other_delta 硬下限，-999 表示禁用（Formula A 由评分体系处理）
   # 默认值: -999.0（禁用）
@@ -257,6 +257,12 @@ flip:
   # 较低入场价阈值，entry_price < 此值 → +1 分（elif，不与上一档叠加）
   # 默认值: 0.25
   entry_cheap_weak: 0.25
+
+  # 入场价上限 gate: 确认时刻（穿越 + confirm_delay_ticks×5s）对侧价 > 此值
+  # → 信号无效（盈亏比已恶化，实盘 FAK 也无法以可接受价格成交）
+  # 与 trading.max_price 保持一致；0 = 禁用
+  # 默认值: 0.30（6 天数据扫描：单笔盈亏比 2.97、利润因子 1.71）
+  max_entry_price: 0.30
 
   # ===== 评分权重 (§2.10) — Formula A =====
 
@@ -333,8 +339,8 @@ trading:
 
   # 最高允许价格：限价单的价格上限，直接设置绝对价格而非滑点百分比
   # 当盘口价很低时滑点百分比不实用（如 0.20 的 50% = 0.30，可能仍吃不到单）
-  # 默认值: 0.35
-  max_price: 0.35
+  # 默认值: 0.30（与 flip.max_entry_price 对齐，高盈亏比优先）
+  max_price: 0.30
 
   # 日亏上限（USDC）：当日累计 realized 亏损达到此值后停止交易至次日 UTC 零点
   # 也可通过命令行 -max-loss flag 覆盖

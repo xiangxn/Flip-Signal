@@ -597,6 +597,17 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		entryPrice = crossSnap.YesPrice
 	}
 
+	// ── 入场价上限 gate（与 onConfirmed 一致，保持多穿越重试路径同步）──
+	var confirmPrice float64
+	if side == "yes" {
+		confirmPrice = confSnap.NoPrice
+	} else {
+		confirmPrice = confSnap.YesPrice
+	}
+	if e.cfg.MaxEntryPrice > 0 && confirmPrice > e.cfg.MaxEntryPrice {
+		return nil
+	}
+
 	// BTC position + extreme
 	var btcPosition float64
 	var btcExtreme bool
@@ -711,6 +722,25 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		entryPrice = e.crossSnap.NoPrice // buy NO, bet DOWN
 	} else {
 		entryPrice = e.crossSnap.YesPrice // buy YES, bet UP
+	}
+
+	// ── 入场价上限 gate（与回测 max_entry_price 一致）──
+	// 确认时刻对侧价 = 此刻真正可成交的 5s 采样代理。
+	// 强 other_delta 的确认意味着廉价入场已消失（穿越价是确认期前的旧价），
+	// 对侧价已超上限 → 盈亏比恶化，实盘 FAK 必被拒 → 信号无效。
+	var confirmPrice float64
+	if e.crossSide == "yes" {
+		confirmPrice = snap.NoPrice
+	} else {
+		confirmPrice = snap.YesPrice
+	}
+	if e.cfg.MaxEntryPrice > 0 && confirmPrice > e.cfg.MaxEntryPrice {
+		log.Printf("[Flip] 💸 价格失效: side=%s 确认价 %.3f > 上限 %.3f（穿越价 %.3f 已过期）",
+			e.crossSide, confirmPrice, e.cfg.MaxEntryPrice, entryPrice)
+		e.lastFailedOtherDelta = otherDelta
+		e.lastFailedEntryPrice = entryPrice
+		e.lastFailedScore = 0
+		return nil
 	}
 
 	// BTC 位置（仅历史数据就绪时）

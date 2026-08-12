@@ -2,6 +2,7 @@ package trading
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/xiangxn/go-polymarket-sdk/orders"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
@@ -17,14 +18,62 @@ const (
 // OrderBookToSummary 将 MarketMonitor WebSocket 返回的 *OrderBook
 // 转为 CreateMarketOrder 所需的 *OrderBookSummary（仅复制 Bids/Asks，
 // 这两个字段是 CalculateMarketPrice 唯一用到的）。
+// Timestamp 一并复制，供下单日志计算盘口快照年龄（诊断 FAK 拒单）。
 func OrderBookToSummary(ob *sdk.OrderBook) *sdk.OrderBookSummary {
 	if ob == nil {
 		return nil
 	}
 	return &sdk.OrderBookSummary{
-		Bids: ob.Bids,
-		Asks: ob.Asks,
+		Bids:      ob.Bids,
+		Asks:      ob.Asks,
+		Timestamp: ob.Timestamp,
 	}
+}
+
+// bestAsk 返回订单簿最优卖价（可立即买入的价格）。
+//
+// WS 约定 asks 降序（最优档在末尾），与 formatBook 一致。
+// 订单簿为 nil 或卖单为空时返回 0。
+func bestAsk(book *sdk.OrderBookSummary) float64 {
+	if book == nil || len(book.Asks) == 0 {
+		return 0
+	}
+	return book.Asks[len(book.Asks)-1].Price
+}
+
+// formatBook 将订单簿快照渲染为紧凑的诊断日志字符串（纯函数）。
+//
+// Polymarket WS 盘口约定（与 SDK CalculateBuyMarketPrice 一致）：
+// bids 升序、asks 降序，最优档均为末尾元素。
+// asks 倒序输出保证最便宜的卖单（可买价）在前，便于与 FAK 拒单对照。
+//
+// 输出示例: asks=[0.2300x135.0, 0.2450x80.0] bid=0.2200x100.0 age=3200ms
+func formatBook(book *sdk.OrderBookSummary, maxLevels int, nowMs int64) string {
+	if book == nil {
+		return "book=nil"
+	}
+	n := len(book.Asks)
+	if n > maxLevels {
+		n = maxLevels
+	}
+	var b strings.Builder
+	b.WriteString("asks=[")
+	for i := 0; i < n; i++ {
+		lv := book.Asks[len(book.Asks)-1-i] // 末尾是最优卖价，倒序渲染
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		fmt.Fprintf(&b, "%.4fx%.1f", lv.Price, lv.Size)
+	}
+	b.WriteString("]")
+	if len(book.Bids) > 0 {
+		bestBid := book.Bids[len(book.Bids)-1]
+		fmt.Fprintf(&b, " bid=%.4fx%.1f", bestBid.Price, bestBid.Size)
+	}
+	if book.Timestamp > 0 {
+		fmt.Fprintf(&b, " age=%dms", nowMs-book.Timestamp)
+	}
+	return b.String()
 }
 
 // ── 下单构建函数 ──

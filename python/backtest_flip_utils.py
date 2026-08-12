@@ -189,9 +189,10 @@ class FlipSignal:
     condition_id: str
     side: str               # "yes" 或 "no"
     score: int              # 复合评分
-    entry_price: float      # 入场价 (对面价)
+    entry_price: float      # 穿越时刻对面价 (评分特征用)
+    fill_price: float       # 确认时刻对面价 = 实盘真实成交价 (entry + other_delta)
     won: bool               # 是否赢
-    pnl: float              # 盈亏
+    pnl: float              # 盈亏 (按 fill_price 成交计算)
     shares: int             # 下单量
     remaining_sec: int      # 入场时剩余秒数
 
@@ -282,6 +283,14 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     if other_delta < cfg.od_hard_filter:
         return None
 
+    # ── 入场价上限 gate (实盘对齐) ──
+    # 确认时刻对侧价 = entry_price + other_delta。
+    # 强 other_delta 的确认意味着廉价入场已消失: 实盘在 25s 后下 FAK
+    # 限价 max_entry_price 必然被拒, 且此时盈亏比已恶化 → 信号无效。
+    confirm_price = entry_price + other_delta
+    if cfg.max_entry_price > 0 and confirm_price > cfg.max_entry_price:
+        return None
+
     # ── Step 4: 计算评分 ──
     score = 0
 
@@ -326,7 +335,10 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
         # NO>0.7, 我们买 YES (赌 UP)
         won = (event["outcome"] == 0)
 
-    pnl = (1.0 - entry_price) * shares if won else (0.0 - entry_price) * shares
+    # 实盘对齐: 按确认时刻价成交 (穿越价在确认期结束后已不可得,
+    # 旧口径按穿越价算 pnl 会虚增利润 — 幽灵成交)
+    fill_price = entry_price + other_delta
+    pnl = (1.0 - fill_price) * shares if won else -fill_price * shares
 
     return FlipSignal(
         event_time=event["start_time"],
@@ -334,6 +346,7 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
         side=side,
         score=score,
         entry_price=entry_price,
+        fill_price=fill_price,
         won=won,
         pnl=pnl,
         shares=shares,
@@ -481,6 +494,7 @@ def print_summary(signals: list[FlipSignal],
     wins = sum(1 for s in signals if s.won)
     total_pnl = sum(s.pnl for s in signals)
     avg_entry = sum(s.entry_price for s in signals) / n
+    avg_fill = sum(s.fill_price for s in signals) / n
     avg_score = sum(s.score for s in signals) / n
     avg_shares = sum(s.shares for s in signals) / n
 
@@ -521,15 +535,24 @@ def print_summary(signals: list[FlipSignal],
     print(f"  总信号数:      {n:>5d}")
     print(f"  日均信号:      {daily_rate:>5.0f}")
     print(f"  胜率:          {wins / n * 100:>5.1f}%  ({wins}/{n})")
-    print(f"  总 P&L:        {total_pnl:>+7.2f}")
-    print(f"  平均入场价:    {avg_entry:>7.3f}")
+    print(f"  总 P&L:        {total_pnl:>+7.2f}  (按确认价成交)")
+    print(f"  平均成交价:    {avg_fill:>7.3f}")
+    print(f"  平均穿越价:    {avg_entry:>7.3f}  (评分特征用)")
     print(f"  平均分数:      {avg_score:>7.1f}")
     print(f"  平均下单量:    {avg_shares:>7.1f} shares")
     losers_pnl = sum(s.pnl for s in signals if s.pnl < 0)
+    gross_win = sum(s.pnl for s in signals if s.pnl > 0)
+    n_win = sum(1 for s in signals if s.pnl > 0)
+    n_loss = sum(1 for s in signals if s.pnl < 0)
     if losers_pnl < 0 and total_pnl > 0:
-        print(f"  盈亏比:        {total_pnl / abs(losers_pnl):>7.1f}")
+        print(f"  净盈亏比:      {total_pnl / abs(losers_pnl):>7.2f}  (净P&L/总亏损, 依赖胜率)")
     else:
-        print(f"  盈亏比:        N/A")
+        print(f"  净盈亏比:      N/A")
+    if n_win > 0 and n_loss > 0 and gross_win > 0:
+        avg_win = gross_win / n_win
+        avg_loss = abs(losers_pnl) / n_loss
+        print(f"  单笔盈亏比:    {avg_win / avg_loss:>7.2f}  (平均盈利/平均亏损)")
+        print(f"  利润因子:      {gross_win / abs(losers_pnl):>7.2f}  (总盈利/总亏损)")
     print("-" * 58)
 
     # 按分数分桶
@@ -540,11 +563,11 @@ def print_summary(signals: list[FlipSignal],
         if subset:
             w = sum(1 for s in subset if s.won)
             p = sum(s.pnl for s in subset)
-            avg_e = sum(s.entry_price for s in subset) / len(subset)
+            avg_f = sum(s.fill_price for s in subset) / len(subset)
             print(f"  {label:22s}: n={len(subset):>3d}, "
                   f"win={w / len(subset) * 100:>5.1f}%, "
                   f"P&L={p:>+7.2f}, "
-                  f"avg_entry={avg_e:.3f}")
+                  f"avg_fill={avg_f:.3f}")
     print("-" * 58)
 
     # 按特征分桶

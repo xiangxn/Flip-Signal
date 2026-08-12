@@ -48,8 +48,7 @@ type FlipConfig struct {
 	// ── 对面价格确认（T+N ticks 后观察对侧变化）──
 
 	// 确认等待 tick 数：穿越后等 N 个 tick 再取对面价格（1 tick ≈ 5s）
-	ConfirmDelayTicks int `mapstructure:"confirm_delay_ticks"`
-	// other_delta 硬过滤下限，-999 = 禁用（由评分权重处理）
+	ConfirmDelayTicks int `mapstructure:"confirm_delay_ticks"`	// other_delta 硬过滤下限，-999 = 禁用（由评分权重处理）
 	ODHardFilter float64 `mapstructure:"od_hard_filter"`
 	// 对面涨幅 > 此值 → 对面强烈回归 → +3 分
 	OtherDeltaVStrong float64 `mapstructure:"other_delta_vstrong"`
@@ -78,6 +77,9 @@ type FlipConfig struct {
 	EntryCheapStrong float64 `mapstructure:"entry_cheap_strong"`
 	// 对侧价格 < 此值 → 低价入场 → +1 分（elif 不叠加）
 	EntryCheapWeak float64 `mapstructure:"entry_cheap_weak"`
+	// 确认时刻对侧价 > 此值 → 信号无效（盈亏比已恶化，实盘 FAK 也无法成交）
+	// 与 trading.max_price 保持一致；0 = 禁用
+	MaxEntryPrice float64 `mapstructure:"max_entry_price"`
 
 	// ── 评分权重 ──
 
@@ -126,7 +128,7 @@ func DefaultConfig() FlipConfig {
 		HistWindowN:           18,    // 前 18 根 K 线（~1.5h）算平均振幅
 		RangeExpThreshold:     0.5,   // 振幅 <0.5 → BTC 没动但 PM 0.7+ → 过度自信
 		RangeExpMax:           1.5,   // 收紧到 1.5（原 2.0 太宽，真突破仍然通过了）
-		ConfirmDelayTicks:     5,     // 从 1 改为 5（25s）：给对面价格足够时间确认反弹
+		ConfirmDelayTicks:     2,     // 从 5 改为 2（10s）：25s 时对面已反弹但入场价跑掉，FAK 无法成交
 		ODHardFilter:          -999.0, // 禁用硬过滤，由评分权重处理
 		OtherDeltaVStrong:     0.05,  // 对面涨 >0.05 → +3 分
 		OtherDeltaStrong:      0.02,  // 对面涨 >0.02 → +2 分
@@ -137,6 +139,7 @@ func DefaultConfig() FlipConfig {
 		BTCPosMin:             -0.1,  // YES>0.7: BTC 跌 >0.1 倍振幅 → 背离 → +1
 		EntryCheapStrong:      0.20,  // 对侧 <0.20 → 极低价入场 → +1
 		EntryCheapWeak:        0.25,  // 对侧 <0.25 → 低价入场 → +1（elif 不叠加）
+		MaxEntryPrice:         0.3,   // 确认时刻对侧价 >0.30 → 信号无效（与 trading.max_price 一致，2026-08-12 6天数据扫描）
 		WOtherD5VStrong:       3,     // 对面大涨权重
 		WOtherD5Strong:        2,     // 对面中涨权重
 		WOtherD5Weak:          1,     // 对面小涨权重

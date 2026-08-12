@@ -50,7 +50,7 @@ class FlipBacktestConfig:
     range_exp_max: float = 1.5           # F0: 收紧到 1.5 (原 2.0 太宽, 真突破仍然通过了)
 
     # §2.7 对面价格确认 (T+5s 特征) — Formula A: 三档评分
-    confirm_delay_ticks: int = 5         # 确认等待 tick 数 → 25s (原 1=5s, 5s 数据下对面价格来不及反应)
+    confirm_delay_ticks: int = 2         # 确认等待 tick 数 → 10s (原 5=25s: 对面已充分反弹但入场价跑掉, FAK 无法成交)
     od_hard_filter: float = -999.0       # other_delta 硬过滤下限, -999 = 禁用 (Formula A: 由评分权重处理)
     other_delta_vstrong: float = 0.05    # 对面涨幅 > 此值 → +3 分 (原 +4)
     other_delta_strong: float = 0.02     # 对面涨幅 > 此值 → +2 分 (原 0.03, +4)
@@ -64,6 +64,11 @@ class FlipBacktestConfig:
     # §2.9 入场价格
     entry_cheap_strong: float = 0.20     # entry < 此值 → +1 分 (Formula A: 重新激活)
     entry_cheap_weak: float = 0.25       # entry < 此值 → +1 分
+
+    # ── 入场价上限 (实盘对齐 gate) ──
+    # 确认时刻对侧价 > 此值 → 信号无效 (盈亏比已恶化, 实盘 FAK 也无法成交)
+    # 与实盘 trading.max_price 保持一致; <=0 禁用
+    max_entry_price: float = 0.3
 
     # ── 评分权重 (§2.10) — Formula A ──
     w_other_d5_vstrong: int = 3          # 对面大涨 (od > 0.05)

@@ -89,7 +89,7 @@ def main():
             outcome_icon = "✅" if s.won else "❌"
             print(
                 f"  {outcome_icon} {s.side.upper():>3s}>0.7 | "
-                f"score={s.score} | entry={s.entry_price:.4f} | "
+                f"score={s.score} | entry={s.entry_price:.4f} fill={s.fill_price:.4f} | "
                 f"shares={s.shares} | P&L={s.pnl:+.3f} | "
                 f"rem={s.remaining_sec:>3d}s | "
                 f"path_eff={s.path_eff:.2f} noise={s.noise_ratio:.1f} "

@@ -133,6 +133,13 @@ Idle ──Reset()──▶ Watching ──price>0.7──▶ Confirming ──s
 | F6 RangeExpansion | range_expansion < 0.5 | +2 |
 | F7 BTCExtreme | BTC 与 PM 方向背离 | +1 |
 | **F0 Veto** | range_expansion ≥ 2.0（真突破）| 否决 |
+| **Price Gate** | 确认时刻对侧价 > max_entry_price（默认 0.30，与 trading.max_price 一致）| 信号无效 |
+
+> Price Gate 说明：入场价是穿越时刻（T=0）的对侧价，确认在 T+confirm_delay_ticks×5s
+> （默认 2 ticks = 10s，原 5=25s 时对侧已充分反弹但入场价跑掉，FAK 无法成交）。强 other_delta
+> 的确认意味着对侧已上涨、廉价入场消失。确认时刻对侧价超上限 → 盈亏比恶化，
+> 实盘 FAK 必被拒。引擎层（5s 采样）与回测同步过滤；Trader 层再用最新 WS 盘口
+> 最优卖价复核（仅 FAK），避免注定失败的提交。
 
 ---
 

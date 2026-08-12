@@ -450,6 +450,64 @@ func TestEngine_CrossingWithUnfavorableOtherDelta(t *testing.T) {
 	}
 }
 
+func TestEngine_MaxEntryPriceVeto(t *testing.T) {
+	// 确认时刻对侧价 > max_entry_price → 信号无效（盈亏比已恶化）
+	cfg := DefaultConfig()
+	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1
+	ht := NewHistRangeTracker(18)
+	ht.AddRange(100, 150)
+	ht.AddRange(100, 130)
+	ht.AddRange(100, 140)
+
+	eng := NewEngine(cfg, ht)
+	eng.Reset(1)
+
+	openPrice := 50010.0
+	for i := 0; i < 5; i++ {
+		snap := makeTestSnap(0.5, 0.3, openPrice-float64(i), openPrice, 250-i*5)
+		if sig := eng.ProcessSnapshot(snap, 1); sig != nil {
+			t.Fatalf("unexpected signal at snap %d", i)
+		}
+	}
+
+	// 穿越: YES>0.7，对面 NO=0.15（廉价入场）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50005, openPrice, 230), 1); sig != nil {
+		t.Fatal("expected nil after crossing")
+	}
+
+	// 确认: 对面 NO 已涨至 0.40 > 0.35 → 价格失效 gate，无信号
+	// （若无 gate，该信号将得 7 分并发出）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.40, 50005, openPrice, 225), 1); sig != nil {
+		t.Fatalf("expected nil after confirm (price gate), got signal side=%s", sig.Side)
+	}
+}
+
+func TestEngine_MaxEntryPriceDisabled(t *testing.T) {
+	// max_entry_price=0 → gate 禁用，确认后正常产生信号
+	cfg := DefaultConfig()
+	cfg.MaxEntryPrice = 0
+	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1
+	ht := NewHistRangeTracker(18)
+	ht.AddRange(100, 150)
+	ht.AddRange(100, 130)
+	ht.AddRange(100, 140)
+
+	eng := NewEngine(cfg, ht)
+	eng.Reset(1)
+
+	openPrice := 50010.0
+	for i := 0; i < 5; i++ {
+		eng.ProcessSnapshot(makeTestSnap(0.5, 0.3, openPrice-float64(i), openPrice, 250-i*5), 1)
+	}
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50005, openPrice, 230), 1)
+	sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.40, 50005, openPrice, 225), 1)
+	if sig == nil {
+		t.Fatal("expected signal when max_entry_price disabled")
+	}
+}
+
 func TestEngine_F0Veto_RealBreakout(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2

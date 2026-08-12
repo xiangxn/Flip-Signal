@@ -233,6 +233,32 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 	// 实盘：按策略构建订单（GTC 限价单 / FAK 市价单）
 	// 根据要买入的 token 选择对应的订单簿，FAK 时透传给 CreateMarketOrder
 	book := pickBook(tokenSide, yesBook, noBook)
+	// 渲染提交时刻的盘口快照，随订单结果日志一并输出，便于诊断 FAK 拒单
+	bookSnapshot := formatBook(book, 5, t.timeNow().UnixMilli())
+
+	// ── FAK 盘口校验（提交前用最新 WS 盘口复核）──
+	// 引擎 gate 基于 5s 采样的买价做信号级过滤；此处用几百毫秒级更新的
+	// 真实卖价做最终校验：最优卖价 > 限价时 FAK 必被 CLOB 拒绝，
+	// 直接判信号无效，避免浪费注定失败的提交。
+	// GTC 为挂单等待成交，限价本身已约束成交价，无需校验。
+	if cfg.OrderStrategy == StrategyFAK {
+		reason := ""
+		if book == nil || len(book.Asks) == 0 {
+			reason = "FAK 盘口校验失败: 订单簿为空，无法确认可成交价格"
+		} else if ba := bestAsk(book); ba > maxPrice {
+			reason = fmt.Sprintf("FAK 盘口校验失败: 最优卖价 %.4f > 最高限价 %.4f", ba, maxPrice)
+		}
+		if reason != "" {
+			t.mu.Lock()
+			rec.State = OrderFailed
+			rec.ErrorMsg = reason
+			rec.UpdatedAt = t.timeNow()
+			t.recorder.AppendOrder(rec)
+			t.exec.LastSkipReason = reason
+			t.mu.Unlock()
+			return failInfo, fmt.Errorf("%s", reason)
+		}
+	}
 	signedOrder, orderType, orderedShares, err := BuildOrder(
 		client, cfg.OrderStrategy, tokenID, maxPrice, cfg.StakePerSignal, book,
 	)
@@ -244,7 +270,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return failInfo, fmt.Errorf("创建订单失败: %w", err)
+		return failInfo, fmt.Errorf("创建订单失败: %w, 盘口: %s", err, bookSnapshot)
 	}
 
 	// PostOrder
@@ -257,7 +283,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 		t.recorder.AppendOrder(rec)
 		t.exec.LastSkipReason = rec.ErrorMsg
 		t.mu.Unlock()
-		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Strategy: %s", err, maxPrice, cfg.OrderStrategy)
+		return failInfo, fmt.Errorf("提交订单失败: %w, Price: %.4f, Strategy: %s, 盘口: %s", err, maxPrice, cfg.OrderStrategy, bookSnapshot)
 	}
 
 	orderID, success, errMsg := ParsePostOrderResp(resp)
@@ -296,8 +322,8 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 	t.exec.LastSkipReason = ""
 	t.exec.DailySignals++
 
-	log.Printf("[Trading] 📝 %s 订单已提交: side=%s price=%.4f shares=%.0f orderID=%s",
-		cfg.OrderStrategy, tokenSide, maxPrice, orderedShares, orderID)
+	log.Printf("[Trading] 📝 %s 订单已提交: side=%s price=%.4f shares=%.0f orderID=%s 盘口: %s",
+		cfg.OrderStrategy, tokenSide, maxPrice, orderedShares, orderID, bookSnapshot)
 	return ExecInfo{Status: "pending"}, nil
 }
 

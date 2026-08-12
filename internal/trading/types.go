@@ -25,7 +25,7 @@ func DefaultConfig() TradingConfig {
 		Enabled:              false,
 		OutputPath:           "data/trades.jsonl",
 		StakePerSignal:       5.0,
-		MaxPrice:             0.35,
+		MaxPrice:             0.30, // 最高允许价格（与 flip.max_entry_price 对齐，高盈亏比优先）
 		MaxDailyLoss:  10.0,
 		OrderStrategy: "GTC",
 	}
