@@ -193,7 +193,7 @@ go run ./cmd/flip -trading -stake 5 -max-loss 10 -dashboard :8090
 |------|--------|----------|------|
 | `enabled` | false | `-trading` | 启用实盘 |
 | `stake_per_signal` | 5.0 | `-stake` | 每信号 USDC 预算 |
-| `max_slippage` | 0.07 (7%) | — | 价格上限 = entry×1.07 |
+| `max_price` | 0.35 | — | 最高允许价格（绝对限价）|
 | `max_daily_loss` | 10.0 | `-max-loss` | 日亏上限，触发后当日停止 |
 | `cooldown_after_loss_sec` | 300 | — | 亏损后冷却 5 分钟 |
 

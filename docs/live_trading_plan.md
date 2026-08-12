@@ -21,7 +21,7 @@ Flip Signal 纸面交易阶段已完成。新增实盘交易模块，在信号�
 | 日单量上限 | 不做 | 信号天然低频（每 5min 最多 1 个）|
 | Dashboard | 不新增 API 或前端，只修改 State.Mode | 够用 |
 | 环境变量 | 不新增绑定 | 配置文件 + CLI flags |
-| 滑点默认值 | **7%**（`max_slippage: 0.07`）| 入场盘口价 ~0.2-0.25，0.25-0.27 成交也允许 |
+| 最高允许价格 | **0.35**（`max_price: 0.35`）| 直接设置绝对限价，非滑点百分比 |
 
 ---
 
@@ -53,7 +53,7 @@ type TradingConfig struct {
     Enabled              bool    // 启动时是否启用实盘（true=实盘，false=纸面）
     OutputPath           string  // 交易记录 JSONL 路径（默认 data/trades.jsonl）
     StakePerSignal       float64 // 每信号投入 USDC（默认 5.0）
-    MaxSlippage          float64 // 滑点容忍（默认 0.07 = 7%）
+    MaxPrice             float64 // 最高允许价格（默认 0.35）
     MaxDailyLoss         float64 // 日亏上限 USDC（默认 10.0）
     CooldownAfterLossSec int     // 亏损后冷却秒数（默认 300）
 }
@@ -128,7 +128,7 @@ type ExecutionState struct {
   │
   ├── 1. 确定目标 token：side=="yes" → NO token；side=="no" → YES token
   │
-  ├── 2. maxPrice = sig.EntryPrice × (1 + MaxSlippage)    // 默认 7%
+  ├── 2. maxPrice = cfg.MaxPrice                          // 默认 0.35（直接限价）
   │
   ├── 3. SDK 创建 FAK 市价单（处理 tick size、price 校验、EIP-712 签名）：
   │      signedOrder, err = client.CreateMarketOrder(&UserMarketOrder{
@@ -174,7 +174,7 @@ OnSignal
 | 风险 | 配置 | 默认值 | 行为 |
 |------|------|--------|------|
 | 单信号仓位 | StakePerSignal | 5 USDC | USDC 预算 |
-| 滑点 | MaxSlippage | 0.07 (7%) | 价格上限 = entry×1.07 |
+| 价格上限 | MaxPrice | 0.35 | 最高允许价格（绝对限价）|
 | 日亏 | MaxDailyLoss | 10 USDC | 触发当日停止，UTC 零点重置 |
 | 连续亏损 | CooldownAfterLossSec | 300s | 亏损结算后冷却 |
 | 并发持仓 | — | 固定 1 | 已有持仓拒单 |
@@ -265,7 +265,7 @@ trading:
   enabled: false               # true=实盘，false=纸面
   output_path: "data/trades.jsonl"
   stake_per_signal: 5.0
-  max_slippage: 0.07           # 7%
+  max_price: 0.35              # 最高允许价格
   max_daily_loss: 10.0
   cooldown_after_loss_sec: 300
 ```

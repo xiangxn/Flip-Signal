@@ -14,7 +14,7 @@ type TradingConfig struct {
 	Enabled              bool    `mapstructure:"enabled"`                // 启动时是否启用实盘（true=实盘，false=纸面）
 	OutputPath           string  `mapstructure:"output_path"`            // 交易记录 JSONL 路径
 	StakePerSignal       float64 `mapstructure:"stake_per_signal"`       // 每信号投入 USDC
-	MaxSlippage          float64 `mapstructure:"max_slippage"`           // 滑点容忍（价格上限 = entry×(1+slippage)）
+	MaxPrice             float64 `mapstructure:"max_price"`               // 最高允许价格（直接限价，非滑点百分比）
 	MaxDailyLoss  float64 `mapstructure:"max_daily_loss"`  // 日亏上限 USDC，触发后当日停止
 	OrderStrategy string  `mapstructure:"order_strategy"` // 下单策略："GTC"（挂单等待成交）或 "FAK"（即刻市价成交，剩余取消）
 }
@@ -25,7 +25,7 @@ func DefaultConfig() TradingConfig {
 		Enabled:              false,
 		OutputPath:           "data/trades.jsonl",
 		StakePerSignal:       5.0,
-		MaxSlippage:          0.07,
+		MaxPrice:             0.35,
 		MaxDailyLoss:  10.0,
 		OrderStrategy: "GTC",
 	}

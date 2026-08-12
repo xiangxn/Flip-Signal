@@ -2,7 +2,6 @@ package trading
 
 import (
 	"fmt"
-	"math"
 
 	"github.com/necklace/flip-signal/internal/flip"
 )
@@ -30,16 +29,4 @@ func SignalToOrder(sig *flip.FlipSignal, yesTokenID, noTokenID string) (tokenID 
 	default:
 		return "", "", fmt.Errorf("未知的信号方向: %s", sig.Side)
 	}
-}
-
-// CalcMaxPrice 计算 GTC 限价单的限价（滑点保护）。
-//
-//	maxPrice = entryPrice × (1 + maxSlippage)
-//
-// 返回 NaN 时调用方应拒绝。
-func CalcMaxPrice(entryPrice, maxSlippage float64) float64 {
-	if entryPrice <= 0 || maxSlippage < 0 {
-		return math.NaN()
-	}
-	return entryPrice * (1.0 + maxSlippage)
 }

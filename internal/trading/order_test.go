@@ -1,7 +1,6 @@
 package trading
 
 import (
-	"math"
 	"testing"
 
 	"github.com/necklace/flip-signal/internal/flip"
@@ -56,35 +55,5 @@ func TestSignalToOrder_UnknownSide(t *testing.T) {
 	_, _, err := SignalToOrder(sig, "yesTok", "noTok")
 	if err == nil {
 		t.Fatal("expected error for unknown side")
-	}
-}
-
-func TestCalcMaxPrice(t *testing.T) {
-	tests := []struct {
-		name     string
-		entry    float64
-		slippage float64
-		expect   float64
-	}{
-		{"normal", 0.20, 0.07, 0.214},
-		{"zero slippage", 0.20, 0, 0.20},
-		{"large slippage", 0.25, 0.07, 0.2675},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := CalcMaxPrice(tt.entry, tt.slippage)
-			if math.Abs(got-tt.expect) > 0.0001 {
-				t.Errorf("CalcMaxPrice(%v, %v) = %v, want %v", tt.entry, tt.slippage, got, tt.expect)
-			}
-		})
-	}
-}
-
-func TestCalcMaxPrice_Invalid(t *testing.T) {
-	if !math.IsNaN(CalcMaxPrice(0, 0.07)) {
-		t.Error("expected NaN for zero entry price")
-	}
-	if !math.IsNaN(CalcMaxPrice(-0.1, 0.07)) {
-		t.Error("expected NaN for negative entry price")
 	}
 }

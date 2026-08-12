@@ -174,11 +174,11 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 		return failInfo, fmt.Errorf("信号映射失败: %w", err)
 	}
 
-	maxPrice := CalcMaxPrice(sig.EntryPrice, t.cfg.MaxSlippage)
-	if maxPrice <= 0 {
-		t.exec.LastSkipReason = "价格上限计算无效"
+	maxPrice := t.cfg.MaxPrice
+	if maxPrice <= 0 || maxPrice > 1.0 {
+		t.exec.LastSkipReason = "最高允许价格无效"
 		t.mu.Unlock()
-		return failInfo, fmt.Errorf("价格上限无效: entry=%.4f slippage=%.2f", sig.EntryPrice, t.cfg.MaxSlippage)
+		return failInfo, fmt.Errorf("最高允许价格无效: max_price=%.4f", t.cfg.MaxPrice)
 	}
 
 	rec := &OrderRecord{
