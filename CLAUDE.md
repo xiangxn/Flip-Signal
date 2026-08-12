@@ -2,10 +2,17 @@
 
 ## 项目概述
 
-**Flip Signal** 是一个针对 **Polymarket BTC 5分钟市场** 的量化交易系统。核心引擎 **Flip Signal Detection** 检测 Polymarket YES/NO 价格穿越 0.7 后的反转信号，基于 7 特征复合评分进行方向性下注。
+**Flip Signal** 是一个针对 **Polymarket BTC 5分钟市场** 的量化交易系统。核心引擎 **Flip Signal Detection** 检测 Polymarket YES/NO 价格穿越 0.7 后的反转信号，基于 Formula B 精简公式（背离硬要求 + 过度自信 + 确认回归）进行方向性下注。
 
 ### 核心原则
 > **不预测涨跌，只判断"什么时候市场过度自信"。**
+
+### 当前策略版本：Formula B（2026-08-13 标定）
+- 完整方案见 `docs/flip_strategy_plan_2026-08-13.md`，分析过程见 `docs/flip_optimization_analysis_2026-08-13.md`
+- 三个信号条件：B1 背离硬要求（`min_divergence=0.05`，BTC 必须与 PM 反向）、B2 过度自信（`range_expansion<0.5` → +2）、B3 确认回归（`other_delta` 三档 → +3/+2/+1）
+- `score_entry=2`：任一核心信号成立即触发
+- 已停用：振荡/低价入场/btc_extreme 加分（权重 0）、path_eff<0.4 与 noise>3 否决（阈值 0）
+- **成交口径**：`yes_price/no_price` 存的是各订单簿 **best bid**，回测与实盘的成交价/gate 一律按对侧 **ask = 1 - 触发侧 bid** 计算（Go 引擎 gate 修正待落地，见方案文档 §5）
 
 ---
 
@@ -28,7 +35,7 @@ FlipSignal/
 │   │   ├── types.go                     # FlipConfig + FlipSignal + ScoreParams
 │   │   ├── engine.go                    # 状态机: Watching → Confirming → Done
 │   │   ├── features.go                  # 特征提取纯函数: PathEff, NoiseRatio, CountFlips…
-│   │   ├── scoring.go                   # 7特征复合评分（Formula A）
+│   │   ├── scoring.go                   # Formula B 评分（背离硬要求 + 过度自信 + 确认回归）
 │   │   ├── hist_range.go               # 历史K线波动范围追踪器
 │   │   ├── recorder.go                  # JSONL 信号记录 + P&L 结算
 │   │   └── engine_test.go              # 单元测试
@@ -77,7 +84,7 @@ FlipSignal/
                                │
                                ▼
                         Flip Engine
-                    (状态机 + 7特征评分)
+                 (状态机 + Formula B)
                                │
                                ▼
                         FlipRecorder
@@ -120,26 +127,27 @@ Idle ──Reset()──▶ Watching ──price>0.7──▶ Confirming ──s
 - **Done**: 本周期已产生信号，后续 snapshot 被忽略
 - **first_crossing_only**: 先试 YES，失败则 fallback 到 NO；两侧都失败则回到 Watching
 
-### 7 特征复合评分（Formula A）
+### Formula B 精简评分（2026-08-13 标定）
 
-| 特征 | 条件 | 权重 |
+三个信号条件，与策略哲学一一对应：
+
+| 条件 | 说明 | 权重 |
 |------|------|------|
-| F1v OtherDelta | other_delta > 0.05 | +3 |
-| F1 OtherDelta | other_delta > 0.02 | +2 |
-| F2 OtherDelta | other_delta > 0.01 | +1 |
-| F3 Oscillating | path_eff≤0.8, noise>1.5, flips>1 | +2 |
-| F4 CheapEntry | entry_price < 0.20 | +1 |
-| F5 CheapEntry | entry_price < 0.25（elif）| +1 |
-| F6 RangeExpansion | range_expansion < 0.5 | +2 |
-| F7 BTCExtreme | BTC 与 PM 方向背离 | +1 |
-| **F0 Veto** | range_expansion ≥ 2.0（真突破）| 否决 |
-| **Price Gate** | 确认时刻对侧价 > max_entry_price（默认 0.30，与 trading.max_price 一致）| 信号无效 |
+| **B1 背离硬要求** | 穿越时刻 BTC 必须与 PM 反向：YES侧触发要求 `btc_pos < -min_divergence`，NO侧要求 `btc_pos > min_divergence`（默认 0.05）。同向/中性穿越 EV≈0（χ²=125），直接否决 | 硬过滤 |
+| B3 确认回归 OtherDelta | other_delta > 0.05 / 0.02 / 0.01 | +3 / +2 / +1 |
+| **B2 过度自信 RangeExpansion** | range_expansion < 0.5（BTC 没动但 PM 已 0.7+） | +2 |
+| F0 Veto | range_expansion ≥ 1.5（真突破，PM 是对的） | 否决 |
+| **Price Gate（ask 口径）** | 确认时刻对侧 **ask = 1 - 触发侧 bid** > max_entry_price（0.45，与 trading.max_price 一致） | 信号无效 |
 
-> Price Gate 说明：入场价是穿越时刻（T=0）的对侧价，确认在 T+confirm_delay_ticks×5s
-> （默认 2 ticks = 10s，原 5=25s 时对侧已充分反弹但入场价跑掉，FAK 无法成交）。强 other_delta
-> 的确认意味着对侧已上涨、廉价入场消失。确认时刻对侧价超上限 → 盈亏比恶化，
-> 实盘 FAK 必被拒。引擎层（5s 采样）与回测同步过滤；Trader 层再用最新 WS 盘口
-> 最优卖价复核（仅 FAK），避免注定失败的提交。
+- `score_entry = 2`：任一核心信号成立即触发（od>0.02 或 range<0.5），无需特征堆叠
+- **已停用**（权重/阈值置 0，字段保留）：F3 振荡（χ² p=0.32 无效力）、F4/F5 低价入场
+  （越便宜 WR 越低，且用不可成交的对侧 bid）、F7 btc_extreme 加分（由 B1 取代）、
+  path_eff<0.4 否决（滤掉 EV 偏好候选）、noise>3 否决（中性）
+- **成交口径**：`yes_price/no_price` 存的是各订单簿 **best bid**。实盘 FAK 买入对侧
+  成交在 **ask = 1 - 触发侧 bid**（双 token 互补）。回测 fill 与 gate 均按 ask 口径；
+  Go 引擎的 gate 需同步改为 ask 口径（与 trader.go 最优卖价校验一致），见方案文档 §5.2
+- 基准表现（data_0, 1719 事件）：n=126、WR 46.0%、EV +0.214/笔、P&L +26.91、
+  PF 2.60、avg_fill 0.247；6 个完整日全部正 EV
 
 ---
 
@@ -189,7 +197,7 @@ replace (
 ### 结构体与配置
 
 - 配置使用专用 struct + `DefaultConfig()` 工厂函数返回默认值
-- 所有可调参数集中在 config struct 中，通过注释标注出处（如 `§2.1`, `Formula A`）
+- 所有可调参数集中在 config struct 中，通过注释标注出处（如 `§2.1`, `Formula B`）
 - 字段对齐用 tab 对齐到列，提高可读性
 - 对外暴露的 struct 字段加 JSON tag
 
@@ -304,6 +312,8 @@ import (
 1. 在 `internal/flip/types.go` 的 `FlipConfig` 和 `ScoreParams` 中添加新字段
 2. 在 `internal/flip/scoring.go` 的 `ComputeFlipScore()` 中加入新特征
 3. 在 `internal/flip/engine.go` 的 `enterConfirming()` 或 `onConfirmed()` 中计算特征值
+4. **先在 Python 回测中验证**：新特征必须有候选层统计效力（χ²）+ 双 Split 样本外
+   证据才可加入，避免重回特征堆叠老路（参见 Formula B 减法教训，2026-08-13）
 
 ### 添加新的数据源
 1. 在 `internal/feed/` 新建 adapter

@@ -41,21 +41,26 @@ python/
 ├── README.md
 ├── requirements.txt
 │
-├── backtest_flip_config.py      # [配置] Formula A 参数定义 + 默认值
-├── backtest_flip_utils.py       # [核心] 特征提取 + 信号检测 + 回测引擎
+├── backtest_flip_config.py      # [配置] Formula B 参数定义 + 默认值（2026-08-13）
+├── backtest_flip_utils.py       # [核心] 特征提取 + 信号检测 + 回测引擎（ask 成交口径）
 ├── backtest_flip_scoring.py     # [入口] 回测主程序（CLI）
 │
-├── sweep_other_delta.py         # [调参] other_delta 阈值网格搜索
-├── analyze_features.py          # [分析] 7特征预测能力全面分析
-├── analyze_filter_pipeline.py   # [分析] 过滤管线逐级杀灭率分析
-├── analyze_od_killed.py         # [分析] other_delta 硬过滤影响
-├── analyze_remsec.py            # [分析] remaining_sec 对胜率影响
+├── optimize_winrate.py          # [分析] 胜率/EV 优化主脚本（口径修正/特征/搜索/减法/验证五段）
+├── sweep_other_delta.py         # [调参] other_delta 阈值网格搜索（历史脚本）
+├── analyze_features.py          # [分析] 特征预测能力全面分析（历史脚本）
+├── analyze_filter_pipeline.py   # [分析] 过滤管线逐级杀灭率分析（历史脚本）
+├── analyze_od_killed.py         # [分析] other_delta 硬过滤影响（历史脚本）
+├── analyze_remsec.py            # [分析] remaining_sec 对胜率影响（历史脚本）
 │
 ├── analyze_flip_comprehensive.py # [研究] 穿越 0.7 事件综合分析
 ├── analyze_flip_deep.py          # [研究] BTC 穿越后行为深度分析
 ├── analyze_flip_strategy.py      # [研究] wait-and-see 策略设计
 └── analyze_flip_final.py         # [研究] 入场价 + BTC 跑道优化
 ```
+
+> 注意：`sweep_*` / `analyze_features` 等历史脚本仍按旧口径（对侧 bid 成交、
+> Formula A 参数）编写，仅作研究参考。当前口径以
+> `backtest_flip_scoring.py` + `optimize_winrate.py` 为准。
 
 ## 模块说明
 
@@ -85,21 +90,25 @@ python/
 3. `strategy` — 尝试 wait-and-see 策略
 4. `final` — 最终参数优化
 
-## 回测逻辑
+## 回测逻辑（Formula B, 2026-08-13）
 
 ```
 1. 加载 events JSONL（来自 Go cmd/flip -lab-output 或 cmd/lab）
 2. 计算 hist_avg_range（前 N 个 event 的 K线振幅均值）
 3. 遍历每个 event 的 snapshots:
-   a. YES/NO > 0.7 → 触发检测（仅首次穿越, 先 YES 后 NO）
-   b. 等待 1 tick（5s）确认
-   c. 计算 7 特征复合评分
-   d. score ≥ 5 → 产生信号
-   e. event 结束时根据 BTC outcome 结算 P&L
+   a. YES/NO bid > 0.7 → 触发检测（每个上升沿, 同 tick 先 YES 后 NO）
+   b. B1 背离硬要求: 穿越时刻 BTC 必须与 PM 反向（div ≥ 0.05），否则否决
+   c. F0 否决: range_expansion ≥ 1.5（真突破）
+   d. 等待 2 ticks（10s）确认
+   e. gate: 确认时刻对侧 ask = 1 - 触发侧 bid > 0.45 → 无效
+   f. Formula B 评分: B3 other_delta 三档 (+3/+2/+1) + B2 range_exp<0.5 (+2)
+   g. score ≥ 2 → 产生信号
+   h. event 结束时根据 BTC outcome 结算 P&L（按 ask 成交价）
 4. 输出摘要：信号数、胜率、总 P&L、Profit Factor
 ```
 
 与 Go 端 `flip.Engine` 严格对齐：相同配置、相同逻辑、相同评分公式。
+（Go 侧 Formula B 落地清单见 `../docs/flip_strategy_plan_2026-08-13.md` §5。）
 
 ## 设计原则
 

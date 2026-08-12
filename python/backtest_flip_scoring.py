@@ -1,19 +1,28 @@
 #!/usr/bin/env python3
 """
-复合评分版翻转信号回测
+精简公式版翻转信号回测（Formula B, 2026-08-13 标定）
 
-基于 docs/flip_backtest_plan.md — 纯实时（无未来信息）的翻转信号回测。
+纯实时（无未来信息）的翻转信号回测。完整方案见
+docs/flip_strategy_plan_2026-08-13.md，分析过程见
+docs/flip_optimization_analysis_2026-08-13.md。
 
 核心思路:
-  - 当 Polymarket YES 或 NO 价格首次突破 0.7 时触发信号检测
-  - 用穿越前的 BTC 价格路径判断是否为来回振荡（趋势衰竭）
-  - 结合对面价格确认、振幅扩张、入场价等 7 个特征评分
-  - score ≥ 5 开仓, ≥ 7 加仓
+  - Polymarket YES/NO 一侧 bid 突破 0.7 触发信号检测
+  - Formula B 三个信号条件（减法版，与策略哲学一一对应）:
+      B1 背离硬要求: 穿越时刻 BTC 必须与 PM 反向 (min_divergence=0.05)
+      B2 过度自信:   BTC 振幅 < 历史平均的一半 → +2
+      B3 确认回归:   确认期对侧 bid 回升三档 → +3/+2/+1
+    score ≥ 2 开仓（任一核心信号成立即触发，无需特征堆叠）
+  - 成交口径（实盘对齐）: 确认时刻对侧 ASK = 1 - 触发侧 bid
+    （yes/no_price 存的是 best bid，实盘 FAK 买对侧成交在 ask）
+
+基准结果（data_0, 1719 事件）:
+  n=126, WR 46.0%, EV +0.214/笔, P&L +26.91, PF 2.60, avg_fill 0.247
 
 Usage:
-    python backtest_flip_scoring.py --data ../data/
-    python backtest_flip_scoring.py --data ../data/ --export signals.jsonl
-    python backtest_flip_scoring.py --data ../data/ --verbose  # 打印每笔信号详情
+    python backtest_flip_scoring.py --data ../data_0/lab/
+    python backtest_flip_scoring.py --data ../data_0/lab/ --export signals.jsonl
+    python backtest_flip_scoring.py --data ../data_0/lab/ --verbose  # 打印每笔信号详情
 """
 
 import argparse
@@ -75,7 +84,7 @@ def main():
     cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
     print(f"\n运行回测 [{args.profile.upper()}] (trigger>{cfg.trigger_threshold}, "
           f"confirm_delay={cfg.confirm_delay_ticks}tick, "
-          f"score_entry≥{cfg.score_entry})...")
+          f"min_div≥{cfg.min_divergence}, score_entry≥{cfg.score_entry})...")
     signals, total_events, active_events = run_backtest(events, cfg)
 
     # ── 输出结果 ──
@@ -92,11 +101,8 @@ def main():
                 f"score={s.score} | entry={s.entry_price:.4f} fill={s.fill_price:.4f} | "
                 f"shares={s.shares} | P&L={s.pnl:+.3f} | "
                 f"rem={s.remaining_sec:>3d}s | "
-                f"path_eff={s.path_eff:.2f} noise={s.noise_ratio:.1f} "
-                f"flips={s.flips} | "
-                f"osc={s.is_oscillating} | "
+                f"div={s.btc_divergence:+.2f} | "
                 f"range_exp={s.range_expansion:.1f} | "
-                f"btc_pos={s.btc_position:.2f} {s.btc_extreme} | "
                 f"other_d={s.other_delta:+.4f} | "
                 f"{direction}"
             )

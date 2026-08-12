@@ -1,19 +1,39 @@
 #!/usr/bin/env python3
 """
-回测参数配置 — 复合评分版翻转信号回测。
+回测参数配置 — 精简公式版翻转信号回测（Formula B, 2026-08-13 标定）。
 
 所有可调参数集中在此文件，方便调参。
-参数说明对应 docs/flip_backtest_plan.md §2 和 §4。
+完整方案见 docs/flip_strategy_plan_2026-08-13.md，
+分析过程见 docs/flip_optimization_analysis_2026-08-13.md。
 
-支持的市场: BTC, ETH
+Formula B（减法版）— 三个信号条件，与策略哲学一一对应:
+  B1 背离硬要求 min_divergence=0.05:
+      穿越时刻 BTC 必须与 PM 反向（YES侧触发要求 btc_pos < -0.05，
+      NO侧触发要求 btc_pos > 0.05）。χ²=125，全候选最强特征；
+      同向穿越 EV≈0，直接否决。
+  B2 过度自信 range_expansion < 0.5 → +2:
+      BTC 振幅 < 历史平均振幅的一半 = BTC 没动但 PM 已 0.7+。
+  B3 确认回归 other_delta 三档 → +3/+2/+1:
+      确认期（T+2 ticks）对侧 bid 回升 = 反转正在发生。
 
-各市场参数独立预设:
-  - DEFAULT_CONFIG     BTC 回测参数 (2026-08-13 重标定: delay=2, gate=0.45, data_0 1719 事件 → WR 41.8%, P&L +19.93, PF 1.59, avg fill 0.313)
-  - ETH_CONFIG         ETH 回测参数 (初始值与 BTC 相同，待独立调参)
+  score_entry = 2: 任一核心信号成立即触发（B2 或 od>0.02），无需特征堆叠。
+
+已停用（2026-08-13 减法，权重/阈值置 0）:
+  F3 振荡（χ² p=0.32 无效力）、F4/F5 低价入场（方向相反且用不可成交的
+  对侧 bid）、F7 btc_extreme 加分（由 B1 硬过滤取代）、
+  path_eff<0.4 否决（滤掉 EV 偏好候选）、noise>3.0 否决（中性）。
+
+成交口径（实盘对齐）:
+  yes_price/no_price 存的是各订单簿 BEST BID。实盘 FAK 买对侧成交在
+  ASK = 1 - 触发侧 bid（双token互补）。fill 与 gate 均按 ask 口径。
+
+支持的市场: BTC, ETH（ETH 沿用 BTC 参数，待独立标定）
+
+基准结果（data_0, 1719 事件, ask 口径）:
+  n=126, WR 46.0%, EV +0.214/笔, P&L +26.91, PF 2.60, avg_fill 0.247
 
 用法:
-  python backtest_flip_scoring.py --profile btc --data ../data/btc/
-  python backtest_flip_scoring.py --profile eth --data ../data/eth/
+  python backtest_flip_scoring.py --profile btc --data ../data_0/lab/
 """
 
 from dataclasses import dataclass
@@ -21,72 +41,65 @@ from dataclasses import dataclass
 
 @dataclass
 class FlipBacktestConfig:
-    # ── Layer 0: 前置条件 (§2.1) ──
-    trigger_threshold: float = 0.7       # PM 一侧价格超过此值触发
-    allow_retry_crossings: bool = True   # 多穿越重试: True=每个上升沿都尝试评分（首个通过者获胜），False=仅首次穿越（旧行为）
+    # ── Layer 0: 前置条件 ──
+    trigger_threshold: float = 0.7       # PM 一侧 bid 超过此值触发
+    allow_retry_crossings: bool = True   # 多穿越重试: 每个上升沿都尝试评分，首个通过者获胜
     min_pre_snaps: int = 5               # 穿越前至少需要的 snapshot 数
-    max_remaining_sec: int = 260         # §2.1 窗口有效期上限: 仅 remaining_sec < 此值的穿越才有效 (太早= BTC 路径太短)
-    min_remaining_sec: int = 35          # §2.1 窗口有效期下限: 仅 remaining_sec > 此值的穿越才有效 (太晚=确认+下单时间不够)
+    max_remaining_sec: int = 260         # 窗口有效期上限: 仅 remaining_sec < 此值的穿越才有效
+    min_remaining_sec: int = 35          # 窗口有效期下限: 确认(2 ticks×5s)+下单执行余量
 
-    # ── T+0 实时特征 ──
+    # ── B1 背离硬要求（Formula B 核心）──
+    # 穿越时刻 BTC 必须与 PM 反向，背离度 = ±btc_pos（YES侧取负）：
+    #   div < min_divergence → 否决（同向/中性穿越 EV≈0）
+    # 0 或负值 = 禁用
+    min_divergence: float = 0.05
 
-    # §2.2 路径效率 — 振荡判定核心
-    path_eff_oscillating: float = 0.7      # 收紧到 0.7 (原 0.8 太宽, 胜率不足)
-
-    # §2.3 噪声比
-    noise_ratio_oscillating: float = 1.5   # 不变
-
-    # §2.4 翻转次数
-    flips_oscillating: int = 1             # 2026-08-12 sweep: 1 比 2 多 6 笔优质振荡信号，胜率不变 P&L 更高
-
-    # §2.5 来回振荡综合判定: 三个条件需同时满足
-    #   path_eff <= path_eff_oscillating AND
-    #   noise_ratio > noise_ratio_oscillating AND
-    #   flips > flips_oscillating (当前 >1 即 ≥2 次翻转)
-
-    # §2.6 振幅扩张 (tick-independent: |price-open|/hist_avg_range)
-    hist_window_N: int = 18              # 前 N 根 K 线 (~1.5小时, 最优)
+    # ── B2 过度自信（振幅扩张, tick-independent）──
+    hist_window_N: int = 18              # 前 N 根 K 线 (~1.5小时) 平均振幅
     range_exp_threshold: float = 0.5     # 振幅 < 此值 → BTC没动, PM过度自信 → +2
-    range_exp_max: float = 1.5           # F0: 收紧到 1.5 (原 2.0 太宽, 真突破仍然通过了)
+    range_exp_max: float = 1.5           # 振幅 ≥ 此值 → 真突破, PM是对的 → 否决
 
-    # §2.7 对面价格确认 (T+5s 特征) — Formula A: 三档评分
-    confirm_delay_ticks: int = 2         # 确认等待 tick 数 → 10s (原 5=25s: 对面已充分反弹但入场价跑掉, FAK 无法成交)
-    od_hard_filter: float = -999.0       # other_delta 硬过滤下限, -999 = 禁用 (Formula A: 由评分权重处理)
-    other_delta_vstrong: float = 0.05    # 对面涨幅 > 此值 → +3 分 (原 +4)
-    other_delta_strong: float = 0.02     # 对面涨幅 > 此值 → +2 分 (原 0.03, +4)
-    other_delta_weak: float = 0.01       # 对面涨幅 > 此值 → +1 分 (原 +2)
+    # ── B3 确认回归（T+delay 特征）──
+    confirm_delay_ticks: int = 2         # 确认等待 tick 数 → 10s
+    od_hard_filter: float = -999.0       # other_delta 硬过滤下限, -999 = 禁用
+    other_delta_vstrong: float = 0.05    # 对侧 bid 涨 > 此值 → +3
+    other_delta_strong: float = 0.02     # 对侧 bid 涨 > 此值 → +2
+    other_delta_weak: float = 0.01       # 对侧 bid 涨 > 此值 → +1
 
-    # §2.8 BTC 位置 (tick-independent: vs Open, 以 hist_avg_range 为单位)
-    # Formula A: 放宽 — YES侧 btc_pos < -0.1, NO侧 btc_pos > 0.1
-    btc_pos_max: float = 0.1             # NO>0.7: btc_pos > 此值 → BTC与PM背离 → +1
-    btc_pos_min: float = -0.1            # YES>0.7: btc_pos < 此值 → BTC与PM背离 → +1
-
-    # §2.9 入场价格
-    entry_cheap_strong: float = 0.20     # entry < 此值 → +1 分 (Formula A: 重新激活)
-    entry_cheap_weak: float = 0.25       # entry < 此值 → +1 分
-
-    # ── 入场价上限 (实盘对齐 gate) ──
-    # 确认时刻对侧价 > 此值 → 信号无效 (盈亏比已恶化, 实盘 FAK 也无法成交)
-    # 与实盘 trading.max_price 保持一致; <=0 禁用
-    # 0.45 为分桶自然边界 (2026-08-13 sweep): fill∈[0.35,0.45) 是最强确认信号
-    # (WR~50%, avg od 0.13), fill≥0.50 桶 EV 转负 (-0.043/笔), 再放宽边际 P&L 仅 +1.4
+    # ── 入场价上限 gate（ASK 口径，实盘对齐 trading.max_price）──
+    # 确认时刻对侧 ASK (=1-触发侧bid) > 此值 → 信号无效
+    # 实盘 Trader 用最优卖价校验 FAK，回测必须同口径
     max_entry_price: float = 0.45
 
-    # ── 评分权重 (§2.10) — Formula A ──
-    w_other_d5_vstrong: int = 3          # 对面大涨 (od > 0.05)
-    w_other_d5_strong: int = 2           # 对面中涨 (od > 0.02)
-    w_other_d5_weak: int = 1             # 对面小涨 (od > 0.01)
-    w_oscillating: int = 1               # 来回振荡 (降低到 +1: 振荡信号胜率 31% 远低于趋势 45%)
-    w_cheap_entry_strong: int = 1        # 极低价入场 (Formula A: 重新激活)
-    w_cheap_entry_weak: int = 1          # 低价入场
-    w_range_expansion: int = 2           # 振幅扩张
-    w_btc_extreme: int = 1               # BTC 极端位置
+    # ── 评分权重（Formula B）──
+    w_other_d5_vstrong: int = 3          # 对侧确认大涨
+    w_other_d5_strong: int = 2           # 对侧确认中涨
+    w_other_d5_weak: int = 1             # 对侧确认小涨
+    w_oscillating: int = 0               # 停用（2026-08-13: χ² 无统计效力）
+    w_cheap_entry_strong: int = 0        # 停用（方向相反 + 用不可成交的 bid）
+    w_cheap_entry_weak: int = 0          # 停用
+    w_range_expansion: int = 2           # BTC没动但PM 0.7+ → 过度自信
+    w_btc_extreme: int = 0               # 停用（由 min_divergence 硬过滤取代）
 
-    # ── 入场阈值 (§2.10) ──
-    score_entry: int = 5                 # ≥ 此值 → 开仓 (1 share)
-    score_add: int = 99                  # ≥ 此值 → 加仓 (disabled: 5s下评分不够精细)
+    # ── 入场阈值 ──
+    score_entry: int = 2                 # ≥ 此值 → 开仓（od>0.02 或 range<0.5 即触发）
+    score_add: int = 99                  # ≥ 此值 → 加仓（disabled）
+
+    # ── T=0 质量否决（0 = 禁用）──
+    # 2026-08-13 减法: path_eff<0.4 否决滤掉 EV 偏好的候选、noise>3 否决中性，均停用
+    path_eff_veto_min: float = 0.0       # path_eff < 此值 → 否决
+    noise_ratio_veto_max: float = 0.0    # noise_ratio > 此值 → 否决
+
+    # ── 停用特征阈值（保留字段，权重已归零）──
+    path_eff_oscillating: float = 0.7
+    noise_ratio_oscillating: float = 1.5
+    flips_oscillating: int = 1
+    btc_pos_max: float = 0.1             # NO侧触发: btc_pos > 此值 → 背离
+    btc_pos_min: float = -0.1            # YES侧触发: btc_pos < 此值 → 背离
+    entry_cheap_strong: float = 0.20     # 对侧 bid < 此值 → 极低价
+    entry_cheap_weak: float = 0.25       # 对侧 bid < 此值 → 低价
 
 
 # 默认配置实例
-DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 回测参数 (2026-08-13 重标定: WR 41.8%, P&L +19.93, PF 1.59)
-ETH_CONFIG = FlipBacktestConfig()       # ETH 回测参数 (初始值与 BTC 相同，待独立调参)
+DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 参数 (2026-08-13 Formula B: n=126, WR 46.0%, P&L +26.91, PF 2.60)
+ETH_CONFIG = FlipBacktestConfig()      # ETH 参数 (沿用 BTC，待独立标定)

@@ -35,7 +35,7 @@ FlipSignal/
 │   │   ├── types.go              #   FlipConfig, FlipSignal, ScoreParams
 │   │   ├── engine.go             #   状态机: Watching → Confirming → Done
 │   │   ├── features.go           #   特征提取纯函数
-│   │   ├── scoring.go            #   7特征复合评分（Formula A）
+│   │   ├── scoring.go            #   Formula B 评分（背离 + 过度自信 + 确认回归）
 │   │   ├── hist_range.go        #   历史K线波动范围追踪
 │   │   ├── recorder.go           #   JSONL 信号记录 + P&L 结算
 │   │   └── engine_test.go       #   单元测试
@@ -105,39 +105,48 @@ pip install -r requirements.txt
 # 穿越事件综合分析
 python analyze_flip_comprehensive.py
 
-# 7特征预测能力分析
+# 特征预测能力分析
 python analyze_features.py
+
+# 胜率/EV 优化分析（2026-08-13，含 ask 口径修正与减法实验）
+python optimize_winrate.py all
 ```
 
 ---
 
 ## 3. 策略回测
 
-在历史数据上回测 Flip Signal 策略，评估 7 特征复合评分（Formula A）的表现。
+在历史数据上回测 Flip Signal 策略。当前版本为 **Formula B 精简公式**（2026-08-13 标定），
+完整方案见 [docs/flip_strategy_plan_2026-08-13.md](docs/flip_strategy_plan_2026-08-13.md)。
 
 ```bash
 cd python/
 
-# 基础回测
-python backtest_flip_scoring.py --data ../data/lab/
+# 基础回测（默认 Formula B 参数）
+python backtest_flip_scoring.py --data ../data_0/lab/
 
 # 导出信号到 JSONL（与 Go 端格式一致）
-python backtest_flip_scoring.py --data ../data/lab/ --export signals.jsonl --verbose
+python backtest_flip_scoring.py --data ../data_0/lab/ --export signals.jsonl --verbose
 ```
 
-**Formula A 评分项**:
+**基准结果**（data_0，1719 事件，按对侧 ASK 成交）：n=126、WR 46.0%、P&L +26.91、
+PF 2.60、avg_fill 0.247、6 个完整日全部正 EV。
 
-| # | 特征 | 条件 | 得分 |
+**Formula B 信号条件**（三个条件与策略哲学一一对应）:
+
+| # | 条件 | 规则 | 得分 |
 |---|------|------|------|
-| F1v | OtherDelta（对侧确认）| > 0.05 | +3 |
-| F1 | OtherDelta | > 0.02 | +2 |
-| F2 | OtherDelta | > 0.01 | +1 |
-| F3 | IsOscillating（振荡衰竭）| 三项全满足 | +2 |
-| F4 | EntryPrice（便宜入场）| < 0.20 | +1 |
-| F5 | EntryPrice | < 0.25 | +1 |
-| F6 | RangeExpansion（BTC 未动）| < 0.5 | +2 |
-| F7 | BTCExtreme（BTC 背离）| 方向背离 | +1 |
-| **F0** | **RangeExpansion 过大** | **≥ 2.0** | **否决** |
+| **B1** | **BTC 背离硬要求** | 穿越时刻 BTC 必须与 PM 反向（YES侧触发要求 `btc_pos < -0.05`，NO侧要求 `> 0.05`）；同向/中性穿越 EV≈0，直接否决 | 硬过滤 |
+| B2 | RangeExpansion（过度自信）| BTC 振幅 < 历史平均的一半（BTC 没动但 PM 已 0.7+）| +2 |
+| B3 | OtherDelta（确认回归）| 确认期对侧 bid 回升 > 0.05 / 0.02 / 0.01 | +3 / +2 / +1 |
+| F0 | RangeExpansion 过大 | ≥ 1.5（真突破，PM 是对的）| 否决 |
+| Gate | 成交价上限（**ask 口径**）| 确认时刻对侧 ask = 1 - 触发侧 bid > 0.45 | 信号无效 |
+
+- `score_entry = 2`：任一核心信号成立即触发，无需特征堆叠
+- 已停用：振荡（无统计效力）、低价入场（方向相反）、btc_extreme 加分（由 B1 取代）、
+  path_eff<0.4 与 noise>3 否决
+- **成交口径**：`yes_price/no_price` 存的是各订单簿 best bid，实盘 FAK 买对侧成交在
+  ask = 1 - 触发侧 bid，回测 fill 与 gate 均按此口径
 
 ---
 
@@ -165,17 +174,13 @@ go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab -dashboar
 │                                                                   │
 │ 用穿越点及之前的 BTC 价格序列计算 T=0 特征:                        │
 │                                                                   │
-│   path_eff       = |lastPrice - open| / (high - low)              │
-│   noise_ratio    = Σ|p[i]-p[i-1]| / netMove                      │
-│   flips          = BTC 方向翻转次数                                │
-│   is_oscillating = path_eff≤0.7 ∧ noise>1.5 ∧ flips>1            │
+│   btc_position    = (price - open) / hist_avg_range               │
+│   divergence      = ±btc_position (YES侧取负) — 正=BTC与PM反向    │
 │   range_expansion = |price - open| / hist_avg_range               │
-│   btc_extreme    = BTC 与 PM 方向背离                              │
 │                                                                   │
 │   硬过滤 (任一不通过 → 立即否决，不等待确认):                      │
-│   • path_eff < 0.4          趋势太模糊                             │
-│   • noise_ratio > 3.0       PM 价格太不稳定                        │
-│   • range_expansion ≥ 1.5   真突破，PM 判断正确                    │
+│   • B1 背离不足    divergence < 0.05 → BTC 与 PM 同向，EV≈0      │
+│   • F0 真突破      range_expansion ≥ 1.5 → PM 是对的              │
 │                                                                   │
 │   全部通过 → 保存特征，状态切换到 stateConfirming                  │
 │   等待 confirm_delay_ticks 个 snapshot…                            │
@@ -187,21 +192,21 @@ go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab -dashboar
 │ 阶段 2: onConfirmed() — 确认数据到达后才执行                       │
 │                                                                   │
 │   唯一需要等待的特征:                                              │
-│   other_delta = 对面价格[t+N] - 对面价格[t]                        │
+│   other_delta = 对面 bid[t+N] - 对面 bid[t]                       │
 │     YES>0.7 → 对面=NO,  买 NO 赌 DOWN → NoPrice 涨 = +分         │
 │     NO>0.7  → 对面=YES, 买 YES 赌 UP  → YesPrice 涨 = +分        │
 │                                                                   │
-│   entry_price = 穿越时刻对面价格 (入场价)                          │
+│   成交价 (ask 口径): fill = 1 - 触发侧 bid[t+N]                   │
+│   gate: fill > max_entry_price(0.45) → 信号无效                   │
 │                                                                   │
-│   7 特征复合评分 (Formula A):                                      │
-│   F1v other_delta > 0.05   +3    F5  入场价 < 0.25    +1         │
-│   F1  other_delta > 0.02   +2    F6  振幅 < 0.5       +2         │
-│   F2  other_delta > 0.01   +1    F7  BTC 背离         +1         │
-│   F3  振荡                 +1    F0  振幅 ≥ 1.5      否决         │
-│   F4  入场价 < 0.20        +1                                     │
+│   Formula B 评分:                                                 │
+│   B3 other_delta > 0.05   +3                                      │
+│   B3 other_delta > 0.02   +2                                      │
+│   B3 other_delta > 0.01   +1                                      │
+│   B2 振幅 < 0.5           +2   (过度自信)                         │
 │                                                                   │
-│   总分 ≥ score_entry(5) → 🎯 FlipSignal                           │
-│   总分 < 5 → 回 Watching，尝试 pending crossings                  │
+│   总分 ≥ score_entry(2) → 🎯 FlipSignal                           │
+│   总分 < 2 → 回 Watching，尝试 pending crossings                  │
 └──────────────────────────────────────────────────────────────────┘
 ```
 
@@ -210,12 +215,12 @@ go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab -dashboar
 **信号文件格式**（`data/flip_signals.jsonl`）:
 
 ```json
-{"time":"2026-08-08T12:05:15Z","condition_id":"0x...","side":"no","score":6,
- "entry_price":0.18,"shares":1,"remaining_sec":45,
- "path_eff":0.52,"noise_ratio":2.1,"flips":2,"is_oscillating":true,
- "range_expansion":0.3,"btc_position":-0.15,"btc_extreme":true,"other_delta":0.025}
+{"time":"2026-08-08T12:05:15Z","condition_id":"0x...","side":"no","score":2,
+ "entry_price":0.21,"shares":1,"remaining_sec":45,
+ "btc_divergence":0.27,"range_expansion":0.3,
+ "btc_position":0.27,"other_delta":0.005}
 // 结算后追加一行
-{"type":"resolution","condition_id":"0x...","side":"no","entry_price":0.18,"shares":1,"won":true,"pnl":0.82}
+{"type":"resolution","condition_id":"0x...","side":"no","entry_price":0.21,"shares":1,"won":true,"pnl":0.79}
 ```
 
 ---
@@ -245,7 +250,7 @@ go run ./cmd/flip -trading -stake 5 -max-loss 10 -dashboard :8090
 |------|--------|----------|------|
 | `enabled` | false | `-trading` | 启用实盘 |
 | `stake_per_signal` | 5.0 | `-stake` | 每信号 USDC 预算 |
-| `max_price` | 0.35 | — | 最高允许价格（绝对限价）|
+| `max_price` | 0.45 | — | 最高允许价格（绝对限价，ask 口径与回测 gate 一致）|
 | `max_daily_loss` | 10.0 | `-max-loss` | 日亏上限，触发后当日停止 |
 | `cooldown_after_loss_sec` | 300 | — | 亏损后冷却 5 分钟 |
 
@@ -334,5 +339,7 @@ go test ./internal/... -v
 - [CLAUDE.md](CLAUDE.md) — Go 代码规范与架构细节
 - [docs/live_trading_plan.md](docs/live_trading_plan.md) — 实盘交易实施方案
 - [python/README.md](python/README.md) — Python 分析工具说明
-- `docs/flip_backtest_plan.md` — 回测方案设计
+- `docs/flip_strategy_plan_2026-08-13.md` — Formula B 实施方案（当前策略规格）
+- `docs/flip_optimization_analysis_2026-08-13.md` — 胜率/EV 优化分析过程
+- `docs/flip_backtest_plan.md` — 回测方案设计（历史版本，Formula B 前的设计）
 - `docs/flip_signal_evaluation_report.md` — 信号评估报告

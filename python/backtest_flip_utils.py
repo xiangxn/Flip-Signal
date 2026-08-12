@@ -1,11 +1,21 @@
 #!/usr/bin/env python3
 """
-回测工具函数 — 复合评分版翻转信号回测。
+回测工具函数 — 精简公式版翻转信号回测（Formula B, 2026-08-13 标定）。
 
 特征提取 + 信号检测的纯函数，不依赖 IO。
 所有函数均为无副作用纯函数，便于测试和调参。
 
-对应 docs/flip_backtest_plan.md §2-§3。
+Formula B 三个信号条件（详见 docs/flip_strategy_plan_2026-08-13.md）:
+  B1 背离硬要求: 穿越时刻 BTC 必须与 PM 反向（min_divergence=0.05）
+  B2 过度自信:   range_expansion < 0.5 → +2
+  B3 确认回归:   other_delta 三档 → +3/+2/+1
+  score_entry = 2: 任一核心信号成立即触发
+
+成交口径（实盘对齐）:
+  yes_price/no_price 存的是各订单簿 BEST BID。实盘 FAK 买对侧成交在
+  ASK = 1 - 触发侧 bid（双token互补）。fill_price 与 max_entry_price
+  gate 均按 ask 口径计算 — 旧口径按对侧 bid 成交（entry+other_delta）
+  每笔系统性低估 spread（实测 ~1 分）。
 """
 
 from __future__ import annotations
@@ -189,8 +199,8 @@ class FlipSignal:
     condition_id: str
     side: str               # "yes" 或 "no"
     score: int              # 复合评分
-    entry_price: float      # 穿越时刻对面价 (评分特征用)
-    fill_price: float       # 确认时刻对面价 = 实盘真实成交价 (entry + other_delta)
+    entry_price: float      # 穿越时刻对侧 bid (评分特征用)
+    fill_price: float       # 确认时刻对侧 ASK = 1 - 触发侧 bid（实盘真实成交价）
     won: bool               # 是否赢
     pnl: float              # 盈亏 (按 fill_price 成交计算)
     shares: int             # 下单量
@@ -204,6 +214,7 @@ class FlipSignal:
     range_expansion: float | None
     btc_position: float
     btc_extreme: bool
+    btc_divergence: float   # 背离度：正=BTC 与 PM 反向（YES侧取 -btc_pos）
     other_delta: float
 
 
@@ -213,6 +224,10 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
 
     从 check_signal 中抽取的纯评分逻辑 — 给定穿越点 cross_idx，
     提取特征、应用硬过滤、计算复合评分、判定输赢。
+
+    Formula B 流程（2026-08-13）:
+      窗口 → 确认tick存在 → B1 背离硬要求 → T=0 质量否决(可停用)
+      → F0 真突破否决 → gate(ask口径) → 评分(B2+B3) → 判定输赢(ask成交)
     """
     this_key = "yes_price" if side == "yes" else "no_price"
     other_key = "no_price" if side == "yes" else "yes_price"
@@ -238,14 +253,10 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
                                  noise_ratio=noise_ratio_val,
                                  flips=flips_val)
 
-    # Hard filter: noise_ratio > 3.0 → 不触发
-    # OPT#3: 高噪声信号胜率 0%，noise > 3.0 的 5 笔全亏
-    if noise_ratio_val > 3.0:
+    # ── T=0 质量否决（0 = 禁用；2026-08-13 减法后默认停用）──
+    if cfg.noise_ratio_veto_max > 0 and noise_ratio_val > cfg.noise_ratio_veto_max:
         return None
-
-    # Hard filter: path_eff < 0.4 → 不触发
-    # OPT#7: 极低路径效率 = 趋势不明确，剩余 2 亏中 L1=0.38
-    if path_eff < 0.4:
+    if cfg.path_eff_veto_min > 0 and path_eff < cfg.path_eff_veto_min:
         return None
 
     # 振幅扩张 (tick-independent: |price-open|/hist_avg_range)
@@ -259,42 +270,47 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     # BTC 位置 (tick-independent: vs Open, 以历史振幅为单位)
     btc_position = compute_btc_position(cross_snap["price"], open_price,
                                         event.get("hist_avg_range", 0))
-    # Formula A: BTC 与 PM 背离 — 放宽条件
-    # Flip 策略赌 PM 过度反应。BTC 与 PM 同向 = PM 正确，不应加分
-    # BTC 与 PM 反向 = PM 可能错了，这才是 flip 的 edge
-    if side == "yes":
-        # YES>0.7 (PM看涨), BTC 跌 → PM 过度反应，flip edge
-        btc_extreme = (btc_position < cfg.btc_pos_min)  # btc_pos < -0.1
-    else:
-        # NO>0.7 (PM看跌), BTC 涨 → PM 过度反应，flip edge
-        btc_extreme = (btc_position > cfg.btc_pos_max)  # btc_pos > 0.1
+    # 背离度：正 = BTC 与 PM 反向（YES侧触发取 -btc_pos，NO侧取 +btc_pos）
+    btc_divergence = -btc_position if side == "yes" else btc_position
 
-    # 入场价
+    # ── B1 背离硬要求（Formula B 核心，2026-08-13）──
+    # 同向穿越 EV≈0（χ²=125 分桶），BTC 与 PM 反向才有 flip edge。
+    # 阈值 0.03~0.10 为平台，0.05 为自然边界。
+    if cfg.min_divergence > 0 and btc_divergence < cfg.min_divergence:
+        return None
+
+    # 兼容字段：btc_extreme（权重已停用，保留输出）
+    if side == "yes":
+        btc_extreme = (btc_position < cfg.btc_pos_min)
+    else:
+        btc_extreme = (btc_position > cfg.btc_pos_max)
+
+    # 入场价（对侧 bid，评分特征用；真实成交价见 fill_price）
     entry_price = cross_snap[other_key]
 
-    # ── T+5s 确认特征 ──
+    # ── T+delay 确认特征 ──
     other_delta = compute_other_delta(snaps, cross_idx, other_key, cfg)
 
     # 确认数据不存在 (窗口末尾, remaining_sec 不足) → 与 Go 引擎一致，丢弃
     if other_delta is None:
         return None
 
-    # Hard filter: other_delta 下限 (Formula A: 默认禁用, 由评分权重处理)
+    # Hard filter: other_delta 下限 (默认禁用, 由评分权重处理)
     if other_delta < cfg.od_hard_filter:
         return None
 
-    # ── 入场价上限 gate (实盘对齐) ──
-    # 确认时刻对侧价 = entry_price + other_delta。
-    # 强 other_delta 的确认意味着廉价入场已消失: 实盘在 25s 后下 FAK
-    # 限价 max_entry_price 必然被拒, 且此时盈亏比已恶化 → 信号无效。
-    confirm_price = entry_price + other_delta
-    if cfg.max_entry_price > 0 and confirm_price > cfg.max_entry_price:
+    # ── 入场价上限 gate（ASK 口径，实盘对齐）──
+    # 实盘 Trader 用最优卖价(=1-触发侧bid)校验 FAK (trader.go)，
+    # 回测必须同口径。对侧 ask 超出 max_price → 盈亏比恶化 + FAK 被拒。
+    fill_price = 1.0 - snaps[cross_idx + cfg.confirm_delay_ticks][this_key]
+    if cfg.max_entry_price > 0 and fill_price > cfg.max_entry_price:
         return None
 
-    # ── Step 4: 计算评分 ──
+    # ── Step 4: 计算评分（Formula B：B2 过度自信 + B3 确认回归）──
+
     score = 0
 
-    # F1/F2/F2.5: 对面价格变化 — Formula A 三档评分
+    # B3: 对面价格变化 — 三档评分
     if other_delta > cfg.other_delta_vstrong:
         score += cfg.w_other_d5_vstrong
     elif other_delta > cfg.other_delta_strong:
@@ -302,21 +318,21 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     elif other_delta > cfg.other_delta_weak:
         score += cfg.w_other_d5_weak
 
-    # F3: 来回振荡
+    # F3: 来回振荡（2026-08-13 起权重 0，字段保留）
     if oscillating:
         score += cfg.w_oscillating
 
-    # F4/F5: 低价入场 (entry < 0.25 → +1, 不叠加 — 极端低价 <0.15 胜率仅 7%)
+    # F4/F5: 低价入场（2026-08-13 起权重 0，字段保留）
     if entry_price < cfg.entry_cheap_strong:
         score += cfg.w_cheap_entry_strong
     elif entry_price < cfg.entry_cheap_weak:
         score += cfg.w_cheap_entry_weak
 
-    # F6: BTC 还没怎么动 (range_expansion < threshold) → PM 过度自信 → +2
+    # B2: BTC 还没怎么动 (range_expansion < threshold) → PM 过度自信 → +2
     if range_expansion is not None and range_expansion < cfg.range_exp_threshold:
         score += cfg.w_range_expansion
 
-    # F7: BTC 极端位置
+    # F7: BTC 极端位置（2026-08-13 起权重 0，由 B1 硬过滤取代）
     if btc_extreme:
         score += cfg.w_btc_extreme
 
@@ -335,9 +351,10 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
         # NO>0.7, 我们买 YES (赌 UP)
         won = (event["outcome"] == 0)
 
-    # 实盘对齐: 按确认时刻价成交 (穿越价在确认期结束后已不可得,
-    # 旧口径按穿越价算 pnl 会虚增利润 — 幽灵成交)
-    fill_price = entry_price + other_delta
+    # 实盘对齐: 按确认时刻对侧 ASK 成交。
+    # yes_price/no_price 存的是各订单簿 best bid，买对侧必须跨 spread 到
+    # ask（双token互补: 对侧ask = 1 - 触发侧bid）。旧口径按对侧 bid 成交
+    # 每笔系统性低估 ~1 分 spread。
     pnl = (1.0 - fill_price) * shares if won else -fill_price * shares
 
     return FlipSignal(
@@ -358,6 +375,7 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
         range_expansion=range_expansion,
         btc_position=btc_position,
         btc_extreme=btc_extreme,
+        btc_divergence=btc_divergence,
         other_delta=other_delta,
     )
 
@@ -497,6 +515,7 @@ def print_summary(signals: list[FlipSignal],
     avg_fill = sum(s.fill_price for s in signals) / n
     avg_score = sum(s.score for s in signals) / n
     avg_shares = sum(s.shares for s in signals) / n
+    avg_div = sum(s.btc_divergence for s in signals) / n
 
     # 从事件时间跨度估算天数
     if signals:
@@ -508,7 +527,7 @@ def print_summary(signals: list[FlipSignal],
         daily_rate = 0
 
     print("=" * 58)
-    print("  复合评分版翻转信号回测 — 结果汇总")
+    print("  Formula B 翻转信号回测 — 结果汇总")
     print("=" * 58)
 
     # 数据日期跨度
@@ -535,9 +554,10 @@ def print_summary(signals: list[FlipSignal],
     print(f"  总信号数:      {n:>5d}")
     print(f"  日均信号:      {daily_rate:>5.0f}")
     print(f"  胜率:          {wins / n * 100:>5.1f}%  ({wins}/{n})")
-    print(f"  总 P&L:        {total_pnl:>+7.2f}  (按确认价成交)")
-    print(f"  平均成交价:    {avg_fill:>7.3f}")
-    print(f"  平均穿越价:    {avg_entry:>7.3f}  (评分特征用)")
+    print(f"  总 P&L:        {total_pnl:>+7.2f}  (按确认时刻对侧 ASK 成交)")
+    print(f"  平均成交价:    {avg_fill:>7.3f}  (对侧 ASK = 1 - 触发侧 bid)")
+    print(f"  平均穿越价:    {avg_entry:>7.3f}  (对侧 bid, 评分特征用)")
+    print(f"  平均背离度:    {avg_div:>7.3f}  (正=BTC与PM反向)")
     print(f"  平均分数:      {avg_score:>7.1f}")
     print(f"  平均下单量:    {avg_shares:>7.1f} shares")
     losers_pnl = sum(s.pnl for s in signals if s.pnl < 0)
@@ -555,10 +575,10 @@ def print_summary(signals: list[FlipSignal],
         print(f"  利润因子:      {gross_win / abs(losers_pnl):>7.2f}  (总盈利/总亏损)")
     print("-" * 58)
 
-    # 按分数分桶
-    for lo, hi, label in [(0, 5, "Score 0-4 (未触发)"),
-                            (5, 7, "Score 5-6 (开仓)"),
-                            (7, 99, "Score 7+  (加仓)")]:
+    # 按分数分桶（Formula B: score>=2 开仓，最高 5）
+    for lo, hi, label in [(0, 2, "Score 0-1 (未触发)"),
+                            (2, 4, "Score 2-3 (开仓)"),
+                            (4, 99, "Score 4+  (叠加)")]:
         subset = [s for s in signals if lo <= s.score < hi]
         if subset:
             w = sum(1 for s in subset if s.won)
