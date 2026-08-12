@@ -120,6 +120,7 @@ function updateChart(snapshots) {
 // ── Data fetching ──
 
 let refreshSec = 5;
+let scoreEntryCfg = 5; // 从 /api/state 同步的 Score 入场阈值，用于前端着色
 
 async function fetchState() {
   try {
@@ -135,7 +136,7 @@ async function fetchState() {
     document.getElementById('gen').textContent = d.generation;
     document.getElementById('clock').textContent = new Date(d.ts).toLocaleTimeString();
     document.getElementById('refresh-cnt').textContent = refreshSec;
-    // refreshSec += 5;
+    scoreEntryCfg = d.score_entry_cfg; // 同步 Score 阈值，供信号表着色使用
 
     // Stats
     document.getElementById('stat-total').textContent = d.signal_count;
@@ -253,7 +254,6 @@ async function fetchState() {
       }
       if (f.score !== undefined) {
         items.push(['Score',       f.score,                    f.score,                    true]);
-        items.push(['Score Req.',  d.score_entry_cfg,          d.score_entry_cfg,          false]);
       }
 
       fg.innerHTML = items.map(([l, v, raw, evaluable]) => {
@@ -291,7 +291,7 @@ async function fetchSignals() {
     const tb = document.getElementById('sig-body');
 
     if (!d.signals || d.signals.length === 0) {
-      tb.innerHTML = '<tr><td colspan="14" class="empty-state">No signals yet</td></tr>';
+      tb.innerHTML = '<tr><td colspan="15" class="empty-state">No signals yet</td></tr>';
       return;
     }
 
@@ -311,10 +311,11 @@ async function fetchSignals() {
       if (s.exec_status === 'filled') execHtml = '<span class="won">&#10003;</span>';
       else if (s.exec_status === 'failed') execHtml = '<span class="lost">&#10007;</span>';
       const latMs = s.order_book_latency || 0;
+      const scoreCls = s.score < scoreEntryCfg ? 'score-low' : '';
       return `<tr>
         <td>${t}</td>
         <td class="${sideCls}">${s.side.toUpperCase()}</td>
-        <td>${s.score}</td>
+        <td class="${scoreCls}">${s.score}</td>
         <td>${s.entry_price.toFixed(3)}</td>
         <td>${(s.shares || 0).toFixed(2)}</td>
         <td>${execHtml}</td>
@@ -368,4 +369,3 @@ function pollAll() {
 
 pollAll();
 setInterval(pollAll, refreshSec*1000);
-setInterval(fetchSignals, 10000);
