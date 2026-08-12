@@ -175,7 +175,7 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	params := ScoreParams{
 		Side:           "no",
 		OtherDelta:     0.06, // >0.05 → +3 (Formula A top tier)
-		IsOscillating:  true, // +2 (Formula A)
+		IsOscillating:  true, // +1 (Formula A: 降低到 1)
 		EntryPrice:     0.15, // <0.20 → +1 (elif, no stacking)
 		RangeExpansion: 0.3,  // <0.5 → +2
 		BTCPosition:    0.25, // NO side, >0.1 → BTC diverges
@@ -187,7 +187,7 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 9 // 3+2+1+2+1 = 9 (Formula A max with these inputs)
+	expected := 8 // 3+1+1+2+1 = 8 (Formula A max with these inputs)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -238,8 +238,8 @@ func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		Side:           "yes",
-		OtherDelta:     0.05,   // >0.02 → +2 (Formula A: not >0.05 so falls to strong)
-		IsOscillating:  true,   // +2 (Formula A)
+		OtherDelta:     0.05,   // =0.05, not >0.05 → falls to strong tier (+2)
+		IsOscillating:  true,   // +1 (Formula A: 降低到 1)
 		EntryPrice:     0.15,   // <0.20 → +1
 		RangeExpansion: 2.5,
 		BTCPosition:    0,
@@ -250,7 +250,7 @@ func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 	if vetoed {
 		t.Error("F0 should not veto when hist not ready")
 	}
-	expected := 5 // 2+2+1 = 5 (Formula A: strong od + osc + entry, no F6/F7)
+	expected := 4 // 2+1+1 = 4 (Formula A: strong od + osc + entry, no F6/F7)
 	if score != expected {
 		t.Errorf("expected %d, got %d", expected, score)
 	}
@@ -353,7 +353,8 @@ func TestEngine_TooFewPreSnaps(t *testing.T) {
 
 func TestEngine_CrossingWithConfirm(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.MinPreSnaps = 2 // lower for test
+	cfg.MinPreSnaps = 2     // lower for test
+	cfg.ConfirmDelayTicks = 1 // single tick for test (default 5 too slow for unit tests)
 	ht := NewHistRangeTracker(18)
 	// Make hist ready with some dummy data
 	ht.AddRange(100, 150) // range=50
@@ -482,6 +483,7 @@ func TestEngine_F0Veto_RealBreakout(t *testing.T) {
 func TestEngine_OnlyFirstCrossing(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1 // single tick for test
 	ht := NewHistRangeTracker(18)
 	ht.AddRange(100, 150)
 	ht.AddRange(100, 130)
@@ -641,6 +643,8 @@ func TestHistRangeTracker_FIFOEviction(t *testing.T) {
 func TestEngine_YESFailedFallbackToNO(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1 // single tick for test
+	cfg.RangeExpMax = 2.0     // wider range for test (default 1.5 would veto NO crossing at btc_pos=1.5)
 	ht := NewHistRangeTracker(18)
 	ht.AddRange(100, 150)
 	ht.AddRange(100, 130)
@@ -694,6 +698,8 @@ func TestEngine_YESFailedFallbackToNO(t *testing.T) {
 func TestEngine_BothSidesFailResumeWatching(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1 // single tick for test
+	cfg.RangeExpMax = 2.0     // wider range for test (default 1.5 would veto NO crossing)
 	ht := NewHistRangeTracker(18)
 	ht.AddRange(100, 150)
 	ht.AddRange(100, 130)
@@ -859,6 +865,7 @@ func TestEngine_MinPreSnapsNotEnough_RetriesOnNextTick(t *testing.T) {
 	// as permanently tried).
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 5
+	cfg.RangeExpMax = 2.0 // wider range for test (default 1.5 would veto retry crossing)
 	ht := NewHistRangeTracker(18)
 	ht.AddRange(100, 150)
 	ht.AddRange(100, 130)

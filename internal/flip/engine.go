@@ -8,6 +8,13 @@ import (
 	"github.com/necklace/flip-signal/internal/lab"
 )
 
+// pendingCrossing 记录盲窗期间（确认等待中）检测到的穿越，
+// 供当前穿越失败后逐个尝试，消除流式引擎与 Python 批量回测之间的差异。
+type pendingCrossing struct {
+	crossIdx int
+	side     string
+}
+
 // T0Features 保存穿越时刻（T=0）计算的特征值。
 // 导出供 Dashboard 展示穿越点详情。
 type T0Features struct {
@@ -70,6 +77,9 @@ type Engine struct {
 	retryCount   int        // 本周期内进入 Confirming 的次数
 	lastFailedT0 *T0Features // 最近一次失败穿越的 T=0 特征（Dashboard 展示用）
 
+	// 盲窗期间记录的穿越（确认等待期间上升沿，当前穿越失败后逐个尝试）
+	pendingCrossings []pendingCrossing
+
 	// 最近一次失败穿越的评分数据（onConfirmed 中保存，诊断用）
 	lastFailedOtherDelta float64
 	lastFailedEntryPrice float64
@@ -118,6 +128,7 @@ func (e *Engine) Reset(generation int64) {
 
 	e.retryCount = 0
 	e.lastFailedT0 = nil
+	e.pendingCrossings = e.pendingCrossings[:0]
 	e.lastFailedOtherDelta = 0
 	e.lastFailedEntryPrice = 0
 	e.lastFailedScore = 0
@@ -192,6 +203,16 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 		return nil
 
 	case stateConfirming:
+		// 盲窗期间记录新穿越，供当前穿越失败后逐个尝试
+		// （对应 Python check_signal 批量扫描的行为）
+		if e.cfg.AllowRetryCrossings {
+			if yesRisingEdge && bufIdx >= e.cfg.MinPreSnaps {
+				e.pendingCrossings = append(e.pendingCrossings, pendingCrossing{bufIdx, "yes"})
+			}
+			if noRisingEdge && bufIdx >= e.cfg.MinPreSnaps {
+				e.pendingCrossings = append(e.pendingCrossings, pendingCrossing{bufIdx, "no"})
+			}
+		}
 		e.confirmCount++
 		if e.confirmCount >= e.cfg.ConfirmDelayTicks {
 			sig := e.onConfirmed(snap)
@@ -330,8 +351,42 @@ func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
 		return e.fallbackAfterFailedConfirm()
 	}
 
-	// 多穿越模式：检查另一侧当前是否仍在阈值之上
-	// （在确认等待期间发生了穿越）
+	// ── 优先尝试盲窗期间记录的穿越（同侧优先，按时间顺序）──
+	// 对应 Python check_signal 的行为：先穷尽同侧所有穿越，再试另一侧
+	if len(e.pendingCrossings) > 0 {
+		sameSide := e.crossSide
+
+		// 第一轮：同侧穿越
+		for _, pc := range e.pendingCrossings {
+			if pc.side == sameSide {
+				e.retryCount++
+				if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
+					e.state = stateDone
+					e.doneThisGen = true
+					e.pendingCrossings = e.pendingCrossings[:0]
+					return sig
+				}
+			}
+		}
+
+		// 第二轮：另一侧穿越
+		for _, pc := range e.pendingCrossings {
+			if pc.side != sameSide {
+				e.retryCount++
+				if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
+					e.state = stateDone
+					e.doneThisGen = true
+					e.pendingCrossings = e.pendingCrossings[:0]
+					return sig
+				}
+			}
+		}
+
+		// 全部失败 → 清空 pending，继续后续 fallback
+		e.pendingCrossings = e.pendingCrossings[:0]
+	}
+
+	// ── 现有 fallback：检查另一侧当前是否在阈值之上 ──
 	otherSide := "no"
 	if e.crossSide == "no" {
 		otherSide = "yes"
@@ -405,6 +460,7 @@ func (e *Engine) returnToWatching() {
 	e.crossSide = ""
 	e.crossIdx = 0
 	e.confirmCount = 0
+	e.pendingCrossings = e.pendingCrossings[:0]
 }
 
 // fallbackAfterFailedConfirm 实现兼容模式的 fallback：一侧确认失败后，
@@ -425,6 +481,183 @@ func (e *Engine) fallbackAfterFailedConfirm() *FlipSignal {
 	e.crossIdx = 0
 	e.confirmCount = 0
 	return nil
+}
+
+// evaluateCrossingAt 对指定穿越点计算完整评分（T=0 特征 + T+5s 确认 + 7 特征评分），
+// 返回信号或 nil。不修改引擎状态，仅更新 lastFailedT0 诊断字段。
+//
+// 与 enterConfirming + onConfirmed 计算逻辑完全一致，但作为纯函数运行 ——
+// 专为盲窗期间记录的穿越（pendingCrossings）设计：确认数据已在 buffer 中，
+// 无需等待，直接同步评估。
+func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
+	crossSnap := e.snapBuffer[crossIdx]
+
+	// ── 前置条件 ──
+	nPre := crossIdx + 1
+	if nPre < e.cfg.MinPreSnaps {
+		return nil
+	}
+
+	// ── T=0 特征 ──
+	prePrices := make([]float64, nPre)
+	for i := 0; i < nPre; i++ {
+		prePrices[i] = e.snapBuffer[i].CurrentPrice
+	}
+	openPrice := crossSnap.OpenPrice
+
+	netMove := math.Abs(prePrices[len(prePrices)-1] - openPrice)
+	preHigh, preLow := prePrices[0], prePrices[0]
+	for _, p := range prePrices {
+		if p > preHigh {
+			preHigh = p
+		}
+		if p < preLow {
+			preLow = p
+		}
+	}
+	preRange := preHigh - preLow
+	if preRange == 0 {
+		return nil
+	}
+
+	pathEff := netMove / preRange
+	if pathEff < e.cfg.PathEffVetoMin {
+		return nil
+	}
+
+	totalPathVal := TotalPath(prePrices)
+	noiseRatio := totalPathVal / netMove
+	if netMove == 0 {
+		noiseRatio = totalPathVal
+	}
+	if noiseRatio > e.cfg.NoiseRatioVetoMax {
+		return nil
+	}
+
+	flips := CountFlips(prePrices)
+	oscillating := IsOscillating(pathEff, noiseRatio, flips, e.cfg)
+
+	// Range expansion + F0 veto
+	var rangeExpansion float64
+	if e.histRange.IsReady() {
+		rangeExpansion = RangeExpansion(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		if rangeExpansion >= e.cfg.RangeExpMax {
+			return nil
+		}
+	}
+
+	// ── 确认数据（T+5s）──
+	confIdx := crossIdx + e.cfg.ConfirmDelayTicks
+	if confIdx >= len(e.snapBuffer) {
+		return nil // 确认数据尚未到达（不应出现，防御性检查）
+	}
+	confSnap := e.snapBuffer[confIdx]
+
+	// other_delta
+	var otherDelta float64
+	if side == "yes" {
+		otherDelta = confSnap.NoPrice - crossSnap.NoPrice
+	} else {
+		otherDelta = confSnap.YesPrice - crossSnap.YesPrice
+	}
+	if otherDelta < e.cfg.ODHardFilter {
+		return nil
+	}
+
+	// entry price
+	var entryPrice float64
+	if side == "yes" {
+		entryPrice = crossSnap.NoPrice
+	} else {
+		entryPrice = crossSnap.YesPrice
+	}
+
+	// BTC position + extreme
+	var btcPosition float64
+	var btcExtreme bool
+	if e.histRange.IsReady() {
+		btcPosition = BTCPosition(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		if side == "yes" {
+			btcExtreme = btcPosition < e.cfg.BTCPosMin
+		} else {
+			btcExtreme = btcPosition > e.cfg.BTCPosMax
+		}
+	}
+
+	// 穿越点自身的订单簿延迟
+	latency := crossSnap.OrderBookLatency
+	if confSnap.OrderBookLatency > latency {
+		latency = confSnap.OrderBookLatency
+	}
+
+	// ── 复合评分 ──
+	params := ScoreParams{
+		Side:             side,
+		OtherDelta:       otherDelta,
+		IsOscillating:    oscillating,
+		EntryPrice:       entryPrice,
+		RangeExpansion:   rangeExpansion,
+		BTCPosition:      btcPosition,
+		BTCExtreme:       btcExtreme,
+		HistReady:        e.histRange.IsReady(),
+		OrderBookLatency: latency,
+		Cfg:              e.cfg,
+	}
+
+	score, vetoed := ComputeFlipScore(params)
+	if vetoed || score < e.cfg.ScoreEntry {
+		// 更新诊断字段供 Dashboard 展示
+		e.lastFailedT0 = &T0Features{
+			Side:             side,
+			PathEff:          pathEff,
+			NoiseRatio:       noiseRatio,
+			Flips:            flips,
+			Oscillating:      oscillating,
+			RangeExpansion:   rangeExpansion,
+			BTCPosition:      btcPosition,
+			BTCExtreme:       btcExtreme,
+			OtherDelta:       otherDelta,
+			EntryPrice:       entryPrice,
+			Score:            score,
+			OrderBookLatency: latency,
+		}
+		e.lastFailedOtherDelta = otherDelta
+		e.lastFailedEntryPrice = entryPrice
+		e.lastFailedScore = score
+		return nil
+	}
+
+	// 评估通过 → 更新引擎状态以反映本次穿越
+	e.crossSnap = crossSnap
+	e.crossSide = side
+	e.crossIdx = crossIdx
+	e.pathEff = pathEff
+	e.noiseRatio = noiseRatio
+	e.flips = flips
+	e.oscillating = oscillating
+	e.rangeExpansion = rangeExpansion
+	e.btcPosition = btcPosition
+	e.btcExtreme = btcExtreme
+	e.orderBookLatency = crossSnap.OrderBookLatency
+
+	return &FlipSignal{
+		Time:           time.Now().UTC(),
+		Side:           side,
+		Score:          score,
+		EntryPrice:     entryPrice,
+		Shares:         0,
+		ExecStatus:     "pending",
+		RemainingSec:   crossSnap.RemainingSec,
+		PathEff:        pathEff,
+		NoiseRatio:     noiseRatio,
+		Flips:          flips,
+		IsOscillating:  oscillating,
+		RangeExpansion: rangeExpansion,
+		BTCPosition:    btcPosition,
+		BTCExtreme:     btcExtreme,
+		OtherDelta:     otherDelta,
+		OrderBookLatency: latency,
+	}
 }
 
 // onConfirmed 在确认延迟（ConfirmDelayTicks）到达后被调用，
