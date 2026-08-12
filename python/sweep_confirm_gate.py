@@ -108,11 +108,11 @@ def main():
               f"{r['n']:>4} {r['wr']:>6.1f}% {r['rr_per']:>9.2f} {r['total']:>+8.2f} "
               f"{r['rr_net']:>10.2f} {r['avg_fill']:>9.3f}")
 
-    # ── 3. 当前默认参数 (delay=2, od=0.01/0.02/0.05, gate=0.35) 的参考行 ──
+    # ── 3. 当前默认参数 (delay=2, od=0.01/0.02/0.05, gate=0.45) 的参考行 ──
     print("\n" + "-" * 112)
     for r in results:
-        if (r["delay"] == 2 and r["od_weak"] == 0.01 and r["gate"] == 0.35):
-            print(f"  当前默认 (delay=2, od弱=0.01, gate=0.35): n={r['n']} WR={r['wr']:.1f}% "
+        if (r["delay"] == 2 and r["od_weak"] == 0.01 and r["gate"] == 0.45):
+            print(f"  当前默认 (delay=2, od弱=0.01, gate=0.45): n={r['n']} WR={r['wr']:.1f}% "
                   f"单笔盈亏比={r['rr_per']:.2f} 利润因子={r['pf']:.2f} "
                   f"P&L={r['total']:+.2f} avg成交价={r['avg_fill']:.3f}")
     print("  (对比旧参数 delay=5, od弱=0.01, gate=0.35 — 见 analyze_price_gate.py)")

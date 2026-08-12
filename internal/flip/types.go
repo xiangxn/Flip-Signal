@@ -48,8 +48,8 @@ type FlipConfig struct {
 	// ── 对面价格确认（T+N ticks 后观察对侧变化）──
 
 	// 确认等待 tick 数：穿越后等 N 个 tick 再取对面价格（1 tick ≈ 5s）
-	ConfirmDelayTicks int `mapstructure:"confirm_delay_ticks"`	// other_delta 硬过滤下限，-999 = 禁用（由评分权重处理）
-	ODHardFilter float64 `mapstructure:"od_hard_filter"`
+	ConfirmDelayTicks int     `mapstructure:"confirm_delay_ticks"` // other_delta 硬过滤下限，-999 = 禁用（由评分权重处理）
+	ODHardFilter      float64 `mapstructure:"od_hard_filter"`
 	// 对面涨幅 > 此值 → 对面强烈回归 → +3 分
 	OtherDeltaVStrong float64 `mapstructure:"other_delta_vstrong"`
 	// 对面涨幅 > 此值 → 对面明显回归 → +2 分
@@ -117,40 +117,40 @@ type FlipConfig struct {
 // 2026-08-12 网格搜索优化：胜率 50.9%, P&L +62.40, 盈亏比 2.3, 日均 37 信号。
 func DefaultConfig() FlipConfig {
 	return FlipConfig{
-		TriggerThreshold:     0.7,    // PM 一侧 >0.7 触发
-		AllowRetryCrossings:  true,   // 多穿越重试：每个上升沿都尝试评分
-		MinPreSnaps:          5,      // 穿越前至少 5 个 snapshot
-		MaxRemainingSec:      260,    // 窗口有效期上限：remaining_sec < 260s 的穿越才有效
-		MinRemainingSec:      35,     // 窗口有效期下限：remaining_sec > 35s（5 ticks × 5s + 10s 执行缓冲）
-		PathEffOscillating:    0.7,   // 收紧到 0.7（原 0.8 太宽松，噪声大）
-		NoiseRatioOscillating: 1.5,   // 噪声比 >1.5 视为振荡
-		FlipsOscillating:      1,     // 2026-08-12 sweep: 1 比 2 多 6 笔优质信号，胜率不变 P&L 更高
-		HistWindowN:           18,    // 前 18 根 K 线（~1.5h）算平均振幅
-		RangeExpThreshold:     0.5,   // 振幅 <0.5 → BTC 没动但 PM 0.7+ → 过度自信
-		RangeExpMax:           1.5,   // 收紧到 1.5（原 2.0 太宽，真突破仍然通过了）
-		ConfirmDelayTicks:     2,     // 从 5 改为 2（10s）：25s 时对面已反弹但入场价跑掉，FAK 无法成交
+		TriggerThreshold:      0.7,    // PM 一侧 >0.7 触发
+		AllowRetryCrossings:   true,   // 多穿越重试：每个上升沿都尝试评分
+		MinPreSnaps:           5,      // 穿越前至少 5 个 snapshot
+		MaxRemainingSec:       260,    // 窗口有效期上限：remaining_sec < 260s 的穿越才有效
+		MinRemainingSec:       35,     // 窗口有效期下限：remaining_sec > 35s（5 ticks × 5s + 10s 执行缓冲）
+		PathEffOscillating:    0.7,    // 收紧到 0.7（原 0.8 太宽松，噪声大）
+		NoiseRatioOscillating: 1.5,    // 噪声比 >1.5 视为振荡
+		FlipsOscillating:      1,      // 2026-08-12 sweep: 1 比 2 多 6 笔优质信号，胜率不变 P&L 更高
+		HistWindowN:           18,     // 前 18 根 K 线（~1.5h）算平均振幅
+		RangeExpThreshold:     0.5,    // 振幅 <0.5 → BTC 没动但 PM 0.7+ → 过度自信
+		RangeExpMax:           1.5,    // 收紧到 1.5（原 2.0 太宽，真突破仍然通过了）
+		ConfirmDelayTicks:     2,      // 从 5 改为 2（10s）：25s 时对面已反弹但入场价跑掉，FAK 无法成交
 		ODHardFilter:          -999.0, // 禁用硬过滤，由评分权重处理
-		OtherDeltaVStrong:     0.05,  // 对面涨 >0.05 → +3 分
-		OtherDeltaStrong:      0.02,  // 对面涨 >0.02 → +2 分
-		OtherDeltaWeak:        0.01,  // 对面涨 >0.01 → +1 分
-		PathEffVetoMin:        0.4,   // 路径效率 <0.4 → 趋势极不明确，否决
-		NoiseRatioVetoMax:     3.0,   // 噪声比 >3.0 → 价格极不稳定，否决
-		BTCPosMax:             0.1,   // NO>0.7: BTC 涨 >0.1 倍振幅 → 背离 → +1
-		BTCPosMin:             -0.1,  // YES>0.7: BTC 跌 >0.1 倍振幅 → 背离 → +1
-		EntryCheapStrong:      0.20,  // 对侧 <0.20 → 极低价入场 → +1
-		EntryCheapWeak:        0.25,  // 对侧 <0.25 → 低价入场 → +1（elif 不叠加）
-		MaxEntryPrice:         0.3,   // 确认时刻对侧价 >0.30 → 信号无效（与 trading.max_price 一致，2026-08-12 6天数据扫描）
-		WOtherD5VStrong:       3,     // 对面大涨权重
-		WOtherD5Strong:        2,     // 对面中涨权重
-		WOtherD5Weak:          1,     // 对面小涨权重
-		WOscillating:          1,     // 降低到 1（原 2）：振荡信号胜率仅 31%，远低于趋势 45%
-		WCheapEntryStr:        1,     // 极低价入场权重
-		WCheapEntryWeak:       1,     // 低价入场权重
-		WRangeExpansion:       2,     // 振幅偏小权重
-		WBtcExtreme:           1,     // BTC 背离权重
-		ScoreEntry:            5,     // ≥5 分开仓
-		ScoreAdd:              99,    // 加仓禁用（5s 评分精度不够）
-		MaxLatencyMs:          0,     // 0=禁用，实盘建议 300ms
+		OtherDeltaVStrong:     0.05,   // 对面涨 >0.05 → +3 分
+		OtherDeltaStrong:      0.02,   // 对面涨 >0.02 → +2 分
+		OtherDeltaWeak:        0.01,   // 对面涨 >0.01 → +1 分
+		PathEffVetoMin:        0.4,    // 路径效率 <0.4 → 趋势极不明确，否决
+		NoiseRatioVetoMax:     3.0,    // 噪声比 >3.0 → 价格极不稳定，否决
+		BTCPosMax:             0.1,    // NO>0.7: BTC 涨 >0.1 倍振幅 → 背离 → +1
+		BTCPosMin:             -0.1,   // YES>0.7: BTC 跌 >0.1 倍振幅 → 背离 → +1
+		EntryCheapStrong:      0.20,   // 对侧 <0.20 → 极低价入场 → +1
+		EntryCheapWeak:        0.25,   // 对侧 <0.25 → 低价入场 → +1（elif 不叠加）
+		MaxEntryPrice:         0.45,   // 确认时刻对侧价 >0.30 → 信号无效（与 trading.max_price 一致，2026-08-12 6天数据扫描）
+		WOtherD5VStrong:       3,      // 对面大涨权重
+		WOtherD5Strong:        2,      // 对面中涨权重
+		WOtherD5Weak:          1,      // 对面小涨权重
+		WOscillating:          1,      // 降低到 1（原 2）：振荡信号胜率仅 31%，远低于趋势 45%
+		WCheapEntryStr:        1,      // 极低价入场权重
+		WCheapEntryWeak:       1,      // 低价入场权重
+		WRangeExpansion:       2,      // 振幅偏小权重
+		WBtcExtreme:           1,      // BTC 背离权重
+		ScoreEntry:            5,      // ≥5 分开仓
+		ScoreAdd:              99,     // 加仓禁用（5s 评分精度不够）
+		MaxLatencyMs:          0,      // 0=禁用，实盘建议 300ms
 	}
 }
 
@@ -175,15 +175,15 @@ type FlipSignal struct {
 	Side         string    `json:"side"` // "yes" or "no"
 	Score        int       `json:"score"`
 	EntryPrice   float64   `json:"entry_price"`
-	Shares       float64   `json:"shares"`       // 目标股数 = stake / entry_price（Engine 不设置，由调用方计算）
+	Shares       float64   `json:"shares"` // 目标股数 = stake / entry_price（Engine 不设置，由调用方计算）
 	RemainingSec int       `json:"remaining_sec"`
 
 	// 执行结果（Trader 回填）
-	ExecStatus   string    `json:"exec_status"`             // "pending" | "filled" | "failed"
-	FilledAt     time.Time `json:"filled_at,omitempty"`     // 成交确认时间（UTC）
-	FilledShares float64   `json:"filled_shares"`           // 实际成交股数（failed 时为 0）
-	AvgFillPrice float64   `json:"avg_fill_price"`          // 实际成交均价（纸面 = entryPrice，实盘 = CLOB 真实价）
-	SlippageBps  float64   `json:"slippage_bps,omitempty"`  // entry → fill 滑点（bp），正=不利
+	ExecStatus   string    `json:"exec_status"`            // "pending" | "filled" | "failed"
+	FilledAt     time.Time `json:"filled_at,omitempty"`    // 成交确认时间（UTC）
+	FilledShares float64   `json:"filled_shares"`          // 实际成交股数（failed 时为 0）
+	AvgFillPrice float64   `json:"avg_fill_price"`         // 实际成交均价（纸面 = entryPrice，实盘 = CLOB 真实价）
+	SlippageBps  float64   `json:"slippage_bps,omitempty"` // entry → fill 滑点（bp），正=不利
 
 	// 特征详情（分析/调试用）
 	PathEff        float64 `json:"path_eff"`
@@ -208,14 +208,14 @@ type FlipSignal struct {
 
 // ScoreParams 封装 ComputeFlipScore 的全部输入参数。
 type ScoreParams struct {
-	Side           string
-	OtherDelta     float64
-	IsOscillating  bool
-	EntryPrice     float64
-	RangeExpansion float64
-	BTCPosition    float64
-	BTCExtreme     bool  // pre-computed by engine (BTC diverges from PM direction)
-	HistReady      bool
+	Side             string
+	OtherDelta       float64
+	IsOscillating    bool
+	EntryPrice       float64
+	RangeExpansion   float64
+	BTCPosition      float64
+	BTCExtreme       bool // pre-computed by engine (BTC diverges from PM direction)
+	HistReady        bool
 	OrderBookLatency int64 // 订单簿最大延迟（毫秒），用于延迟风控
-	Cfg            FlipConfig
+	Cfg              FlipConfig
 }

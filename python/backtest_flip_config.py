@@ -8,7 +8,7 @@
 支持的市场: BTC, ETH
 
 各市场参数独立预设:
-  - DEFAULT_CONFIG     BTC 回测参数 (2026-08-12 sweep: flips>1, 胜率 50.4%, P&L +62.79, 盈亏比 2.3)
+  - DEFAULT_CONFIG     BTC 回测参数 (2026-08-13 重标定: delay=2, gate=0.45, data_0 1719 事件 → WR 41.8%, P&L +19.93, PF 1.59, avg fill 0.313)
   - ETH_CONFIG         ETH 回测参数 (初始值与 BTC 相同，待独立调参)
 
 用法:
@@ -68,7 +68,9 @@ class FlipBacktestConfig:
     # ── 入场价上限 (实盘对齐 gate) ──
     # 确认时刻对侧价 > 此值 → 信号无效 (盈亏比已恶化, 实盘 FAK 也无法成交)
     # 与实盘 trading.max_price 保持一致; <=0 禁用
-    max_entry_price: float = 0.3
+    # 0.45 为分桶自然边界 (2026-08-13 sweep): fill∈[0.35,0.45) 是最强确认信号
+    # (WR~50%, avg od 0.13), fill≥0.50 桶 EV 转负 (-0.043/笔), 再放宽边际 P&L 仅 +1.4
+    max_entry_price: float = 0.45
 
     # ── 评分权重 (§2.10) — Formula A ──
     w_other_d5_vstrong: int = 3          # 对面大涨 (od > 0.05)
@@ -86,5 +88,5 @@ class FlipBacktestConfig:
 
 
 # 默认配置实例
-DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 回测参数 (2026-08-12 sweep 优化: WR 50.9%, P&L +62)
+DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 回测参数 (2026-08-13 重标定: WR 41.8%, P&L +19.93, PF 1.59)
 ETH_CONFIG = FlipBacktestConfig()       # ETH 回测参数 (初始值与 BTC 相同，待独立调参)

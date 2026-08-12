@@ -11,23 +11,23 @@ import "time"
 
 // TradingConfig 实盘交易执行参数。
 type TradingConfig struct {
-	Enabled              bool    `mapstructure:"enabled"`                // 启动时是否启用实盘（true=实盘，false=纸面）
-	OutputPath           string  `mapstructure:"output_path"`            // 交易记录 JSONL 路径
-	StakePerSignal       float64 `mapstructure:"stake_per_signal"`       // 每信号投入 USDC
-	MaxPrice             float64 `mapstructure:"max_price"`               // 最高允许价格（直接限价，非滑点百分比）
-	MaxDailyLoss  float64 `mapstructure:"max_daily_loss"`  // 日亏上限 USDC，触发后当日停止
-	OrderStrategy string  `mapstructure:"order_strategy"` // 下单策略："GTC"（挂单等待成交）或 "FAK"（即刻市价成交，剩余取消）
+	Enabled        bool    `mapstructure:"enabled"`          // 启动时是否启用实盘（true=实盘，false=纸面）
+	OutputPath     string  `mapstructure:"output_path"`      // 交易记录 JSONL 路径
+	StakePerSignal float64 `mapstructure:"stake_per_signal"` // 每信号投入 USDC
+	MaxPrice       float64 `mapstructure:"max_price"`        // 最高允许价格（直接限价，非滑点百分比）
+	MaxDailyLoss   float64 `mapstructure:"max_daily_loss"`   // 日亏上限 USDC，触发后当日停止
+	OrderStrategy  string  `mapstructure:"order_strategy"`   // 下单策略："GTC"（挂单等待成交）或 "FAK"（即刻市价成交，剩余取消）
 }
 
 // DefaultConfig 返回安全的默认 TradingConfig。
 func DefaultConfig() TradingConfig {
 	return TradingConfig{
-		Enabled:              false,
-		OutputPath:           "data/trades.jsonl",
-		StakePerSignal:       5.0,
-		MaxPrice:             0.30, // 最高允许价格（与 flip.max_entry_price 对齐，高盈亏比优先）
-		MaxDailyLoss:  10.0,
-		OrderStrategy: "GTC",
+		Enabled:        false,
+		OutputPath:     "data/trades.jsonl",
+		StakePerSignal: 5.0,
+		MaxPrice:       0.45, // 最高允许价格（与 flip.max_entry_price 对齐，高盈亏比优先）
+		MaxDailyLoss:   10.0,
+		OrderStrategy:  "GTC",
 	}
 }
 
@@ -84,11 +84,11 @@ type OrderRecord struct {
 type Position struct {
 	ConditionID      string    `json:"condition_id"`
 	TokenID          string    `json:"token_id"`
-	TokenSide        string    `json:"token_side"`        // "yes"/"no"
-	Shares           float64   `json:"shares"`            // 实际成交股数
-	AvgPrice         float64   `json:"avg_price"`         // 加权成交均价
-	CostUSDC         float64   `json:"cost_usdc"`         // 投入成本 = shares × avgPrice
-	OrderID          string    `json:"order_id"`          // 来源订单 ID
+	TokenSide        string    `json:"token_side"` // "yes"/"no"
+	Shares           float64   `json:"shares"`     // 实际成交股数
+	AvgPrice         float64   `json:"avg_price"`  // 加权成交均价
+	CostUSDC         float64   `json:"cost_usdc"`  // 投入成本 = shares × avgPrice
+	OrderID          string    `json:"order_id"`   // 来源订单 ID
 	OpenedAt         time.Time `json:"opened_at"`
 	SettledAt        time.Time `json:"settled_at,omitempty"`
 	Won              bool      `json:"won"`
@@ -107,6 +107,7 @@ type ExecInfo struct {
 	FilledShares float64 // 实际成交股数
 	AvgFillPrice float64 // 实际成交均价
 }
+
 // pendingGtcOrder 记录已提交但尚未完全成交的 GTC 限价单上下文，
 // 供 TradeMonitor 事件循环和周期末对账使用（仅内存，不持久化）。
 type pendingGtcOrder struct {
@@ -126,12 +127,12 @@ type pendingGtcOrder struct {
 }
 
 type ExecutionState struct {
-	Enabled          bool      `json:"enabled"`
-	DailyPnl         float64   `json:"daily_pnl"`
-	DailySignals     int       `json:"daily_signals"`
-	DailyLimitHit    bool      `json:"daily_limit_hit"`
-	CurrentCondition string    `json:"current_condition"`
-	Position       *Position        `json:"position,omitempty"` // 当前未结算持仓
-	PendingOrder   *pendingGtcOrder `json:"-"`                  // 当前未成交 GTC 挂单（仅内存）
-	LastSkipReason   string    `json:"last_skip_reason"`
+	Enabled          bool             `json:"enabled"`
+	DailyPnl         float64          `json:"daily_pnl"`
+	DailySignals     int              `json:"daily_signals"`
+	DailyLimitHit    bool             `json:"daily_limit_hit"`
+	CurrentCondition string           `json:"current_condition"`
+	Position         *Position        `json:"position,omitempty"` // 当前未结算持仓
+	PendingOrder     *pendingGtcOrder `json:"-"`                  // 当前未成交 GTC 挂单（仅内存）
+	LastSkipReason   string           `json:"last_skip_reason"`
 }
