@@ -267,7 +267,7 @@ def main():
     """)
 
     signals, total, active = run_backtest(events, cfg)
-    print_summary(signals, total, active)
+    print_summary(signals, total, active, events)
 
     # Compare with baseline
     base_signals, _, _ = run_backtest(events, base)

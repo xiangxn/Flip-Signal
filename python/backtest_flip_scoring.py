@@ -79,7 +79,7 @@ def main():
     signals, total_events, active_events = run_backtest(events, cfg)
 
     # ── 输出结果 ──
-    print_summary(signals, total_events, active_events)
+    print_summary(signals, total_events, active_events, events)
 
     if args.verbose and signals:
         print("\n逐笔信号:")

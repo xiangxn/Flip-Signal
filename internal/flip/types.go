@@ -118,7 +118,7 @@ func DefaultConfig() FlipConfig {
 		MaxRemainingSec:      260,    // 窗口有效期：剩余秒数 < 260s 的穿越才有效
 		PathEffOscillating:    0.7,   // 收紧到 0.7（原 0.8 太宽松，噪声大）
 		NoiseRatioOscillating: 1.5,   // 噪声比 >1.5 视为振荡
-		FlipsOscillating:      2,     // 收紧到 >2（原 >1 太宽松，假振荡多）
+		FlipsOscillating:      1,     // 2026-08-12 sweep: 1 比 2 多 6 笔优质信号，胜率不变 P&L 更高
 		HistWindowN:           18,    // 前 18 根 K 线（~1.5h）算平均振幅
 		RangeExpThreshold:     0.5,   // 振幅 <0.5 → BTC 没动但 PM 0.7+ → 过度自信
 		RangeExpMax:           1.5,   // 收紧到 1.5（原 2.0 太宽，真突破仍然通过了）

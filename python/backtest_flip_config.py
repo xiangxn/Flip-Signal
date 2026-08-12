@@ -8,7 +8,7 @@
 支持的市场: BTC, ETH
 
 各市场参数独立预设:
-  - DEFAULT_CONFIG     BTC 回测参数 (2026-08-12 优化: 胜率 50.9%, P&L +62, 盈亏比 2.3)
+  - DEFAULT_CONFIG     BTC 回测参数 (2026-08-12 sweep: flips>1, 胜率 50.4%, P&L +62.79, 盈亏比 2.3)
   - ETH_CONFIG         ETH 回测参数 (初始值与 BTC 相同，待独立调参)
 
 用法:
@@ -36,12 +36,12 @@ class FlipBacktestConfig:
     noise_ratio_oscillating: float = 1.5   # 不变
 
     # §2.4 翻转次数
-    flips_oscillating: int = 2             # 收紧到 >2 (原 >1 噪声太大)
+    flips_oscillating: int = 1             # 2026-08-12 sweep: 1 比 2 多 6 笔优质振荡信号，胜率不变 P&L 更高
 
     # §2.5 来回振荡综合判定: 三个条件需同时满足
     #   path_eff <= path_eff_oscillating AND
     #   noise_ratio > noise_ratio_oscillating AND
-    #   flips > flips_oscillating
+    #   flips > flips_oscillating (当前 >1 即 ≥2 次翻转)
 
     # §2.6 振幅扩张 (tick-independent: |price-open|/hist_avg_range)
     hist_window_N: int = 18              # 前 N 根 K 线 (~1.5小时, 最优)

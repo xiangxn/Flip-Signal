@@ -458,7 +458,8 @@ def run_backtest(events: list[dict],
 
 def print_summary(signals: list[FlipSignal],
                   total_events: int = 0,
-                  active_events: int = 0) -> None:
+                  active_events: int = 0,
+                  events: list[dict] | None = None) -> None:
     """打印回测汇总报告 (§3.3, §5)。"""
     if not signals:
         print("无信号。")
@@ -483,6 +484,24 @@ def print_summary(signals: list[FlipSignal],
     print("=" * 58)
     print("  复合评分版翻转信号回测 — 结果汇总")
     print("=" * 58)
+
+    # 数据日期跨度
+    from datetime import datetime, timezone
+    if events:
+        all_ts = [e["start_time"] for e in events if e.get("start_time")]
+        if all_ts:
+            ts_min, ts_max = min(all_ts), max(all_ts)
+            date_min = datetime.fromtimestamp(ts_min, tz=timezone.utc).strftime("%m-%d")
+            date_max = datetime.fromtimestamp(ts_max, tz=timezone.utc).strftime("%m-%d")
+            data_days = max((ts_max - ts_min) / 86400, 1)
+            print(f"  数据跨度:      {date_min} → {date_max} ({data_days:.0f} 天)")
+    elif signals:
+        t_min = min(s.event_time for s in signals)
+        t_max = max(s.event_time for s in signals)
+        date_min = datetime.fromtimestamp(t_min, tz=timezone.utc).strftime("%m-%d")
+        date_max = datetime.fromtimestamp(t_max, tz=timezone.utc).strftime("%m-%d")
+        print(f"  信号跨度:      {date_min} → {date_max}")
+
     if total_events:
         print(f"  总事件数:      {total_events:>5d}")
     if active_events:
