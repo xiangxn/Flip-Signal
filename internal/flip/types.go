@@ -10,97 +10,140 @@ package flip
 import "time"
 
 // FlipConfig 包含翻转信号检测的全部可调参数。
-// 默认值与 backtest_flip_config.py 完全一致（5s 数据标定）。
+// 默认值与 python/backtest_flip_config.py 一致，基于 5s 采样数据标定。
+// 当前参数为 2026-08-12 网格搜索优化结果：胜率 50.9%, P&L +62.40, 盈亏比 2.3。
 type FlipConfig struct {
-	// ── Layer 0: 前置条件 (§2.1) ──
-	TriggerThreshold     float64 `mapstructure:"trigger_threshold"`      // PM price > this triggers detection (0.7)
-	AllowRetryCrossings  bool    `mapstructure:"allow_retry_crossings"`  // Multi-crossing: retry on every rising edge until a bet is placed (true)
-	MinPreSnaps          int     `mapstructure:"min_pre_snaps"`          // Minimum snapshots before crossing (5)
-	MaxRemainingSec      int     `mapstructure:"max_remaining_sec"`      // Only crossings with remaining_sec < this are valid (260, window too early = insufficient BTC path)
+	// ── Layer 0: 触发前置条件 (§2.1) ──
 
-	// ── 振荡检测（三条件必须同时满足）—— Formula A ──
-	PathEffOscillating    float64 `mapstructure:"path_eff_oscillating"`     // path_eff ≤ this → candidate (0.8, was 0.5)
-	NoiseRatioOscillating float64 `mapstructure:"noise_ratio_oscillating"` // noise_ratio > this → candidate (1.5, was 5.0)
-	FlipsOscillating      int     `mapstructure:"flips_oscillating"`       // flips > this → candidate (1, was 2)
+	// PM 一侧价格超过此阈值即触发穿越检测
+	TriggerThreshold float64 `mapstructure:"trigger_threshold"`
+	// 多穿越重试：为 true 时，每个向上穿越 0.7 的上升沿都尝试评分，首个通过者获胜
+	AllowRetryCrossings bool `mapstructure:"allow_retry_crossings"`
+	// 穿越时刻之前至少需要的 snapshot 数量（确保有足够的 BTC 价格路径）
+	MinPreSnaps int `mapstructure:"min_pre_snaps"`
+	// 窗口有效期：仅 remaining_sec < 此值的穿越才有效（太早触发时 BTC 路径太短，不可靠）
+	MaxRemainingSec int `mapstructure:"max_remaining_sec"`
 
-	// ── 振幅扩张（tick 无关，基于 hist_avg_range）──
-	HistWindowN       int     `mapstructure:"hist_window_n"`        // Historical kline window size (18)
-	RangeExpThreshold float64 `mapstructure:"range_exp_threshold"`  // < this → BTC barely moved, PM overconfident (0.5)
-	RangeExpMax       float64 `mapstructure:"range_exp_max"`        // ≥ this → F0 veto, real breakout (2.0)
+	// ── 来回振荡判定（三条件必须同时满足）──
 
-	// ── 对面确认 (§2.7) —— Formula A 三级评分 ──
-	ConfirmDelayTicks  int     `mapstructure:"confirm_delay_ticks"`  // Ticks to wait for confirmation (1 tick = 5s)
-	ODHardFilter       float64 `mapstructure:"od_hard_filter"`       // other_delta hard lower bound, -999 = disabled (Formula A: scoring handles it)
-	OtherDeltaVStrong  float64 `mapstructure:"other_delta_vstrong"`  // > this → +3 points (0.05, new top tier)
-	OtherDeltaStrong   float64 `mapstructure:"other_delta_strong"`   // > this → +2 points (0.02, was 0.03)
-	OtherDeltaWeak     float64 `mapstructure:"other_delta_weak"`     // > this → +1 points (0.01, was +2)
+	// 路径效率 ≤ 此值 → 振荡候选。~1.0 为单边趋势, ~0.0 为来回振荡
+	PathEffOscillating float64 `mapstructure:"path_eff_oscillating"`
+	// 噪声比 > 此值 → 振荡候选。总路径长度 / 净位移，越大越"碎"
+	NoiseRatioOscillating float64 `mapstructure:"noise_ratio_oscillating"`
+	// 方向翻转次数 > 此值 → 振荡候选。BTC 价格方向改变的次数
+	FlipsOscillating int `mapstructure:"flips_oscillating"`
 
-	// ── BTC 位置 (§2.8) —— Formula A 放宽 ──
-	BTCPosMax float64 `mapstructure:"btc_pos_max"` // NO>0.7: btc_pos > this → BTC diverges from PM → +1 (0.1)
-	BTCPosMin float64 `mapstructure:"btc_pos_min"` // YES>0.7: btc_pos < this → BTC diverges from PM → +1 (-0.1)
+	// ── 振幅扩张（tick 无关，基于前 N 根 K 线平均振幅）──
 
-	// ── T=0 quality vetoes（硬编码→可配置）──
-	PathEffVetoMin    float64 `mapstructure:"path_eff_veto_min"`    // path_eff < this → veto at crossing (0.4, trend too unclear)
-	NoiseRatioVetoMax float64 `mapstructure:"noise_ratio_veto_max"` // noise_ratio > this → veto at crossing (3.0, price too unstable)
+	// 历史 K 线窗口大小，用于计算平均振幅
+	HistWindowN int `mapstructure:"hist_window_n"`
+	// 穿越时 BTC 振幅 < 此值 → BTC 没怎么动但 PM 已经 0.7+，过度自信 → +2 分
+	RangeExpThreshold float64 `mapstructure:"range_exp_threshold"`
+	// 穿越时 BTC 振幅 ≥ 此值 → 真突破（BTC 确实大幅移动了），一票否决
+	RangeExpMax float64 `mapstructure:"range_exp_max"`
 
-	// ── 入场价格 (§2.9) —— Formula A 重新激活 ──
-	EntryCheapStrong float64 `mapstructure:"entry_cheap_strong"` // < this → +1 point  (0.20)
-	EntryCheapWeak   float64 `mapstructure:"entry_cheap_weak"`   // < this → +1 point  (0.25, elif — no stacking)
+	// ── 对面价格确认（T+N ticks 后观察对侧变化）──
 
-	// ── 评分权重 (§2.10) —— Formula A ──
-	WOtherD5VStrong int `mapstructure:"w_other_delta_vstrong"` // Opposite huge move  (3, new)
-	WOtherD5Strong  int `mapstructure:"w_other_delta_strong"`  // Opposite big move    (2, was 4)
-	WOtherD5Weak    int `mapstructure:"w_other_delta_weak"`    // Opposite small move  (1, was 2)
-	WOscillating    int `mapstructure:"w_oscillating"`         // Oscillation bonus    (2, was 1)
-	WCheapEntryStr  int `mapstructure:"w_cheap_entry_strong"`  // Very cheap entry     (1, was 2, was disabled)
-	WCheapEntryWeak int `mapstructure:"w_cheap_entry_weak"`    // Cheap entry          (1)
-	WRangeExpansion int `mapstructure:"w_range_expansion"`     // Range too small      (2)
-	WBtcExtreme     int `mapstructure:"w_btc_extreme"`         // BTC extreme pos      (1)
+	// 确认等待 tick 数：穿越后等 N 个 tick 再取对面价格（1 tick ≈ 5s）
+	ConfirmDelayTicks int `mapstructure:"confirm_delay_ticks"`
+	// other_delta 硬过滤下限，-999 = 禁用（由评分权重处理）
+	ODHardFilter float64 `mapstructure:"od_hard_filter"`
+	// 对面涨幅 > 此值 → 对面强烈回归 → +3 分
+	OtherDeltaVStrong float64 `mapstructure:"other_delta_vstrong"`
+	// 对面涨幅 > 此值 → 对面明显回归 → +2 分
+	OtherDeltaStrong float64 `mapstructure:"other_delta_strong"`
+	// 对面涨幅 > 此值 → 对面小幅回归 → +1 分
+	OtherDeltaWeak float64 `mapstructure:"other_delta_weak"`
 
-	// ── 入场阈值 (§2.10) ──
-	ScoreEntry int `mapstructure:"score_entry"` // ≥ this → open 1 share (5)
-	ScoreAdd   int `mapstructure:"score_add"`   // ≥ this → add 2 shares (99 = disabled)
+	// ── BTC 位置 vs Open（以历史平均振幅为单位，tick 无关）──
+
+	// NO 侧穿越时：btc_pos > 此值 → BTC 涨但 PM 看跌（背离），flip edge → +1 分
+	BTCPosMax float64 `mapstructure:"btc_pos_max"`
+	// YES 侧穿越时：btc_pos < 此值 → BTC 跌但 PM 看涨（背离），flip edge → +1 分
+	BTCPosMin float64 `mapstructure:"btc_pos_min"`
+
+	// ── T=0 质量硬过滤 ──
+
+	// 路径效率 < 此值 → 趋势极不明确，穿越时直接否决
+	PathEffVetoMin float64 `mapstructure:"path_eff_veto_min"`
+	// 噪声比 > 此值 → 价格极度不稳定，穿越时直接否决
+	NoiseRatioVetoMax float64 `mapstructure:"noise_ratio_veto_max"`
+
+	// ── 入场价格折扣 ──
+
+	// 对侧价格 < 此值 → 极低价入场 → +1 分
+	EntryCheapStrong float64 `mapstructure:"entry_cheap_strong"`
+	// 对侧价格 < 此值 → 低价入场 → +1 分（elif 不叠加）
+	EntryCheapWeak float64 `mapstructure:"entry_cheap_weak"`
+
+	// ── 评分权重 ──
+
+	// 对面大涨权重 (od > vstrong)
+	WOtherD5VStrong int `mapstructure:"w_other_delta_vstrong"`
+	// 对面中涨权重 (od > strong)
+	WOtherD5Strong int `mapstructure:"w_other_delta_strong"`
+	// 对面小涨权重 (od > weak)
+	WOtherD5Weak int `mapstructure:"w_other_delta_weak"`
+	// 来回振荡权重（降低：振荡信号胜率 31% 远低于趋势 45%）
+	WOscillating int `mapstructure:"w_oscillating"`
+	// 极低价入场权重
+	WCheapEntryStr int `mapstructure:"w_cheap_entry_strong"`
+	// 低价入场权重
+	WCheapEntryWeak int `mapstructure:"w_cheap_entry_weak"`
+	// 振幅偏小权重（BTC 没动但 PM 0.7+）
+	WRangeExpansion int `mapstructure:"w_range_expansion"`
+	// BTC 背离权重（BTC 与 PM 方向相反）
+	WBtcExtreme int `mapstructure:"w_btc_extreme"`
+
+	// ── 入场阈值 ──
+
+	// 复合评分 ≥ 此值 → 开仓 1 share
+	ScoreEntry int `mapstructure:"score_entry"`
+	// 复合评分 ≥ 此值 → 加仓（99 = 禁用，5s 数据下评分精度不足以支持加仓）
+	ScoreAdd int `mapstructure:"score_add"`
 
 	// ── 订单簿延迟风控 ──
-	MaxLatencyMs int64 `mapstructure:"max_latency_ms"` // 订单簿延迟超过此值（毫秒）则信号不可信，0=禁用 (0)
+
+	// 订单簿数据延迟超过此值（毫秒）则信号不可信，0 = 禁用
+	MaxLatencyMs int64 `mapstructure:"max_latency_ms"`
 }
 
-// DefaultConfig 返回与 backtest_flip_config.py Formula A 一致的配置。
-// 回测结果: 34 signals, 52.9% WR, +10.09 P&L, PF=2.7（lab 数据）。
+// DefaultConfig 返回翻转信号检测的默认参数配置。
+// 2026-08-12 网格搜索优化：胜率 50.9%, P&L +62.40, 盈亏比 2.3, 日均 37 信号。
 func DefaultConfig() FlipConfig {
 	return FlipConfig{
-		TriggerThreshold:     0.7,
-		AllowRetryCrossings:  true, // Multi-crossing: retry on every rising edge
-		MinPreSnaps:          5,
-		MaxRemainingSec:      260, // §2.1: crossings before this are invalid (too early, BTC path too short)
-		PathEffOscillating:    0.8,  // Formula A: relaxed from 0.5
-		NoiseRatioOscillating: 1.5,  // Formula A: relaxed from 5.0 (never fired)
-		FlipsOscillating:      1,    // Formula A: relaxed from 2
-		HistWindowN:           18,
-		RangeExpThreshold:     0.5,
-		RangeExpMax:           2.0,
-		ConfirmDelayTicks:     1,     // 1 tick = 5s
-		ODHardFilter:          -999.0, // Formula A: disabled, scoring handles it
-		OtherDeltaVStrong:     0.05,   // Formula A: new top tier (>0.05 → +3)
-		OtherDeltaStrong:      0.02,   // Formula A: was 0.03 +4
-		OtherDeltaWeak:        0.01,   // Formula A: was +2
-		PathEffVetoMin:        0.4,  // path_eff below this → trend too unclear, veto
-		NoiseRatioVetoMax:     3.0,  // noise_ratio above this → price too unstable, veto
-		BTCPosMax:             0.1,  // Formula A: widened from 0.5
-		BTCPosMin:             -0.1, // Formula A: widened from -0.5
-		EntryCheapStrong:      0.20, // Formula A: re-activated (was 0=disabled)
-		EntryCheapWeak:        0.25,
-		WOtherD5VStrong:       3,      // Formula A: new weight
-		WOtherD5Strong:        2,      // Formula A: was 4
-		WOtherD5Weak:          1,      // Formula A: was 2
-		WOscillating:          2,      // Formula A: was 1
-		WCheapEntryStr:        1,      // Formula A: was 2 (was disabled)
-		WCheapEntryWeak:       1,
-		WRangeExpansion:       2,
-		WBtcExtreme:           1,
-		ScoreEntry:            5,
-		ScoreAdd:              99, // disabled (5s data scoring not fine-grained enough)
-		MaxLatencyMs:          0,  // 0=disabled, 建议值 300ms
+		TriggerThreshold:     0.7,    // PM 一侧 >0.7 触发
+		AllowRetryCrossings:  true,   // 多穿越重试：每个上升沿都尝试评分
+		MinPreSnaps:          5,      // 穿越前至少 5 个 snapshot
+		MaxRemainingSec:      260,    // 窗口有效期：剩余秒数 < 260s 的穿越才有效
+		PathEffOscillating:    0.7,   // 收紧到 0.7（原 0.8 太宽松，噪声大）
+		NoiseRatioOscillating: 1.5,   // 噪声比 >1.5 视为振荡
+		FlipsOscillating:      2,     // 收紧到 >2（原 >1 太宽松，假振荡多）
+		HistWindowN:           18,    // 前 18 根 K 线（~1.5h）算平均振幅
+		RangeExpThreshold:     0.5,   // 振幅 <0.5 → BTC 没动但 PM 0.7+ → 过度自信
+		RangeExpMax:           1.5,   // 收紧到 1.5（原 2.0 太宽，真突破仍然通过了）
+		ConfirmDelayTicks:     5,     // 从 1 改为 5（25s）：给对面价格足够时间确认反弹
+		ODHardFilter:          -999.0, // 禁用硬过滤，由评分权重处理
+		OtherDeltaVStrong:     0.05,  // 对面涨 >0.05 → +3 分
+		OtherDeltaStrong:      0.02,  // 对面涨 >0.02 → +2 分
+		OtherDeltaWeak:        0.01,  // 对面涨 >0.01 → +1 分
+		PathEffVetoMin:        0.4,   // 路径效率 <0.4 → 趋势极不明确，否决
+		NoiseRatioVetoMax:     3.0,   // 噪声比 >3.0 → 价格极不稳定，否决
+		BTCPosMax:             0.1,   // NO>0.7: BTC 涨 >0.1 倍振幅 → 背离 → +1
+		BTCPosMin:             -0.1,  // YES>0.7: BTC 跌 >0.1 倍振幅 → 背离 → +1
+		EntryCheapStrong:      0.20,  // 对侧 <0.20 → 极低价入场 → +1
+		EntryCheapWeak:        0.25,  // 对侧 <0.25 → 低价入场 → +1（elif 不叠加）
+		WOtherD5VStrong:       3,     // 对面大涨权重
+		WOtherD5Strong:        2,     // 对面中涨权重
+		WOtherD5Weak:          1,     // 对面小涨权重
+		WOscillating:          1,     // 降低到 1（原 2）：振荡信号胜率仅 31%，远低于趋势 45%
+		WCheapEntryStr:        1,     // 极低价入场权重
+		WCheapEntryWeak:       1,     // 低价入场权重
+		WRangeExpansion:       2,     // 振幅偏小权重
+		WBtcExtreme:           1,     // BTC 背离权重
+		ScoreEntry:            5,     // ≥5 分开仓
+		ScoreAdd:              99,    // 加仓禁用（5s 评分精度不够）
+		MaxLatencyMs:          0,     // 0=禁用，实盘建议 300ms
 	}
 }
 

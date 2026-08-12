@@ -8,7 +8,7 @@
 支持的市场: BTC, ETH
 
 各市场参数独立预设:
-  - DEFAULT_CONFIG     BTC 回测参数 (Formula A 优化值)
+  - DEFAULT_CONFIG     BTC 回测参数 (2026-08-12 优化: 胜率 50.9%, P&L +62, 盈亏比 2.3)
   - ETH_CONFIG         ETH 回测参数 (初始值与 BTC 相同，待独立调参)
 
 用法:
@@ -30,13 +30,13 @@ class FlipBacktestConfig:
     # ── T+0 实时特征 ──
 
     # §2.2 路径效率 — 振荡判定核心
-    path_eff_oscillating: float = 0.8      # Formula A: 放宽到 0.8 (原 0.5 过严)
+    path_eff_oscillating: float = 0.7      # 收紧到 0.7 (原 0.8 太宽, 胜率不足)
 
     # §2.3 噪声比
-    noise_ratio_oscillating: float = 1.5   # Formula A: 放宽到 1.5 (原 5.0 从不触发)
+    noise_ratio_oscillating: float = 1.5   # 不变
 
     # §2.4 翻转次数
-    flips_oscillating: int = 1             # Formula A: 放宽到 >1 (原 >2)
+    flips_oscillating: int = 2             # 收紧到 >2 (原 >1 噪声太大)
 
     # §2.5 来回振荡综合判定: 三个条件需同时满足
     #   path_eff <= path_eff_oscillating AND
@@ -46,10 +46,10 @@ class FlipBacktestConfig:
     # §2.6 振幅扩张 (tick-independent: |price-open|/hist_avg_range)
     hist_window_N: int = 18              # 前 N 根 K 线 (~1.5小时, 最优)
     range_exp_threshold: float = 0.5     # 振幅 < 此值 → BTC没动, PM过度自信 → +2
-    range_exp_max: float = 2.0           # F0: 振幅 ≥ 此值 → 真突破, 一票否决
+    range_exp_max: float = 1.5           # F0: 收紧到 1.5 (原 2.0 太宽, 真突破仍然通过了)
 
     # §2.7 对面价格确认 (T+5s 特征) — Formula A: 三档评分
-    confirm_delay_ticks: int = 1         # 确认等待 tick 数 (5s 数据下 1 tick = 5s)
+    confirm_delay_ticks: int = 5         # 确认等待 tick 数 → 25s (原 1=5s, 5s 数据下对面价格来不及反应)
     od_hard_filter: float = -999.0       # other_delta 硬过滤下限, -999 = 禁用 (Formula A: 由评分权重处理)
     other_delta_vstrong: float = 0.05    # 对面涨幅 > 此值 → +3 分 (原 +4)
     other_delta_strong: float = 0.02     # 对面涨幅 > 此值 → +2 分 (原 0.03, +4)
@@ -68,7 +68,7 @@ class FlipBacktestConfig:
     w_other_d5_vstrong: int = 3          # 对面大涨 (od > 0.05)
     w_other_d5_strong: int = 2           # 对面中涨 (od > 0.02)
     w_other_d5_weak: int = 1             # 对面小涨 (od > 0.01)
-    w_oscillating: int = 2               # 来回振荡 (Formula A: +2)
+    w_oscillating: int = 1               # 来回振荡 (降低到 +1: 振荡信号胜率 31% 远低于趋势 45%)
     w_cheap_entry_strong: int = 1        # 极低价入场 (Formula A: 重新激活)
     w_cheap_entry_weak: int = 1          # 低价入场
     w_range_expansion: int = 2           # 振幅扩张
@@ -80,5 +80,5 @@ class FlipBacktestConfig:
 
 
 # 默认配置实例
-DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 回测参数 (Formula A 优化值)
+DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 回测参数 (2026-08-12 sweep 优化: WR 50.9%, P&L +62)
 ETH_CONFIG = FlipBacktestConfig()       # ETH 回测参数 (初始值与 BTC 相同，待独立调参)
