@@ -14,6 +14,10 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
+// ExecUpdateCallback 成交更新回调：当 TradeMonitor WS 收到实时成交数据时调用，
+// 用于即时同步成交价到 FlipRecorder → Dashboard，无需等待周期结束。
+type ExecUpdateCallback func(conditionID, status string, filledShares, avgFillPrice float64)
+
 // Trader 是实盘交易执行器。
 //
 // 并发模型：mu (sync.RWMutex) 保护所有状态字段。
@@ -31,6 +35,8 @@ type Trader struct {
 	positions []Position
 	recorder  *TradeRecorder
 	liveOK    bool // Enable() 调用后为 true
+
+	onExecUpdate ExecUpdateCallback // WS 成交实时回调 → FlipRecorder.UpdateExecution
 }
 
 // NewTrader 构造 Trader。client 为 nil 时仅纸面可用。
@@ -109,6 +115,14 @@ func (t *Trader) Enabled() bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 	return t.exec.Enabled
+}
+
+// SetExecUpdateCallback 设置成交更新回调，每次 TradeMonitor WS 收到实时成交数据时触发。
+// 用于即时同步成交价到 FlipRecorder → Dashboard，无需等待周期结束。
+func (t *Trader) SetExecUpdateCallback(cb ExecUpdateCallback) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.onExecUpdate = cb
 }
 
 // ── 市场周期钩子 ──
@@ -546,6 +560,10 @@ func (t *Trader) processTrade(trade *sdkModel.WSTrade) {
 		t.exec.Position.Shares = pending.FilledShares
 		t.exec.Position.AvgPrice = avgPrice
 		t.exec.Position.CostUSDC = pending.TotalCost
+		// 实时回填 FlipRecorder → Dashboard（无需等待周期结束）
+		if t.onExecUpdate != nil {
+			t.onExecUpdate(pending.ConditionID, "filled", pending.FilledShares, avgPrice)
+		}
 	}
 }
 
@@ -615,6 +633,11 @@ func (t *Trader) processOrder(order *sdkModel.WSOrder) {
 		} else {
 			log.Printf("[Trading] ✅ GTC 订单已完全成交: orderID=%s matched=%.1f avgPrice=%.4f",
 				order.Id, order.SizeMatched, pending.Rec.AvgFillPrice)
+		}
+	// 实时回填 FlipRecorder → Dashboard（无需等待周期结束）
+		if t.onExecUpdate != nil && pending.FilledShares > 0 {
+			avgPrice := pending.TotalCost / pending.FilledShares
+			t.onExecUpdate(pending.ConditionID, "filled", pending.FilledShares, avgPrice)
 		}
 	case "CANCELED":
 		pending.Rec.State = OrderFailed

@@ -53,11 +53,11 @@ func TestFlipRecorder_RecordAndResolve_Win(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 JSONL lines, got %d: %q", len(lines), data)
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 JSONL line (combined signal), got %d: %q", len(lines), data)
 	}
 
-	// First line: signal
+	// 单行包含完整信号（含结算字段）
 	var readSig FlipSignal
 	if err := json.Unmarshal([]byte(lines[0]), &readSig); err != nil {
 		t.Fatalf("unmarshal signal: %v", err)
@@ -65,18 +65,12 @@ func TestFlipRecorder_RecordAndResolve_Win(t *testing.T) {
 	if readSig.Side != "yes" || readSig.EntryPrice != 0.15 {
 		t.Errorf("signal mismatch: %+v", readSig)
 	}
-
-	// Second line: resolution
-	var res resolutionRecord
-	if err := json.Unmarshal([]byte(lines[1]), &res); err != nil {
-		t.Fatalf("unmarshal resolution: %v", err)
-	}
-	if res.Type != "resolution" || !res.Won {
-		t.Errorf("resolution mismatch: won=%v pnl=%.4f", res.Won, res.PnL)
+	if !readSig.Won {
+		t.Errorf("expected won=true, got %v", readSig.Won)
 	}
 	// PnL = (1.0 - 0.15) * 1 = 0.85
-	if res.PnL < 0.84 || res.PnL > 0.86 {
-		t.Errorf("expected PnL ~0.85, got %.4f", res.PnL)
+	if readSig.PnL < 0.84 || readSig.PnL > 0.86 {
+		t.Errorf("expected PnL ~0.85, got %.4f", readSig.PnL)
 	}
 }
 
@@ -121,20 +115,20 @@ func TestFlipRecorder_RecordAndResolve_Loss(t *testing.T) {
 		t.Fatalf("ReadFile: %v", err)
 	}
 	lines := strings.Split(strings.TrimSpace(string(data)), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("expected 2 JSONL lines, got %d", len(lines))
+	if len(lines) != 1 {
+		t.Fatalf("expected 1 JSONL line, got %d", len(lines))
 	}
 
-	var res resolutionRecord
-	if err := json.Unmarshal([]byte(lines[1]), &res); err != nil {
-		t.Fatalf("unmarshal resolution: %v", err)
+	var readSig FlipSignal
+	if err := json.Unmarshal([]byte(lines[0]), &readSig); err != nil {
+		t.Fatalf("unmarshal signal: %v", err)
 	}
-	if res.Won {
+	if readSig.Won {
 		t.Error("expected loss")
 	}
 	// PnL = (0.0 - 0.22) * 2 = -0.44
-	if res.PnL > -0.43 || res.PnL < -0.45 {
-		t.Errorf("expected PnL ~-0.44, got %.4f", res.PnL)
+	if readSig.PnL > -0.43 || readSig.PnL < -0.45 {
+		t.Errorf("expected PnL ~-0.44, got %.4f", readSig.PnL)
 	}
 }
 
@@ -248,7 +242,7 @@ func TestFlipRecorder_FailedSignal(t *testing.T) {
 		t.Errorf("failed signal PnL should be 0, got %.4f", cumPnl)
 	}
 
-	// Verify resolution record in file
+	// 第二个 failed 信号：方向错误
 	sig2 := &FlipSignal{
 		ConditionID:  "0xfail2",
 		Side:         "no",

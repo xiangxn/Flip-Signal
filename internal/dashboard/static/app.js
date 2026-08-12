@@ -316,7 +316,7 @@ async function fetchSignals() {
         <td>${t}</td>
         <td class="${sideCls}">${s.side.toUpperCase()}</td>
         <td class="${scoreCls}">${s.score}</td>
-        <td>${s.entry_price.toFixed(3)}</td>
+        <td>${s.exec_status === 'filled' ? s.avg_fill_price.toFixed(3) : s.entry_price.toFixed(3)}</td>
         <td>${(s.shares || 0).toFixed(2)}</td>
         <td>${execHtml}</td>
         <td>${s.path_eff?.toFixed(2) || '-'}</td>

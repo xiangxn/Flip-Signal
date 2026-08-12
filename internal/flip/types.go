@@ -172,9 +172,11 @@ type FlipSignal struct {
 	RemainingSec int       `json:"remaining_sec"`
 
 	// 执行结果（Trader 回填）
-	ExecStatus   string  `json:"exec_status"`    // "pending" | "filled" | "failed"
-	FilledShares float64 `json:"filled_shares"`  // 实际成交股数（failed 时为 0）
-	AvgFillPrice float64 `json:"avg_fill_price"` // 实际成交均价（纸面 = entryPrice，实盘 = CLOB 真实价）
+	ExecStatus   string    `json:"exec_status"`             // "pending" | "filled" | "failed"
+	FilledAt     time.Time `json:"filled_at,omitempty"`     // 成交确认时间（UTC）
+	FilledShares float64   `json:"filled_shares"`           // 实际成交股数（failed 时为 0）
+	AvgFillPrice float64   `json:"avg_fill_price"`          // 实际成交均价（纸面 = entryPrice，实盘 = CLOB 真实价）
+	SlippageBps  float64   `json:"slippage_bps,omitempty"`  // entry → fill 滑点（bp），正=不利
 
 	// 特征详情（分析/调试用）
 	PathEff        float64 `json:"path_eff"`
@@ -187,8 +189,9 @@ type FlipSignal struct {
 	OtherDelta     float64 `json:"other_delta"`
 
 	// 结算时填充
-	Won bool    `json:"won"`
-	PnL float64 `json:"pnl"`
+	Won        bool      `json:"won"`
+	PnL        float64   `json:"pnl"`
+	ResolvedAt time.Time `json:"resolved_at,omitempty"` // 结算时间（UTC）
 
 	// 数据质量
 	OrderBookLatency int64 `json:"order_book_latency,omitempty"` // 订单簿最大延迟（毫秒），诊断用

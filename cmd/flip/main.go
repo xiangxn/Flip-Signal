@@ -269,6 +269,13 @@ func main() {
 		}()
 	}
 
+	// 设置成交实时回调：WS 收到成交数据 → 即时同步 FlipRecorder → Dashboard
+	if trader != nil {
+		trader.SetExecUpdateCallback(func(conditionID, status string, filledShares, avgFillPrice float64) {
+			flipRecorder.UpdateExecution(conditionID, status, filledShares, avgFillPrice)
+		})
+	}
+
 	// 可选：HTTP Dashboard
 	mode := "paper"
 	if trader != nil && trader.Enabled() {

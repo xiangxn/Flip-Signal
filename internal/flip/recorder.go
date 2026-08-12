@@ -6,15 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
-// FlipRecorder 将翻转交易信号写入 JSONL 文件，用于纸面交易分析。
-// 信号即时写入；结算结果（won/pnl）在市场结算时追加为第二行。
+// FlipRecorder 将翻转交易信号写入 JSONL 文件。
+//
+// 写入策略：信号检测和成交确认阶段仅在内存中缓存（pending map），
+// 市场结算时一次性写入一条完整 JSON 行，包含检测时间、成交时间、结算时间。
+// 崩溃恢复：Close() 会将未结算信号刷入文件（部分字段为空）。
 type FlipRecorder struct {
 	mu       sync.Mutex
 	file     *os.File
-	pending  map[string]*FlipSignal // conditionID → signal
-	resolved []*FlipSignal          // all resolved signals (for dashboard)
+	pending  map[string]*FlipSignal // conditionID → signal（内存缓存）
+	resolved []*FlipSignal          // 已结算信号（Dashboard 历史查询）
 }
 
 // NewFlipRecorder 创建追加写入指定 JSONL 文件路径的 recorder。
@@ -35,31 +39,20 @@ func NewFlipRecorder(path string) (*FlipRecorder, error) {
 	}, nil
 }
 
-// RecordSignal 写入信号记录（不含 won/pnl）并暂存以待结算。
+// RecordSignal 暂存信号到内存（不写文件，等 Resolve 时一并写出）。
 // 每个 conditionID 仅保留第一个信号。
 func (r *FlipRecorder) RecordSignal(sig *FlipSignal) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 暂存以待结算 —— 重复时覆盖
 	r.pending[sig.ConditionID] = sig
-
-	data, err := json.Marshal(sig)
-	if err != nil {
-		return fmt.Errorf("marshal signal: %w", err)
-	}
-	if _, err := r.file.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("write signal: %w", err)
-	}
-
 	return nil
 }
 
-// UpdateExecution 回填信号的执行结果（Trader 调用）。
+// UpdateExecution 回填信号的执行结果到内存（Trader 调用）。
 //
-//	execStatus: "filled" 或 "failed"
-//	filledShares: 实际成交股数（failed 时为 0）
-//	avgFillPrice: 实际成交均价（failed 时为 0）
+// 首次变为 "filled" 时记录 FilledAt 时间戳和滑点。
+// 不写文件 —— 完整记录在 Resolve 时一次性写出。
 func (r *FlipRecorder) UpdateExecution(conditionID, execStatus string, filledShares, avgFillPrice float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -68,36 +61,37 @@ func (r *FlipRecorder) UpdateExecution(conditionID, execStatus string, filledSha
 	if !ok {
 		return
 	}
+
+	wasFilled := sig.ExecStatus == "filled"
 	sig.ExecStatus = execStatus
 	sig.FilledShares = filledShares
 	sig.AvgFillPrice = avgFillPrice
 
-	// 成交后同步 Shares 为实际成交股数，确保 Dashboard 显示与 Polymarket 持仓一致。
-	// 实盘路径：订单按 maxPrice（含滑点）计算 size，与 sig.Shares（按 entryPrice 计算）存在偏差；
-	// 纸面路径：entryPrice 即成交价，两者一致，此更新为无操作。
+	// 成交后同步 Shares 为实际成交股数，确保 Dashboard 显示与 Polymarket 持仓一致
 	if execStatus == "filled" && filledShares > 0 {
 		sig.Shares = filledShares
 	}
+
+	// 首次成交：记录时间戳和滑点
+	if execStatus == "filled" && !wasFilled && filledShares > 0 {
+		sig.FilledAt = time.Now().UTC()
+		sig.SlippageBps = calcSlippageBps(sig.EntryPrice, avgFillPrice)
+	}
 }
 
-// Resolve 计算待结算信号的 won/pnl 并写入结算记录。
+// Resolve 结算信号：计算 won/pnl，写入一条完整 JSONL 行，移入 resolved。
 // outcome 遵循 lab.Event.Outcome: 0=Up, 1=Down。
-//
-// 胜负判定与执行状态无关（信号方向正确即 Won=true）。
-// PnL 仅在 execStatus=="filled" 时计算，failed 信号 PnL=0。
 func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	sig, ok := r.pending[conditionID]
 	if !ok {
-		return nil // no signal for this market, nothing to do
+		return nil
 	}
 	delete(r.pending, conditionID)
 
-	// 胜负判定（与执行状态无关，反映信号方向准确度）：
-	//   side=="yes" → YES>0.7, 买 NO（赌 DOWN）→ outcome==1（Down）时赢
-	//   side=="no"  → NO>0.7, 买 YES（赌 UP）→ outcome==0（Up）时赢
+	// 胜负判定
 	var won bool
 	if sig.Side == "yes" {
 		won = outcome == 1 // DOWN wins
@@ -114,47 +108,32 @@ func (r *FlipRecorder) Resolve(conditionID string, outcome int) error {
 			pnl = -sig.FilledShares * sig.AvgFillPrice
 		}
 	}
-	// failed / 未执行 → pnl = 0
 
-	pnlRounded := round4(pnl)
-
-	// 回写到信号对象，供 Dashboard 统计
 	sig.Won = won
-	sig.PnL = pnlRounded
+	sig.PnL = round4(pnl)
+	sig.ResolvedAt = time.Now().UTC()
 
 	// 保存已结算信号，供 Dashboard 历史查询
 	r.resolved = append(r.resolved, sig)
 
-	rec := resolutionRecord{
-		Type:         "resolution",
-		ConditionID:  conditionID,
-		Side:         sig.Side,
-		EntryPrice:   sig.EntryPrice,
-		Shares:       sig.Shares,
-		ExecStatus:   sig.ExecStatus,
-		FilledShares: sig.FilledShares,
-		AvgFillPrice: sig.AvgFillPrice,
-		Won:          won,
-		PnL:          pnlRounded,
-	}
-
-	data, err := json.Marshal(rec)
+	// 写入一条完整 JSONL 行
+	data, err := json.Marshal(sig)
 	if err != nil {
-		return fmt.Errorf("marshal resolution: %w", err)
+		return fmt.Errorf("marshal signal: %w", err)
 	}
 	if _, err := r.file.Write(append(data, '\n')); err != nil {
-		return fmt.Errorf("write resolution: %w", err)
+		return fmt.Errorf("write signal: %w", err)
 	}
 
 	return nil
 }
 
-// Close 刷新待结算信号并关闭文件。
+// Close 将未结算信号刷入文件后关闭。
 func (r *FlipRecorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// 写入任何未结算信号（正常运行中不应出现）
+	// 写入未结算信号（部分字段为空，用于崩溃恢复诊断）
 	for _, sig := range r.pending {
 		data, _ := json.Marshal(sig)
 		r.file.Write(append(data, '\n'))
@@ -163,18 +142,13 @@ func (r *FlipRecorder) Close() error {
 	return r.file.Close()
 }
 
-// resolutionRecord 是市场结算时追加的 JSON 行。
-type resolutionRecord struct {
-	Type         string  `json:"type"`
-	ConditionID  string  `json:"condition_id"`
-	Side         string  `json:"side"`
-	EntryPrice   float64 `json:"entry_price"`
-	Shares       float64 `json:"shares"`
-	ExecStatus   string  `json:"exec_status"`
-	FilledShares float64 `json:"filled_shares"`
-	AvgFillPrice float64 `json:"avg_fill_price"`
-	Won          bool    `json:"won"`
-	PnL          float64 `json:"pnl"`
+// calcSlippageBps 计算信号价到成交价的滑点（bp）。
+// 正数 = 成交价高于信号价（不利），负数 = 成交价低于信号价（有利）。
+func calcSlippageBps(entryPrice, avgFillPrice float64) float64 {
+	if entryPrice <= 0 {
+		return 0
+	}
+	return (avgFillPrice - entryPrice) / entryPrice * 10000
 }
 
 func round4(v float64) float64 {
@@ -186,7 +160,7 @@ func round4(v float64) float64 {
 
 // ── Dashboard 访问器 ──
 
-// PendingSignals 返回所有待结算（未结算）信号的副本。
+// PendingSignals 返回所有待结算信号的副本。
 func (r *FlipRecorder) PendingSignals() []*FlipSignal {
 	r.mu.Lock()
 	defer r.mu.Unlock()
