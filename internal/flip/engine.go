@@ -162,9 +162,13 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 	bufIdx := len(e.snapBuffer)
 	e.snapBuffer = append(e.snapBuffer, snap)
 
-	// 两侧上升沿检测（§2.1: remaining_sec < MaxRemainingSec）
-	yesIsAbove := snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
-	noIsAbove := snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+	// 两侧上升沿检测（§2.1: MinRemainingSec < remaining_sec < MaxRemainingSec）
+	yesIsAbove := snap.YesPrice > e.cfg.TriggerThreshold &&
+		snap.RemainingSec < e.cfg.MaxRemainingSec &&
+		snap.RemainingSec > e.cfg.MinRemainingSec
+	noIsAbove := snap.NoPrice > e.cfg.TriggerThreshold &&
+		snap.RemainingSec < e.cfg.MaxRemainingSec &&
+		snap.RemainingSec > e.cfg.MinRemainingSec
 
 	yesRisingEdge := yesIsAbove && !e.yesWasAbove
 	noRisingEdge := noIsAbove && !e.noWasAbove
@@ -177,6 +181,29 @@ func (e *Engine) ProcessSnapshot(snap *lab.ResearchSnapshot, gen int64) *FlipSig
 		return nil
 
 	case stateWatching:
+		// 检查上一轮 Confirming 失败后留下的 pending crossings。
+		// 其确认数据可能在本 tick 刚刚到齐，优先评估（先到先服务）。
+		if e.cfg.AllowRetryCrossings && len(e.pendingCrossings) > 0 {
+			var stillPending []pendingCrossing
+			for _, pc := range e.pendingCrossings {
+				if pc.crossIdx+e.cfg.ConfirmDelayTicks < len(e.snapBuffer) {
+					// 确认数据已到齐
+					e.retryCount++
+					if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
+						e.state = stateDone
+						e.doneThisGen = true
+						e.pendingCrossings = e.pendingCrossings[:0]
+						return sig
+					}
+					// 评估完成 → 不保留
+				} else {
+					// 确认数据仍未到齐 → 继续等待
+					stillPending = append(stillPending, pc)
+				}
+			}
+			e.pendingCrossings = stillPending
+		}
+
 		if e.cfg.AllowRetryCrossings {
 			// 多穿越模式：每个上升沿都尝试，YES 优先
 			if yesRisingEdge && bufIdx >= e.cfg.MinPreSnaps {
@@ -354,19 +381,27 @@ func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
 	// ── 优先尝试盲窗期间记录的穿越（按 snapshot 时间顺序）──
 	// 对应 Python run_backtest 纯时间顺序扫描：先到先评
 	if len(e.pendingCrossings) > 0 {
-		// 按 snapshot 时间顺序尝试（对应 Python run_backtest 纯时间顺序扫描）
+		// 按 snapshot 时间顺序尝试。
+		// 重要：数据已到齐的穿越才评估，数据不够的保留到后续 tick 重试。
+		// （否则 pending crossing 的确认数据尚未到达就被清空，导致信号永久丢失）
+		var stillPending []pendingCrossing
 		for _, pc := range e.pendingCrossings {
-			e.retryCount++
-			if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
-				e.state = stateDone
-				e.doneThisGen = true
-				e.pendingCrossings = e.pendingCrossings[:0]
-				return sig
+			if pc.crossIdx+e.cfg.ConfirmDelayTicks < len(e.snapBuffer) {
+				// 确认数据已到齐，尝试评估
+				e.retryCount++
+				if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
+					e.state = stateDone
+					e.doneThisGen = true
+					e.pendingCrossings = e.pendingCrossings[:0]
+					return sig
+				}
+				// 评估完成 → 不保留（已确定失败）
+			} else {
+				// 确认数据尚未到达 → 保留，等后续 tick
+				stillPending = append(stillPending, pc)
 			}
 		}
-
-		// 全部失败 → 清空 pending，继续后续 fallback
-		e.pendingCrossings = e.pendingCrossings[:0]
+		e.pendingCrossings = stillPending
 	}
 
 	// ── 现有 fallback：检查另一侧当前是否在阈值之上 ──
@@ -377,9 +412,13 @@ func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
 
 	otherIsAbove := false
 	if otherSide == "yes" {
-		otherIsAbove = snap.YesPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+		otherIsAbove = snap.YesPrice > e.cfg.TriggerThreshold &&
+			snap.RemainingSec < e.cfg.MaxRemainingSec &&
+			snap.RemainingSec > e.cfg.MinRemainingSec
 	} else {
-		otherIsAbove = snap.NoPrice > e.cfg.TriggerThreshold && snap.RemainingSec < e.cfg.MaxRemainingSec
+		otherIsAbove = snap.NoPrice > e.cfg.TriggerThreshold &&
+			snap.RemainingSec < e.cfg.MaxRemainingSec &&
+			snap.RemainingSec > e.cfg.MinRemainingSec
 	}
 
 	if otherIsAbove {
@@ -407,7 +446,9 @@ func (e *Engine) findRecentCrossing(side string) int {
 		} else {
 			price = s.NoPrice
 		}
-		isAbove := price > e.cfg.TriggerThreshold && s.RemainingSec < e.cfg.MaxRemainingSec
+		isAbove := price > e.cfg.TriggerThreshold &&
+			s.RemainingSec < e.cfg.MaxRemainingSec &&
+			s.RemainingSec > e.cfg.MinRemainingSec
 		if wasAbove && !isAbove {
 			return i + 1 // rising edge at next snapshot
 		}
@@ -443,7 +484,8 @@ func (e *Engine) returnToWatching() {
 	e.crossSide = ""
 	e.crossIdx = 0
 	e.confirmCount = 0
-	e.pendingCrossings = e.pendingCrossings[:0]
+	// 注意：不清空 pendingCrossings — 其中可能还有确认数据未到齐的穿越，
+	// 需在后续 Watching 状态的 tick 中重试评估（见 ProcessSnapshot case stateWatching）
 }
 
 // fallbackAfterFailedConfirm 实现兼容模式的 fallback：一侧确认失败后，

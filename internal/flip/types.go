@@ -21,8 +21,11 @@ type FlipConfig struct {
 	AllowRetryCrossings bool `mapstructure:"allow_retry_crossings"`
 	// 穿越时刻之前至少需要的 snapshot 数量（确保有足够的 BTC 价格路径）
 	MinPreSnaps int `mapstructure:"min_pre_snaps"`
-	// 窗口有效期：仅 remaining_sec < 此值的穿越才有效（太早触发时 BTC 路径太短，不可靠）
+	// 窗口有效期上限：仅 remaining_sec < 此值的穿越才有效（太早触发时 BTC 路径太短，不可靠）
 	MaxRemainingSec int `mapstructure:"max_remaining_sec"`
+	// 窗口有效期下限：仅 remaining_sec > 此值的穿越才有效
+	// 确保有足够时间完成确认（confirm_delay_ticks × 5s）+ 下单执行
+	MinRemainingSec int `mapstructure:"min_remaining_sec"`
 
 	// ── 来回振荡判定（三条件必须同时满足）──
 
@@ -115,7 +118,8 @@ func DefaultConfig() FlipConfig {
 		TriggerThreshold:     0.7,    // PM 一侧 >0.7 触发
 		AllowRetryCrossings:  true,   // 多穿越重试：每个上升沿都尝试评分
 		MinPreSnaps:          5,      // 穿越前至少 5 个 snapshot
-		MaxRemainingSec:      260,    // 窗口有效期：剩余秒数 < 260s 的穿越才有效
+		MaxRemainingSec:      260,    // 窗口有效期上限：remaining_sec < 260s 的穿越才有效
+		MinRemainingSec:      35,     // 窗口有效期下限：remaining_sec > 35s（5 ticks × 5s + 10s 执行缓冲）
 		PathEffOscillating:    0.7,   // 收紧到 0.7（原 0.8 太宽松，噪声大）
 		NoiseRatioOscillating: 1.5,   // 噪声比 >1.5 视为振荡
 		FlipsOscillating:      1,     // 2026-08-12 sweep: 1 比 2 多 6 笔优质信号，胜率不变 P&L 更高

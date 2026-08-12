@@ -25,7 +25,8 @@ class FlipBacktestConfig:
     trigger_threshold: float = 0.7       # PM 一侧价格超过此值触发
     allow_retry_crossings: bool = True   # 多穿越重试: True=每个上升沿都尝试评分（首个通过者获胜），False=仅首次穿越（旧行为）
     min_pre_snaps: int = 5               # 穿越前至少需要的 snapshot 数
-    max_remaining_sec: int = 260         # §2.1 窗口有效期: 仅 remaining_sec < 此值的穿越才有效 (与 >0.7 同级前置条件)
+    max_remaining_sec: int = 260         # §2.1 窗口有效期上限: 仅 remaining_sec < 此值的穿越才有效 (太早= BTC 路径太短)
+    min_remaining_sec: int = 35          # §2.1 窗口有效期下限: 仅 remaining_sec > 此值的穿越才有效 (太晚=确认+下单时间不够)
 
     # ── T+0 实时特征 ──
 

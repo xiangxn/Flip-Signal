@@ -164,12 +164,17 @@ def compute_btc_position(price_at_cross: float, open_price: float,
 
 
 def compute_other_delta(snapshots: list[dict], cross_idx: int, other_key: str,
-                        cfg: FlipBacktestConfig) -> float:
+                        cfg: FlipBacktestConfig) -> float | None:
     """§2.7 对面价格 N 秒变化。
 
     other_delta = other_price[t + confirm_delay_ticks] - other_price[t]。
+
+    与 Go 引擎一致：确认 tick 必须真实存在（实盘市场已结束时无法获得
+    确认数据），数据不足时返回 None 表示无法确认。
     """
-    conf_idx = min(cross_idx + cfg.confirm_delay_ticks, len(snapshots) - 1)
+    conf_idx = cross_idx + cfg.confirm_delay_ticks
+    if conf_idx >= len(snapshots):
+        return None  # 窗口末尾：确认数据不存在，实盘同样无法确认
     return snapshots[conf_idx][other_key] - snapshots[cross_idx][other_key]
 
 
@@ -269,6 +274,10 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     # ── T+5s 确认特征 ──
     other_delta = compute_other_delta(snaps, cross_idx, other_key, cfg)
 
+    # 确认数据不存在 (窗口末尾, remaining_sec 不足) → 与 Go 引擎一致，丢弃
+    if other_delta is None:
+        return None
+
     # Hard filter: other_delta 下限 (Formula A: 默认禁用, 由评分权重处理)
     if other_delta < cfg.od_hard_filter:
         return None
@@ -359,7 +368,8 @@ def check_signal(event: dict, side: str,
         was_above = False
         for i, s in enumerate(snaps):
             is_above = (s[this_key] > cfg.trigger_threshold
-                        and s["remaining_sec"] < cfg.max_remaining_sec)
+                        and s["remaining_sec"] < cfg.max_remaining_sec
+                        and s["remaining_sec"] > cfg.min_remaining_sec)
             if is_above and not was_above and i >= cfg.min_pre_snaps:
                 signal = _score_crossing(event, side, i, cfg)
                 if signal is not None:
@@ -370,7 +380,7 @@ def check_signal(event: dict, side: str,
         # ── 单穿越模式 (旧行为): 仅检测第一次 >0.7 ──
         cross_idx = None
         for i, s in enumerate(snaps):
-            if s[this_key] > cfg.trigger_threshold and s["remaining_sec"] < cfg.max_remaining_sec:
+            if s[this_key] > cfg.trigger_threshold and s["remaining_sec"] < cfg.max_remaining_sec and s["remaining_sec"] > cfg.min_remaining_sec:
                 cross_idx = i
                 break
 
@@ -418,9 +428,11 @@ def run_backtest(events: list[dict],
         for i, s in enumerate(snaps):
             # 两侧上升沿检测（与 Go engine ProcessSnapshot 完全一致）
             yes_is_above = (s["yes_price"] > cfg.trigger_threshold
-                          and s["remaining_sec"] < cfg.max_remaining_sec)
+                          and s["remaining_sec"] < cfg.max_remaining_sec
+                          and s["remaining_sec"] > cfg.min_remaining_sec)
             no_is_above = (s["no_price"] > cfg.trigger_threshold
-                         and s["remaining_sec"] < cfg.max_remaining_sec)
+                         and s["remaining_sec"] < cfg.max_remaining_sec
+                         and s["remaining_sec"] > cfg.min_remaining_sec)
 
             yes_rising = yes_is_above and not yes_was_above and i >= cfg.min_pre_snaps
             no_rising = no_is_above and not no_was_above and i >= cfg.min_pre_snaps
