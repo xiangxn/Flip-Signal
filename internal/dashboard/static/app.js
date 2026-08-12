@@ -300,7 +300,7 @@ async function fetchSignals() {
       let wl = '<span class="pending">…</span>';
       let pnl = '-';
       let pnlCls = '';
-      if (s.won !== undefined && s.won !== null) {
+      if (s.resolved_at) {
         wl = s.won ? '<span class="won">WIN</span>' : '<span class="lost">LOSS</span>';
         const v = s.pnl || 0;
         pnl = (v >= 0 ? '+' : '') + v.toFixed(4);
@@ -314,7 +314,7 @@ async function fetchSignals() {
       const scoreCls = s.score < scoreEntryCfg ? 'score-low' : '';
       return `<tr>
         <td>${t}</td>
-        <td class="${sideCls}">${s.side.toUpperCase()}</td>
+        <td class="${sideCls}">${s.side === 'yes' ? 'DOWN' : 'UP'}</td>
         <td class="${scoreCls}">${s.score}</td>
         <td>${s.exec_status === 'filled' ? s.avg_fill_price.toFixed(3) : s.entry_price.toFixed(3)}</td>
         <td>${(s.shares || 0).toFixed(2)}</td>
