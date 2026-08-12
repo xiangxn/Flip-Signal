@@ -388,7 +388,10 @@ def run_backtest(events: list[dict],
                  cfg: FlipBacktestConfig = None) -> tuple[list[FlipSignal], int, int]:
     """对全部事件运行回测，返回 (信号列表, 总事件数, 有效事件数)。
 
-    每个事件最多产生一个信号（每事件一注，YES 优先）。
+    每个事件最多产生一个信号（每事件一注）。
+    按 snapshot 时间顺序扫描 YES/NO 两侧的穿越，先到先评，同 snapshot 内 YES 优先。
+    这直接对应 Go Flip Engine 的实时行为（Watching 状态下同时检测两侧上升沿）。
+
     多穿越重试由 cfg.allow_retry_crossings 控制（默认 True）。
     """
     if cfg is None:
@@ -406,12 +409,49 @@ def run_backtest(events: list[dict],
         if event.get("hist_avg_range") is None:
             continue
 
-        # Step 1: YES 优先，每事件最多一注
-        for side in ("yes", "no"):
-            signal = check_signal(event, side, cfg)
-            if signal is not None:
-                signals.append(signal)
-                break  # 每事件最多一注
+        # Step 1: 按时间顺序扫描 — YES/NO 两侧同时检测，先到先评
+        snaps = event["snapshots"]
+        yes_was_above = False
+        no_was_above = False
+
+        signal = None
+        for i, s in enumerate(snaps):
+            # 两侧上升沿检测（与 Go engine ProcessSnapshot 完全一致）
+            yes_is_above = (s["yes_price"] > cfg.trigger_threshold
+                          and s["remaining_sec"] < cfg.max_remaining_sec)
+            no_is_above = (s["no_price"] > cfg.trigger_threshold
+                         and s["remaining_sec"] < cfg.max_remaining_sec)
+
+            yes_rising = yes_is_above and not yes_was_above and i >= cfg.min_pre_snaps
+            no_rising = no_is_above and not no_was_above and i >= cfg.min_pre_snaps
+
+            yes_was_above = yes_is_above
+            no_was_above = no_is_above
+
+            # 同 snapshot 内 YES 优先（tie-breaking，匹配 Go engine）
+            if cfg.allow_retry_crossings:
+                if yes_rising:
+                    signal = _score_crossing(event, "yes", i, cfg)
+                    if signal is not None:
+                        break
+                if no_rising:
+                    signal = _score_crossing(event, "no", i, cfg)
+                    if signal is not None:
+                        break
+            else:
+                # 兼容模式：仅处理两侧各自首次穿越（旧行为，与 Go compat mode 一致）
+                if yes_rising:
+                    signal = _score_crossing(event, "yes", i, cfg)
+                    if signal is not None:
+                        break
+                    # 兼容模式下 YES 首次已尝试，后续 YES 不再触发
+                elif no_rising:
+                    signal = _score_crossing(event, "no", i, cfg)
+                    if signal is not None:
+                        break
+
+        if signal is not None:
+            signals.append(signal)
 
     return signals, total, active
 
