@@ -351,34 +351,17 @@ func (e *Engine) afterFailedConfirm(snap *lab.ResearchSnapshot) *FlipSignal {
 		return e.fallbackAfterFailedConfirm()
 	}
 
-	// ── 优先尝试盲窗期间记录的穿越（同侧优先，按时间顺序）──
-	// 对应 Python check_signal 的行为：先穷尽同侧所有穿越，再试另一侧
+	// ── 优先尝试盲窗期间记录的穿越（按 snapshot 时间顺序）──
+	// 对应 Python run_backtest 纯时间顺序扫描：先到先评
 	if len(e.pendingCrossings) > 0 {
-		sameSide := e.crossSide
-
-		// 第一轮：同侧穿越
+		// 按 snapshot 时间顺序尝试（对应 Python run_backtest 纯时间顺序扫描）
 		for _, pc := range e.pendingCrossings {
-			if pc.side == sameSide {
-				e.retryCount++
-				if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
-					e.state = stateDone
-					e.doneThisGen = true
-					e.pendingCrossings = e.pendingCrossings[:0]
-					return sig
-				}
-			}
-		}
-
-		// 第二轮：另一侧穿越
-		for _, pc := range e.pendingCrossings {
-			if pc.side != sameSide {
-				e.retryCount++
-				if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
-					e.state = stateDone
-					e.doneThisGen = true
-					e.pendingCrossings = e.pendingCrossings[:0]
-					return sig
-				}
+			e.retryCount++
+			if sig := e.evaluateCrossingAt(pc.crossIdx, pc.side); sig != nil {
+				e.state = stateDone
+				e.doneThisGen = true
+				e.pendingCrossings = e.pendingCrossings[:0]
+				return sig
 			}
 		}
 
