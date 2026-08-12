@@ -155,6 +155,58 @@ go run ./cmd/flip -output data/flip_signals.jsonl -lab-output data/lab -dashboar
 
 打开 http://localhost:8090 查看实时看板。
 
+### Flip Engine 信号检测流程
+
+每个 snapshot（~5s）调用 `ProcessSnapshot()`，引擎内部按以下两阶段运行：
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ 阶段 1: enterConfirming() — 穿越时刻立即执行                      │
+│                                                                   │
+│ 用穿越点及之前的 BTC 价格序列计算 T=0 特征:                        │
+│                                                                   │
+│   path_eff       = |lastPrice - open| / (high - low)              │
+│   noise_ratio    = Σ|p[i]-p[i-1]| / netMove                      │
+│   flips          = BTC 方向翻转次数                                │
+│   is_oscillating = path_eff≤0.7 ∧ noise>1.5 ∧ flips>1            │
+│   range_expansion = |price - open| / hist_avg_range               │
+│   btc_extreme    = BTC 与 PM 方向背离                              │
+│                                                                   │
+│   硬过滤 (任一不通过 → 立即否决，不等待确认):                      │
+│   • path_eff < 0.4          趋势太模糊                             │
+│   • noise_ratio > 3.0       PM 价格太不稳定                        │
+│   • range_expansion ≥ 1.5   真突破，PM 判断正确                    │
+│                                                                   │
+│   全部通过 → 保存特征，状态切换到 stateConfirming                  │
+│   等待 confirm_delay_ticks 个 snapshot…                            │
+└──────────────────────────────────────────────────────────────────┘
+                               │
+                               │ 等待 confirm_delay_ticks × 5s
+                               ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ 阶段 2: onConfirmed() — 确认数据到达后才执行                       │
+│                                                                   │
+│   唯一需要等待的特征:                                              │
+│   other_delta = 对面价格[t+N] - 对面价格[t]                        │
+│     YES>0.7 → 对面=NO,  买 NO 赌 DOWN → NoPrice 涨 = +分         │
+│     NO>0.7  → 对面=YES, 买 YES 赌 UP  → YesPrice 涨 = +分        │
+│                                                                   │
+│   entry_price = 穿越时刻对面价格 (入场价)                          │
+│                                                                   │
+│   7 特征复合评分 (Formula A):                                      │
+│   F1v other_delta > 0.05   +3    F5  入场价 < 0.25    +1         │
+│   F1  other_delta > 0.02   +2    F6  振幅 < 0.5       +2         │
+│   F2  other_delta > 0.01   +1    F7  BTC 背离         +1         │
+│   F3  振荡                 +1    F0  振幅 ≥ 1.5      否决         │
+│   F4  入场价 < 0.20        +1                                     │
+│                                                                   │
+│   总分 ≥ score_entry(5) → 🎯 FlipSignal                           │
+│   总分 < 5 → 回 Watching，尝试 pending crossings                  │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+**状态机**: `Watching → Confirming → Done`，多穿越重试模式下每个上升沿都触发检测，首个评分通过者下注，每周期最多一注。
+
 **信号文件格式**（`data/flip_signals.jsonl`）:
 
 ```json
