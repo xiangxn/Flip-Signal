@@ -381,6 +381,22 @@ func main() {
 		}
 		if fetchErr != nil {
 			log.Printf("[Cycle] ⚠️ 获取市场信息失败: %v —— 5 秒后重试", fetchErr)
+			// 网络故障时本窗口会被跳过（step 1 的 >10s 漂移保护直接对齐下一窗口）。
+			// 必须立即退订上一事件的 token：否则 MarketMonitor 重连时会把缓存的
+			// 旧 token 重新订阅回去，已结算资产会触发服务端 close 1000
+			// （all subscribed assets resolved）→ 重连 → 再订阅 → 死循环。
+			if yesTok != "" || noTok != "" {
+				var staleTokens []string
+				if yesTok != "" {
+					staleTokens = append(staleTokens, yesTok)
+				}
+				if noTok != "" {
+					staleTokens = append(staleTokens, noTok)
+				}
+				bookAdapter.UnsubscribeTokens(staleTokens...)
+				log.Printf("[Cycle] 🔒 已退订上一事件 token（YES=%s NO=%s）", yesTok, noTok)
+				yesTok, noTok = "", ""
+			}
 			select {
 			case <-ctx.Done():
 				return

@@ -3,6 +3,8 @@ package feed
 import (
 	"context"
 	"log"
+	"sync"
+	"time"
 
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 )
@@ -11,6 +13,11 @@ import (
 type OrderBookAdapter struct {
 	monitor     *sdk.MarketMonitor
 	orderBookCh chan *sdk.OrderBook // kept for backward compat; prefer GetLatestBook()
+
+	// 当前订阅 token 的本地副本：SDK 的 MarketMonitor 在 Run 退出时会把内部
+	// subsTokens 清空（Disconnect），保留副本用于 monitor 重启后恢复订阅。
+	mu     sync.RWMutex
+	tokens []string
 }
 
 // NewOrderBookAdapter creates a new order book adapter.
@@ -26,11 +33,17 @@ func NewOrderBookAdapter(wsBaseURL string, client *sdk.PolymarketClient) *OrderB
 
 // SubscribeTokens subscribes to order book updates for the given token IDs.
 func (o *OrderBookAdapter) SubscribeTokens(tokens ...string) {
+	o.mu.Lock()
+	o.tokens = addTokens(o.tokens, tokens...)
+	o.mu.Unlock()
 	o.monitor.SubscribeTokens(tokens...)
 }
 
 // UnsubscribeTokens unsubscribes from order book updates for the given token IDs.
 func (o *OrderBookAdapter) UnsubscribeTokens(tokens ...string) {
+	o.mu.Lock()
+	o.tokens = removeTokens(o.tokens, tokens...)
+	o.mu.Unlock()
 	o.monitor.UnsubscribeTokens(tokens...)
 }
 
@@ -82,8 +95,26 @@ func (o *OrderBookAdapter) Start(ctx context.Context) {
 	}()
 
 	go func() {
-		if err := o.monitor.Run(ctx); err != nil {
-			log.Printf("[OrderBookAdapter] monitor stopped: %v", err)
+		for {
+			err := o.monitor.Run(ctx)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			// Run 退出意味着 WS 连续连接失败耗尽重试次数（或内部异常）：
+			// SDK 已 Disconnect 并清空 subsTokens，不重启的话后续窗口
+			// 将永远收不到盘口数据。
+			log.Printf("[OrderBookAdapter] ⚠️ monitor 异常退出: %v —— 5 秒后重启", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+			// 先恢复本地订阅副本（此时 ws 未连接，仅写入 SDK 内部状态），
+			// Run 连接成功后由 OnOpen → subscribeMarket 自动重发订阅。
+			o.mu.RLock()
+			tokens := append([]string(nil), o.tokens...)
+			o.mu.RUnlock()
+			o.monitor.SubscribeTokens(tokens...)
 		}
 	}()
 }
@@ -108,4 +139,35 @@ func (o *OrderBookAdapter) LatestOrderBook() *sdk.OrderBook {
 	default:
 		return nil
 	}
+}
+
+// addTokens 向订阅列表追加 token 并去重，返回新切片。
+func addTokens(list []string, tokens ...string) []string {
+	set := make(map[string]struct{}, len(list)+len(tokens))
+	for _, t := range list {
+		set[t] = struct{}{}
+	}
+	for _, t := range tokens {
+		set[t] = struct{}{}
+	}
+	dst := make([]string, 0, len(set))
+	for t := range set {
+		dst = append(dst, t)
+	}
+	return dst
+}
+
+// removeTokens 从订阅列表中移除指定 token，返回新切片。
+func removeTokens(list []string, tokens ...string) []string {
+	rm := make(map[string]struct{}, len(tokens))
+	for _, t := range tokens {
+		rm[t] = struct{}{}
+	}
+	dst := list[:0]
+	for _, t := range list {
+		if _, ok := rm[t]; !ok {
+			dst = append(dst, t)
+		}
+	}
+	return dst
 }
