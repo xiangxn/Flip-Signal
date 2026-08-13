@@ -60,6 +60,10 @@ func DefaultBinanceConfig() BinanceConfig {
 // backoff (1s → 30s max). The connection is re-established transparently;
 // callers continue to read LatestData() which returns the last-known values
 // during the gap.
+//
+// Binance 心跳规范: 服务端每 20s 发 PING，客户端须在 60s 内回 PONG（payload
+// 原样回传，见 readFromConn）。读超时 90s：心跳正常时每 20s 必有入站消息，
+// 超时即判定链路已死并触发重连。
 type BinanceAdapter struct {
 	cfg BinanceConfig
 
@@ -104,6 +108,7 @@ func (b *BinanceAdapter) Symbol() string { return b.cfg.Symbol }
 func (b *BinanceAdapter) Started() bool  { return b.started.Load() }
 
 func (b *BinanceAdapter) streamURL() string {
+	// WS 订阅要求 symbol 全小写（Binance 最新文档，大写已无法订阅）
 	symbol := strings.ToLower(b.cfg.Symbol)
 	return fmt.Sprintf("%s/stream?streams=%s@trade/%s@depth20@100ms",
 		b.cfg.StreamBaseURL, symbol, symbol)
@@ -204,6 +209,7 @@ func (b *BinanceAdapter) ConsumeVolume() (buyAcc, sellAcc float64) {
 // runReadLoop is the persistent read loop that handles reconnection.
 // It reads from the current connection until error, then reconnects with
 // exponential backoff. Only returns when ctx is cancelled.
+// 循环任何分支都不会因网络错误退出，保证网络恢复后总能自动重连。
 func (b *BinanceAdapter) runReadLoop(ctx context.Context) {
 	defer b.closeConn()
 
@@ -213,19 +219,33 @@ func (b *BinanceAdapter) runReadLoop(ctx context.Context) {
 	backoff := time.Second
 	const maxBackoff = 30 * time.Second
 
+	// 当前连接建连时刻，用于退避重置判断（见读错误分支）
+	connectedAt := time.Now()
+
 	for {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			return
-		default:
 		}
 
-		b.connMu.Lock()
-		conn := b.conn
-		b.connMu.Unlock()
-
+		conn := b.currentConn()
 		if conn == nil {
-			return
+			// 无可用连接：重拨。失败按退避重试而不是退出循环——
+			// 否则网络短暂不可用时重连机制会彻底失效
+			if err := b.dialAndSet(); err != nil {
+				log.Printf("[BinanceAdapter] ⚠️ dial failed: %v — retrying in %v", err, backoff.Round(time.Millisecond))
+				if !b.sleepCtx(ctx, backoff) {
+					return
+				}
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+				continue
+			}
+			connectedAt = time.Now()
+			b.reconnecting.Store(false)
+			log.Printf("[BinanceAdapter] 🔄 reconnected — symbol=%s", b.cfg.Symbol)
+			continue
 		}
 
 		// Read from current connection until error or ctx cancel
@@ -235,37 +255,50 @@ func (b *BinanceAdapter) runReadLoop(ctx context.Context) {
 		}
 
 		// Connection lost — close and reconnect
-		log.Printf("[BinanceAdapter] ⚠️ read error: %v — reconnecting in %v", err, backoff.Round(time.Millisecond))
 		b.closeConn()
 		b.reconnecting.Store(true)
 
-		select {
-		case <-ctx.Done():
+		// 稳定连接（存活 ≥1min）断开 → 重置为最短退避快速重连；
+		// 连上即断说明端点/网络抖动 → 退避翻倍，避免 1s 重连风暴
+		if time.Since(connectedAt) >= time.Minute {
+			backoff = time.Second
+		} else {
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+		}
+
+		log.Printf("[BinanceAdapter] ⚠️ read error: %v — reconnecting in %v", err, backoff.Round(time.Millisecond))
+
+		if !b.sleepCtx(ctx, backoff) {
 			return
-		case <-time.After(backoff):
 		}
-
-		// Exponential backoff
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
-
-		if err := b.dialAndSet(); err != nil {
-			log.Printf("[BinanceAdapter] reconnect dial failed: %v", err)
-			continue // retry with same backoff
-		}
-
-		// Reset backoff on successful connection
-		backoff = time.Second
-		b.reconnecting.Store(false)
-		log.Printf("[BinanceAdapter] 🔄 reconnected — symbol=%s", b.cfg.Symbol)
 	}
 }
 
 // readFromConn reads messages from a single connection. Returns nil on ctx
 // cancellation, or the error that caused the read to fail.
+//
+// Binance WS 心跳规范: 服务端每 20s 发 PING，若 60s 内未收到 PONG 即断开；
+// 回 PONG 时 payload 必须与 PING 一致。gorilla 的 ReadMessage 默认即回 PONG，
+// 此处显式注册 PING handler（payload 原样回传 + 同步刷新读超时），保证心跳
+// 处理符合规范。读超时收紧为 90s：心跳正常时每 20s 必有入站消息，超时即
+// 判定链路已死，快速触发重连。
 func (b *BinanceAdapter) readFromConn(ctx context.Context, conn *websocket.Conn, tradeStream, depthStream string) error {
+	const (
+		readTimeout  = 90 * time.Second
+		writeTimeout = 10 * time.Second
+	)
+
+	// 收到服务端 PING：刷新读超时后立即回 PONG（payload 原样，符合 Binance 规范）
+	conn.SetPingHandler(func(appData string) error {
+		if err := conn.SetReadDeadline(time.Now().Add(readTimeout)); err != nil {
+			return err
+		}
+		return conn.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(writeTimeout))
+	})
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -273,12 +306,29 @@ func (b *BinanceAdapter) readFromConn(ctx context.Context, conn *websocket.Conn,
 		default:
 		}
 
-		conn.SetReadDeadline(time.Now().Add(5 * time.Minute))
+		conn.SetReadDeadline(time.Now().Add(readTimeout))
 		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return err
 		}
 		b.handleMessage(msg, tradeStream, depthStream)
+	}
+}
+
+// currentConn returns the current WS connection (nil if none established).
+func (b *BinanceAdapter) currentConn() *websocket.Conn {
+	b.connMu.Lock()
+	defer b.connMu.Unlock()
+	return b.conn
+}
+
+// sleepCtx waits for d or ctx cancellation. Returns false if ctx was cancelled.
+func (b *BinanceAdapter) sleepCtx(ctx context.Context, d time.Duration) bool {
+	select {
+	case <-ctx.Done():
+		return false
+	case <-time.After(d):
+		return true
 	}
 }
 
