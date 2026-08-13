@@ -219,7 +219,7 @@ func main() {
 		return
 	case err := <-histErr:
 		if err != nil {
-			log.Printf("[Flip] 历史振幅预热失败: %v（F6/F7 将在积累足够周期后退化可用）", err)
+			log.Printf("[Flip] 历史振幅预热失败: %v（B1/B2 需等待积累 3 个周期后可用，期间不产生信号）", err)
 		}
 	}
 
@@ -485,14 +485,16 @@ func main() {
 				if sig := flipEngine.ProcessSnapshot(snap, generation); sig != nil {
 					sig.ConditionID = conditionID
 					// 根据 stake_per_signal 计算目标股数（纸面/实盘统一）
-					sig.Shares = trading.ComputeShares(cfg.Trading.StakePerSignal, sig.EntryPrice)
+					// 用 FillPrice（确认时刻对侧 ask）而非 EntryPrice（穿越时对侧 bid），
+					// 与回测 ask 成交口径一致
+					sig.Shares = trading.ComputeShares(cfg.Trading.StakePerSignal, sig.FillPrice)
 
 					if err := flipRecorder.RecordSignal(sig); err != nil {
 						log.Printf("[Flip] 信号记录失败: %v", err)
 					}
-					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f shares=%.0f | "+
+					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f fill=%.3f shares=%.0f | "+
 						"div=%+.2f range_exp=%.1f btc_pos=%+.2f other_d=%+.3f rem=%ds",
-						sig.Side, sig.Score, sig.EntryPrice, sig.Shares,
+						sig.Side, sig.Score, sig.EntryPrice, sig.FillPrice, sig.Shares,
 						sig.BtcDivergence, sig.RangeExpansion, sig.BTCPosition, sig.OtherDelta,
 						sig.RemainingSec)
 
@@ -506,8 +508,8 @@ func main() {
 						}
 						flipRecorder.UpdateExecution(conditionID, execInfo.Status, execInfo.FilledShares, execInfo.AvgFillPrice)
 					} else {
-						// 无 Trader：纯纸面模拟成交（成交价 = 入场价）
-						flipRecorder.UpdateExecution(conditionID, "filled", sig.Shares, sig.EntryPrice)
+						// 无 Trader：纯纸面模拟成交（成交价 = 确认时刻对侧 ask，回测同口径）
+						flipRecorder.UpdateExecution(conditionID, "filled", sig.Shares, sig.FillPrice)
 					}
 				}
 

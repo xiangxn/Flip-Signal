@@ -202,11 +202,17 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 
 	// 纸面模式：模拟成交，创建 Position 走统一结算路径
 	if !liveOK || client == nil {
+		// 纸面成交价 = FillPrice（确认时刻对侧 ask，与回测 ask 口径一致）；
+		// 防御：FillPrice 为 0 时回退到 EntryPrice
+		fillPrice := sig.FillPrice
+		if fillPrice <= 0 {
+			fillPrice = sig.EntryPrice
+		}
 		t.mu.Lock()
-		filledShares := ComputeShares(cfg.StakePerSignal, sig.EntryPrice)
+		filledShares := ComputeShares(cfg.StakePerSignal, fillPrice)
 		rec.State = OrderFilled
 		rec.FilledShares = filledShares
-		rec.AvgFillPrice = sig.EntryPrice
+		rec.AvgFillPrice = fillPrice
 		rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(rec)
 
@@ -216,8 +222,8 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 			TokenID:     tokenID,
 			TokenSide:   tokenSide,
 			Shares:      filledShares,
-			AvgPrice:    sig.EntryPrice, // 纸面：入场价即成交价
-			CostUSDC:    filledShares * sig.EntryPrice,
+			AvgPrice:    fillPrice, // 纸面：按确认时刻 ask 成交
+			CostUSDC:    filledShares * fillPrice,
 			OrderID:     "paper",
 			OpenedAt:    t.timeNow(),
 		}
@@ -225,9 +231,9 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 		t.exec.DailySignals++
 		t.exec.LastSkipReason = ""
 		t.mu.Unlock()
-		log.Printf("[Trading] 📝 纸面信号: side=%s entry=%.4f shares=%.0f cost=%.2f",
-			tokenSide, sig.EntryPrice, filledShares, pos.CostUSDC)
-		return ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: sig.EntryPrice}, nil
+		log.Printf("[Trading] 📝 纸面信号: side=%s fill=%.4f shares=%.0f cost=%.2f",
+			tokenSide, fillPrice, filledShares, pos.CostUSDC)
+		return ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: fillPrice}, nil
 	}
 
 	// 实盘：按策略构建订单（GTC 限价单 / FAK 市价单）

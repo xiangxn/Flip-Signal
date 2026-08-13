@@ -29,13 +29,13 @@ runtime:
   # （可选）Lab 事件数据输出目录，JSONL 格式，按日切分
   # 与 cmd/lab 输出格式相同，包含完整的 ResearchSnapshot 序列
   # 留空表示不启用 lab 数据采集
-  # 默认值: ""（不启用）
+  # 默认值: "data/lab"
   lab_output_dir: "data/lab"
 
   # （可选）HTTP Dashboard 监听地址
   # 例如 ":8090" 监听所有网卡的 8090 端口
   # 留空表示不启动 Dashboard
-  # 默认值: ""（不启用）
+  # 默认值: ":8090"
   dashboard_addr: ":8090"
 
 # ---------------------------------------------------------------------------
@@ -51,7 +51,7 @@ sdk:
   http_debug: false
 
   # SOCKS5 代理地址（适用于网络受限地区）
-  # 也可通过环境变量 POLYMARKET_PROXY 设置
+  # 也可通过环境变量 PM_SDK_SOCKS_PROXY 设置
   # 默认值: ""（不使用代理）
   # socks_proxy: "socks5://127.0.0.1:1080"
 
@@ -91,14 +91,16 @@ sdk:
     signature_type: 2
 
     # 钱包私钥（hex 格式，不含 0x 前缀）
-    # 也可通过环境变量 POLYMARKET_OWNER_KEY 设置
+# 注意：写入文件的值必须用 pmutils.NewEncryptor(password).Encrypt() 加密，
+# 明文写入会在启动时解密失败；明文请改用环境变量 PM_SDK_POLYMARKET_OWNER_KEY
+    # 也可通过环境变量 PM_SDK_POLYMARKET_OWNER_KEY 设置
     # 未配置时自动生成临时密钥，仅用于数据读取（paper trading 模式）
     # 默认值: ""（自动生成临时密钥，只读模式）
     owner_key: ""
 
     # CLOB API 凭证（L2 认证，用于下单 / 查询账户）
     # 也可分别通过环境变量设置：
-    #   POLYMARKET_CLOB_KEY, POLYMARKET_CLOB_SECRET, POLYMARKET_CLOB_PASSPHRASE
+    #   PM_SDK_POLYMARKET_CLOB_CREDS_KEY / _SECRET / _PASSPHRASE
     # 默认值: 不设置（只读模式够用）
     # clob_creds:
     #   key: ""
@@ -106,7 +108,7 @@ sdk:
     #   passphrase: ""
 
     # 代理钱包地址（用于 funder/operator 模式）
-    # 也可通过环境变量 POLYMARKET_FUNDER 设置
+    # 也可通过环境变量 PM_SDK_POLYMARKET_FUNDER_ADDRESS 设置
     # 默认值: ""（不使用代理钱包）
     # funder_address: ""
 

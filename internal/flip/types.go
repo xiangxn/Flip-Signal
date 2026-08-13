@@ -138,8 +138,9 @@ type FlipSignal struct {
 	ConditionID  string    `json:"condition_id"`
 	Side         string    `json:"side"` // "yes" or "no"
 	Score        int       `json:"score"`
-	EntryPrice   float64   `json:"entry_price"` // 穿越时刻对侧 bid（特征/纸面结算用）
-	Shares       float64   `json:"shares"` // 目标股数 = stake / entry_price（Engine 不设置，由调用方计算）
+	EntryPrice   float64   `json:"entry_price"` // 穿越时刻对侧 bid（评分特征用）
+	FillPrice    float64   `json:"fill_price"`  // 确认时刻对侧 ASK = 1 - 触发侧 bid（回测同口径成交价）
+	Shares       float64   `json:"shares"` // 目标股数 = stake / fill_price（Engine 不设置，由调用方计算）
 	RemainingSec int       `json:"remaining_sec"`
 
 	// 执行结果（Trader 回填）

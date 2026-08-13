@@ -509,6 +509,7 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		Side:             side,
 		Score:            score,
 		EntryPrice:       entryPrice,
+		FillPrice:        confirmPrice,
 		Shares:           0,
 		ExecStatus:       "pending",
 		RemainingSec:     crossSnap.RemainingSec,
@@ -608,6 +609,7 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		Side:             e.crossSide,
 		Score:            score,
 		EntryPrice:       entryPrice,
+		FillPrice:        confirmPrice,
 		Shares:           0, // 由调用方根据 stake_per_signal 计算后填充
 		ExecStatus:       "pending",
 		RemainingSec:     e.crossSnap.RemainingSec,

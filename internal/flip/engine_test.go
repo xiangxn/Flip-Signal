@@ -267,6 +267,10 @@ func TestEngine_CrossingWithConfirm(t *testing.T) {
 	if sig.Score != 5 {
 		t.Errorf("expected score 5 (B3+3 + B2+2), got %d", sig.Score)
 	}
+	// FillPrice = 确认时刻对侧 ASK = 1 - YES bid(0.78) ≈ 0.22（回测 ask 口径）
+	if diff := sig.FillPrice - 0.22; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("expected fill_price ~0.22 (ask at confirm), got %.4f", sig.FillPrice)
+	}
 	if sig.BtcDivergence < 0.05 {
 		t.Errorf("expected btc_divergence >= 0.05, got %.4f", sig.BtcDivergence)
 	}

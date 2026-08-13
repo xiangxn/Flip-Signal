@@ -110,7 +110,7 @@ Split B: train +0.206 / test +0.263
 
 | 文件 | 改动 |
 |---|---|
-| `internal/flip/types.go` | FlipConfig：新增 `MinDivergence=0.05`、`ScoreEntry=2`；删除振荡三条件/低价入场两档/btc_pos 阈值/两个 T=0 否决/对应权重/`AllowRetryCrossings` 全部字段。FlipSignal/ScoreParams：删除 path_eff/noise/flips/osc/btc_extreme，新增 `BtcDivergence` |
+| `internal/flip/types.go` | FlipConfig：新增 `MinDivergence=0.05`、`ScoreEntry=2`；删除振荡三条件/低价入场两档/btc_pos 阈值/两个 T=0 否决/对应权重/`AllowRetryCrossings` 全部字段。FlipSignal/ScoreParams：删除 path_eff/noise/flips/osc/btc_extreme，新增 `BtcDivergence` 与 `FillPrice`（确认时刻对侧 ask） |
 | `internal/flip/features.go` | 删除 PathEfficiency/TotalPath/NoiseRatio/CountFlips/IsOscillating；保留 RangeExpansion/BTCPosition；新增 `Divergence(side, btcPos)` |
 | `internal/flip/scoring.go` | `ComputeFlipScore` 改为 Formula B：L0 延迟否决 + F0 真突破否决 + B3 三档 + B2 过度自信 |
 | `internal/flip/engine.go` | 删除兼容模式分支与旧特征计算；`enterConfirming`/`evaluateCrossingAt` 新增 B1 背离硬过滤（hist 未就绪即否决，与回测一致）；gate 已为 ask 口径；信号字段对齐 |
