@@ -27,7 +27,9 @@ type eventFile struct {
 	} `json:"snapshots"`
 }
 
-const replayDataPath = "../../data/btc/events_2026-08-13.jsonl"
+// replayDataPath 指向 testdata 内的数据快照（2026-08-13 实盘采集的前 26 个事件）。
+// 不用 data/btc 实时文件 —— 实盘持续追加会改变信号数，导致断言漂移。
+const replayDataPath = "testdata/events_2026-08-13.jsonl"
 
 // warmupRanges 为实盘启动时 HistRangeTracker.Warmup 拉取的 18 根 5m K 线
 // |close-open| 振幅（按时间升序，最后一根为启动时的进行中 K 线，用其近似值）。
