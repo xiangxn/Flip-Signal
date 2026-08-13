@@ -32,9 +32,12 @@ type FlipConfig struct {
 
 	// ── B1 背离硬要求（Formula B 核心）──
 
-	// 穿越时刻 BTC 必须与 PM 反向：背离度 = ±btc_pos（YES侧取负）。
-	// 背离度 < 此值 → 否决（同向/中性穿越 EV≈0，χ²=125 分桶证据）。
-	// 0 = 禁用
+	// 背离度下限：div < 此值 → 否决。0 = 否决同向穿越（BTC 与 PM 同向
+	// EV≈0，χ²=125 分桶证据），-999 = 禁用。
+	// 2026-08-13 频率优化后默认 0（只否决同向，允许中性/背离入场）
+	DivergenceFloor float64 `mapstructure:"divergence_floor"`
+	// 背离强度要求：div < 此值 → 否决（DivergenceFloor 之上的额外强度门槛）。
+	// 0 = 不要求额外强度（仅按 DivergenceFloor 过滤）
 	MinDivergence float64 `mapstructure:"min_divergence"`
 
 	// ── B2 过度自信（振幅扩张，tick 无关，基于前 N 根 K 线平均振幅）──
@@ -91,34 +94,41 @@ type FlipConfig struct {
 }
 
 // DefaultConfig 返回翻转信号检测的默认参数配置。
-// 2026-08-13 Formula B 减法版标定：n=126, WR 46.0%, P&L +26.91, PF 2.60。
+// 2026-08-13 频率优化版标定（data_0 全量，ask 口径）：
+// n=350, 2.44 信号/小时, WR 46.3%, EV +0.240/笔, P&L +83.90, PF 2.94。
+// 频率优化三改动：B1 改为「否决同向穿越」（floor=0）+
+// B2 放宽 range_exp_threshold 0.5→1.0 + 窗口下限 min_remaining_sec 35→15。
 func DefaultConfig() FlipConfig {
 	return FlipConfig{
-		TriggerThreshold:    0.7,  // PM 一侧 bid >0.7 触发
-		MinPreSnaps:         5,    // 穿越前至少 5 个 snapshot
-		MaxRemainingSec:     260,  // 窗口有效期上限：remaining_sec < 260s 的穿越才有效
-		MinRemainingSec:     35,   // 窗口有效期下限：remaining_sec > 35s（2 ticks×5s + 25s 执行缓冲）
-		MinDivergence:       0.05, // B1: BTC 必须与 PM 背离（YES侧 btc_pos<-0.05，NO侧 >0.05）
-		HistWindowN:         18,   // 前 18 根 K 线（~1.5h）算平均振幅
-		RangeExpThreshold:   0.5,  // 振幅 <0.5 → BTC 没动但 PM 0.7+ → 过度自信 → +2
-		RangeExpMax:         1.5,  // 振幅 ≥1.5 → 真突破，否决
-		ConfirmDelayTicks:   2,    // 确认等待 2 ticks（10s）
+		TriggerThreshold:    0.7,   // PM 一侧 bid >0.7 触发
+		MinPreSnaps:         5,     // 穿越前至少 5 个 snapshot
+		MaxRemainingSec:     260,   // 窗口有效期上限：remaining_sec < 260s 的穿越才有效
+		MinRemainingSec:     15,    // 窗口有效期下限：remaining_sec > 15s（确认 2 ticks×5s + FAK 执行缓冲 ~5-10s）
+		DivergenceFloor:     0.0,   // B1: div < 0 → 否决同向穿越（BTC 与 PM 同向 EV≈0）
+		MinDivergence:       0.0,   // B1: 背离强度要求，0 = 不要求（仅按 floor 过滤）
+		HistWindowN:         18,    // 前 18 根 K 线（~1.5h）算平均振幅
+		RangeExpThreshold:   1.0,   // 振幅 <1.0 → BTC 没真正突破（<1 个历史振幅）→ 过度自信 → +2
+		RangeExpMax:         1.5,   // 振幅 ≥1.5 → 真突破，否决
+		ConfirmDelayTicks:   2,     // 确认等待 2 ticks（10s）
 		ODHardFilter:        -999.0, // 禁用硬过滤，由评分权重处理
-		OtherDeltaVStrong:   0.05, // 对面涨 >0.05 → +3 分
-		OtherDeltaStrong:    0.02, // 对面涨 >0.02 → +2 分
-		OtherDeltaWeak:      0.01, // 对面涨 >0.01 → +1 分
-		MaxEntryPrice:       0.45, // 确认时刻对侧 ASK >0.45 → 信号无效（fill≥0.50 转负 EV）
-		WOtherD5VStrong:     3,    // 对面大涨权重
-		WOtherD5Strong:      2,    // 对面中涨权重
-		WOtherD5Weak:        1,    // 对面小涨权重
-		WRangeExpansion:     2,    // 振幅偏小权重
-		ScoreEntry:          2,    // ≥2 分开仓（B2 或 od>strong 任一成立即触发）
-		ScoreAdd:            99,   // 加仓禁用
-		MaxLatencyMs:        0,    // 0=禁用，实盘建议 300ms
+		OtherDeltaVStrong:   0.05,  // 对面涨 >0.05 → +3 分
+		OtherDeltaStrong:    0.02,  // 对面涨 >0.02 → +2 分
+		OtherDeltaWeak:      0.01,  // 对面涨 >0.01 → +1 分
+		MaxEntryPrice:       0.45,  // 确认时刻对侧 ASK >0.45 → 信号无效（fill≥0.50 转负 EV）
+		WOtherD5VStrong:     3,     // 对面大涨权重
+		WOtherD5Strong:      2,     // 对面中涨权重
+		WOtherD5Weak:        1,     // 对面小涨权重
+		WRangeExpansion:     2,     // 振幅偏小权重
+		ScoreEntry:          2,     // ≥2 分开仓（B2 或 od>strong 任一成立即触发）
+		ScoreAdd:            99,    // 加仓禁用
+		MaxLatencyMs:        0,     // 0=禁用，实盘建议 300ms
 	}
 }
 
 // ── 状态机 ──
+
+// divergenceFloorDisabled 表示 DivergenceFloor 未启用（无同向否决）。
+const divergenceFloorDisabled = -999.0
 
 type flipState int
 

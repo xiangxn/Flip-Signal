@@ -298,8 +298,8 @@ func main() {
 	if cfg.Runtime.LabOutputDir != "" {
 		log.Printf(" Lab 数据: %s（events JSONL）", cfg.Runtime.LabOutputDir)
 	}
-	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick min_div≥%.2f score_entry≥%d score_add≥%d",
-		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.MinDivergence, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
+	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick div≥%.2f (floor=%.1f) score_entry≥%d score_add≥%d",
+		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.MinDivergence, flipCfg.DivergenceFloor, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
 	log.Println(" 数据源: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
 	log.Println("========================================")
 

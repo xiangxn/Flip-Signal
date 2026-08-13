@@ -14,7 +14,8 @@ package flip
 //	B3:  OtherDelta > VStrong/Strong/Weak → +3/+2/+1（确认期对侧回归）
 //	B2:  RangeExpansion < RangeExpThreshold → +2（BTC 没动 = PM 过度自信）
 //
-// B1 背离硬要求（MinDivergence）由引擎在评分前硬过滤，不参与评分。
+// B1 背离硬要求（DivergenceFloor 否决同向 + MinDivergence 可选强度）
+// 由引擎在评分前硬过滤，不参与评分。
 func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 	// L0: 订单簿延迟过大 → 数据不可信，一票否决。
 	if params.Cfg.MaxLatencyMs > 0 && params.OrderBookLatency > params.Cfg.MaxLatencyMs {

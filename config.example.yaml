@@ -170,16 +170,20 @@ flip:
 
   # 最小剩余秒数，只有 remaining_sec > 此值的穿越才有效
   # 确保有足够时间完成确认（confirm_delay_ticks × 5s）+ 下单执行
-  # 默认值: 35（2 ticks × 5s + 25s 执行缓冲）
-  min_remaining_sec: 35
+  # 默认值: 15（确认 2 ticks × 5s + FAK 执行缓冲 ~5-10s；窗口尾部信号质量最高）
+  min_remaining_sec: 15
 
   # ===== B1 背离硬要求（Formula B 核心）=====
 
-  # 穿越时刻 BTC 必须与 PM 反向：背离度 = ±btc_pos（YES侧取负）
-  # 背离度 < 此值 → 否决（同向/中性穿越 EV≈0，χ²=125 分桶证据）
-  # 0 = 禁用
-  # 默认值: 0.05
-  min_divergence: 0.05
+  # 背离度下限：div < 此值 → 否决（BTC 与 PM 同向穿越 EV≈0，χ²=125 分桶证据）
+  # 0 = 否决同向穿越（允许中性/背离入场），-999 = 禁用
+  # 默认值: 0.0（2026-08-13 频率优化：从 min_divergence=0.05 改为 floor=0）
+  divergence_floor: 0.0
+
+  # 背离强度要求：div < 此值 → 否决（divergence_floor 之上的额外强度门槛）
+  # 0 = 不要求额外强度（仅按 divergence_floor 过滤）
+  # 默认值: 0.0
+  min_divergence: 0.0
 
   # ===== B2 过度自信（历史波动范围，tick-independent）=====
 
@@ -187,9 +191,9 @@ flip:
   # 默认值: 18（约 1.5 小时的历史参考）
   hist_window_n: 18
 
-  # 区间扩展阈值，range_expansion < 此值 → BTC 几乎没动，PM 过度自信 → +2 分
-  # 默认值: 0.5
-  range_exp_threshold: 0.5
+  # 区间扩展阈值，range_expansion < 此值 → BTC 未真正突破，PM 过度自信 → +2 分
+  # 默认值: 1.0（2026-08-13 频率优化：0.5 → 1.0，<1 个历史振幅仍非突破）
+  range_exp_threshold: 1.0
 
   # 区间扩展上限，range_expansion ≥ 此值 → F0 否决（真突破，取消信号）
   # 默认值: 1.5

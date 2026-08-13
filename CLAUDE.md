@@ -7,12 +7,17 @@
 ### 核心原则
 > **不预测涨跌，只判断"什么时候市场过度自信"。**
 
-### 当前策略版本：Formula B（2026-08-13 标定）
-- 完整方案见 `docs/flip_strategy_plan_2026-08-13.md`，分析过程见 `docs/flip_optimization_analysis_2026-08-13.md`
-- 三个信号条件：B1 背离硬要求（`min_divergence=0.05`，BTC 必须与 PM 反向）、B2 过度自信（`range_expansion<0.5` → +2）、B3 确认回归（`other_delta` 三档 → +3/+2/+1）
+### 当前策略版本：Formula B 频率优化版（2026-08-13 标定）
+- 完整方案见 `docs/flip_strategy_plan_2026-08-13.md`，分析过程见 `docs/flip_optimization_analysis_2026-08-13.md`，
+  频率优化见 `docs/flip_frequency_optimization_2026-08-13.md`
+- 三个信号条件：B1 背离硬要求（`divergence_floor=0.0`，BTC 不得与 PM 同向，div<0 直接否决）、
+  B2 过度自信（`range_expansion<1.0` → +2）、B3 确认回归（`other_delta` 三档 → +3/+2/+1）
 - `score_entry=2`：任一核心信号成立即触发
 - 已停用：振荡/低价入场/btc_extreme 加分（权重 0）、path_eff<0.4 与 noise>3 否决（阈值 0）
-- **成交口径**：`yes_price/no_price` 存的是各订单簿 **best bid**，回测与实盘的成交价/gate 一律按对侧 **ask = 1 - 触发侧 bid** 计算（Go 引擎 gate 修正待落地，见方案文档 §5）
+- **成交口径**：`yes_price/no_price` 存的是各订单簿 **best bid**，回测与实盘的成交价/gate 一律按对侧
+  **ask = 1 - 触发侧 bid** 计算（Go 引擎 gate 已按 ask 口径实现，见方案文档 §5）
+- **实盘注意**：`max_latency_ms=300` 的 L0 延迟否决只在实盘生效（回测 data_0 无 latency 字段），
+  实盘信号率会低于回测基准
 
 ---
 
@@ -127,27 +132,30 @@ Idle ──Reset()──▶ Watching ──price>0.7──▶ Confirming ──s
 - **Done**: 本周期已产生信号，后续 snapshot 被忽略
 - **first_crossing_only**: 先试 YES，失败则 fallback 到 NO；两侧都失败则回到 Watching
 
-### Formula B 精简评分（2026-08-13 标定）
+### Formula B 精简评分（2026-08-13 频率优化版）
 
 三个信号条件，与策略哲学一一对应：
 
 | 条件 | 说明 | 权重 |
 |------|------|------|
-| **B1 背离硬要求** | 穿越时刻 BTC 必须与 PM 反向：YES侧触发要求 `btc_pos < -min_divergence`，NO侧要求 `btc_pos > min_divergence`（默认 0.05）。同向/中性穿越 EV≈0（χ²=125），直接否决 | 硬过滤 |
+| **B1 背离硬要求** | BTC 不得与 PM 同向：`divergence_floor=0.0`（div<0 直接否决，同向穿越 EV≈0，χ²=125）。`min_divergence`（默认 0）可额外要求背离强度 | 硬过滤 |
 | B3 确认回归 OtherDelta | other_delta > 0.05 / 0.02 / 0.01 | +3 / +2 / +1 |
-| **B2 过度自信 RangeExpansion** | range_expansion < 0.5（BTC 没动但 PM 已 0.7+） | +2 |
+| **B2 过度自信 RangeExpansion** | range_expansion < 1.0（BTC 移动不足 1 个历史振幅但 PM 已 0.7+） | +2 |
 | F0 Veto | range_expansion ≥ 1.5（真突破，PM 是对的） | 否决 |
 | **Price Gate（ask 口径）** | 确认时刻对侧 **ask = 1 - 触发侧 bid** > max_entry_price（0.45，与 trading.max_price 一致） | 信号无效 |
 
-- `score_entry = 2`：任一核心信号成立即触发（od>0.02 或 range<0.5），无需特征堆叠
+- `score_entry = 2`：任一核心信号成立即触发（od>0.02 或 range<1.0），无需特征堆叠
+- 窗口：`min_remaining_sec=15`（穿越 rem≥20 触发，确认 2 ticks 后 FAK 仍有 ~10s 缓冲；
+  窗口尾部信号质量最高，见频率优化文档 §2.1）
 - **已删除**（2026-08-13 Formula B 落地时从配置与代码中移除）：F3 振荡、F4/F5 低价入场、
   F7 btc_extreme 加分、path_eff<0.4 与 noise>3 否决、`allow_retry_crossings` 兼容模式
   （引擎始终多穿越重试）。详见方案文档 §2
 - **成交口径**：`yes_price/no_price` 存的是各订单簿 **best bid**。实盘 FAK 买入对侧
-  成交在 **ask = 1 - 触发侧 bid**（双 token 互补）。回测 fill 与 gate 均按 ask 口径；
-  Go 引擎的 gate 需同步改为 ask 口径（与 trader.go 最优卖价校验一致），见方案文档 §5.2
-- 基准表现（data_0, 1719 事件）：n=126、WR 46.0%、EV +0.214/笔、P&L +26.91、
-  PF 2.60、avg_fill 0.247；6 个完整日全部正 EV
+  成交在 **ask = 1 - 触发侧 bid**（双 token 互补）。回测 fill 与 gate 均按 ask 口径
+  （Go 引擎已实现，与 trader.go 最优卖价校验一致），见方案文档 §5.2
+- 基准表现（data_0, 1719 事件）：n=364、2.54 信号/小时、WR 45.6%、EV +0.234/笔、
+  P&L +85.10、PF 2.89、avg_fill 0.222；6 个完整日全部正 EV（频率优化详情见
+  `docs/flip_frequency_optimization_2026-08-13.md`）
 
 ---
 

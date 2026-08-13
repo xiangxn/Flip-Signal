@@ -7,12 +7,13 @@
 分析过程见 docs/flip_optimization_analysis_2026-08-13.md。
 
 Formula B — 三个信号条件，与策略哲学一一对应:
-  B1 背离硬要求 min_divergence=0.05:
-      穿越时刻 BTC 必须与 PM 反向（YES侧触发要求 btc_pos < -0.05，
-      NO侧触发要求 btc_pos > 0.05）。χ²=125，全候选最强特征；
-      同向穿越 EV≈0，直接否决。历史振幅未就绪的事件整体跳过。
-  B2 过度自信 range_expansion < 0.5 → +2:
-      BTC 振幅 < 历史平均振幅的一半 = BTC 没动但 PM 已 0.7+。
+  B1 背离硬要求 divergence_floor=0.0（2026-08-13 频率优化版）:
+      穿越时刻 BTC 不得与 PM 同向（div < floor 直接否决；YES侧
+      div=-btc_pos，NO侧 div=+btc_pos）。同向穿越 EV≈0（χ²=125），
+      直接否决；中性/背离穿越均可入场。min_divergence 可选再要求
+      背离强度（默认 0 = 不要求）。历史振幅未就绪的事件整体跳过。
+  B2 过度自信 range_expansion < 1.0 → +2:
+      BTC 振幅 < 1 个历史平均振幅 = BTC 未真正突破但 PM 已 0.7+。
   B3 确认回归 other_delta 三档 → +3/+2/+1:
       确认期（T+2 ticks）对侧 bid 回升 = 反转正在发生。
 
@@ -24,8 +25,9 @@ Formula B — 三个信号条件，与策略哲学一一对应:
 
 支持的市场: BTC, ETH（ETH 沿用 BTC 参数，待独立标定）
 
-基准结果（data_0, 1719 事件, ask 口径）:
-  n=126, WR 46.0%, EV +0.214/笔, P&L +26.91, PF 2.60, avg_fill 0.247
+基准结果（data_0, 1719 事件, ask 口径, 2026-08-13 频率优化版）:
+  n=364, 2.54 信号/小时, WR 45.6%, EV +0.234/笔, P&L +85.10, PF 2.89
+  （详见 docs/flip_frequency_optimization_2026-08-13.md）
 
 用法:
   python backtest_flip_scoring.py --profile btc --data ../data_0/lab/
@@ -40,17 +42,21 @@ class FlipBacktestConfig:
     trigger_threshold: float = 0.7       # PM 一侧 bid 超过此值触发
     min_pre_snaps: int = 5               # 穿越前至少需要的 snapshot 数
     max_remaining_sec: int = 260         # 窗口有效期上限: 仅 remaining_sec < 此值的穿越才有效
-    min_remaining_sec: int = 35          # 窗口有效期下限: 确认(2 ticks×5s)+下单执行余量
+    min_remaining_sec: int = 15          # 窗口有效期下限: 确认(2 ticks×5s)+FAK 执行缓冲(~5-10s)
 
     # ── B1 背离硬要求（Formula B 核心）──
-    # 穿越时刻 BTC 必须与 PM 反向，背离度 = ±btc_pos（YES侧取负）：
-    #   div < min_divergence → 否决（同向/中性穿越 EV≈0）
-    # 0 或负值 = 禁用
-    min_divergence: float = 0.05
+    # 双向过滤：divergence_floor 否决同向 + min_divergence 可选强度要求。
+    # 背离度 = ±btc_pos（YES侧取负）：
+    #   div < divergence_floor → 否决（0 = 否决同向穿越，BTC 与 PM 同向 EV≈0）
+    #   -999 = 禁用
+    divergence_floor: float = 0.0
+    #   div < min_divergence → 否决（floor 之上的额外强度门槛）
+    # 0 = 不要求额外强度
+    min_divergence: float = 0.0
 
     # ── B2 过度自信（振幅扩张, tick-independent）──
     hist_window_N: int = 18              # 前 N 根 K 线 (~1.5小时) 平均振幅
-    range_exp_threshold: float = 0.5     # 振幅 < 此值 → BTC没动, PM过度自信 → +2
+    range_exp_threshold: float = 1.0     # 振幅 < 此值 → BTC 未真正突破(<1 个历史振幅), PM过度自信 → +2
     range_exp_max: float = 1.5           # 振幅 ≥ 此值 → 真突破, PM是对的 → 否决
 
     # ── B3 确认回归（T+delay 特征）──

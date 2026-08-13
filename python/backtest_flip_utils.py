@@ -6,9 +6,9 @@
 所有函数均为无副作用纯函数，便于测试和调参。
 
 Formula B 三个信号条件（详见 docs/flip_strategy_plan_2026-08-13.md）:
-  B1 背离硬要求: 穿越时刻 BTC 必须与 PM 反向（min_divergence=0.05，
-     无历史振幅的事件整体跳过，与实盘引擎行为一致）
-  B2 过度自信:   range_expansion < 0.5 → +2
+  B1 背离硬要求: BTC 不得与 PM 同向（divergence_floor=0，div < floor
+     直接否决；无历史振幅的事件整体跳过，与实盘引擎行为一致）
+  B2 过度自信:   range_expansion < 1.0 → +2
   B3 确认回归:   other_delta 三档 → +3/+2/+1
   score_entry = 2: 任一核心信号成立即触发
 
@@ -162,13 +162,16 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     hist_avg_range = event.get("hist_avg_range")
 
     # ── B1 背离硬要求（Formula B 核心）──
+    # 双向过滤：divergence_floor 否决同向（div < floor）+ min_divergence 可选强度要求。
     # 历史振幅未就绪 → 无法计算背离度 → 丢弃（与 Go 引擎/实盘行为一致）
-    if cfg.min_divergence > 0:
+    if cfg.min_divergence > 0 or cfg.divergence_floor > -999:
         if hist_avg_range is None:
             return None
         btc_position = compute_btc_position(cross_snap["price"], open_price, hist_avg_range)
         btc_divergence = compute_btc_divergence(side, btc_position)
-        if btc_divergence < cfg.min_divergence:
+        if btc_divergence < cfg.divergence_floor:
+            return None
+        if cfg.min_divergence > 0 and btc_divergence < cfg.min_divergence:
             return None
     else:
         btc_position = compute_btc_position(cross_snap["price"], open_price,

@@ -233,16 +233,20 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 		return e.returnToWatching()
 	}
 
-	// B1: 背离硬要求 —— 穿越时刻 BTC 必须与 PM 反向
+	// B1: 背离硬要求 —— BTC 不得与 PM 同向（DivergenceFloor），
+	// 可选再要求背离强度（MinDivergence > 0）。
 	// 历史振幅未就绪时无法计算背离度 → 否决（与 Python 回测一致：
 	// 无 hist_avg_range 的事件整体跳过，避免预热期放行无 B1 的信号）
-	if e.cfg.MinDivergence > 0 {
+	if e.cfg.MinDivergence > 0 || e.cfg.DivergenceFloor > divergenceFloorDisabled {
 		if !e.histRange.IsReady() {
 			return e.returnToWatching()
 		}
 		e.btcPosition = BTCPosition(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
 		e.btcDivergence = Divergence(side, e.btcPosition)
-		if e.btcDivergence < e.cfg.MinDivergence {
+		if e.btcDivergence < e.cfg.DivergenceFloor {
+			return e.returnToWatching()
+		}
+		if e.cfg.MinDivergence > 0 && e.btcDivergence < e.cfg.MinDivergence {
 			return e.returnToWatching()
 		}
 	}
@@ -407,16 +411,20 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		}
 	}
 
-	// B1 背离硬要求：穿越时刻 BTC 必须与 PM 反向
+	// B1 背离硬要求：BTC 不得与 PM 同向（DivergenceFloor），
+	// 可选再要求背离强度（MinDivergence > 0）
 	// 历史振幅未就绪时无法计算背离度 → 否决（与 Python 回测一致）
 	var btcPosition, btcDivergence float64
-	if e.cfg.MinDivergence > 0 {
+	if e.cfg.MinDivergence > 0 || e.cfg.DivergenceFloor > divergenceFloorDisabled {
 		if !e.histRange.IsReady() {
 			return nil
 		}
 		btcPosition = BTCPosition(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
 		btcDivergence = Divergence(side, btcPosition)
-		if btcDivergence < e.cfg.MinDivergence {
+		if btcDivergence < e.cfg.DivergenceFloor {
+			return nil
+		}
+		if e.cfg.MinDivergence > 0 && btcDivergence < e.cfg.MinDivergence {
 			return nil
 		}
 	}

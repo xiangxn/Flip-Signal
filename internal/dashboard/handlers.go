@@ -59,7 +59,8 @@ type stateResponse struct {
 	LastFailedFeatures  *crossDetail `json:"last_failed_features"` // 最近一次失败穿越（多穿越模式诊断用）
 
 	// Config thresholds for feature pass/fail evaluation（前端诊断用）
-	MinDivergenceCfg    float64 `json:"min_divergence_cfg"`
+	DivergenceFloorCfg   float64 `json:"divergence_floor_cfg"`
+	MinDivergenceCfg     float64 `json:"min_divergence_cfg"`
 	RangeExpMaxCfg       float64 `json:"range_exp_max_cfg"`
 	RangeExpThresholdCfg float64 `json:"range_exp_threshold_cfg"`
 	OtherDeltaVStrongCfg float64 `json:"other_delta_vstrong_cfg"`
@@ -112,6 +113,7 @@ type configResponse struct {
 	MinPreSnaps       int     `json:"min_pre_snaps"`
 	MaxRemainingSec   int     `json:"max_remaining_sec"`
 	MinRemainingSec   int     `json:"min_remaining_sec"`
+	DivergenceFloor   float64 `json:"divergence_floor"`
 	MinDivergence     float64 `json:"min_divergence"`
 	ConfirmDelayTicks int     `json:"confirm_delay_ticks"`
 	ScoreEntry        int     `json:"score_entry"`
@@ -187,6 +189,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 
 	// Config thresholds for frontend feature pass/fail evaluation
 	cfg := s.Engine.Config()
+	resp.DivergenceFloorCfg = cfg.DivergenceFloor
 	resp.MinDivergenceCfg = cfg.MinDivergence
 	resp.RangeExpMaxCfg = cfg.RangeExpMax
 	resp.RangeExpThresholdCfg = cfg.RangeExpThreshold
@@ -305,6 +308,7 @@ func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 		MinPreSnaps:       cfg.MinPreSnaps,
 		MaxRemainingSec:   cfg.MaxRemainingSec,
 		MinRemainingSec:   cfg.MinRemainingSec,
+		DivergenceFloor:   cfg.DivergenceFloor,
 		MinDivergence:     cfg.MinDivergence,
 		ConfirmDelayTicks: cfg.ConfirmDelayTicks,
 		ScoreEntry:        cfg.ScoreEntry,

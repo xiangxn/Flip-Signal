@@ -82,7 +82,7 @@ func TestComputeFlipScore_BelowEntry(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
 		OtherDelta:     0.015, // >0.01 → +1（B3 弱档）
-		RangeExpansion: 0.8,   // ≥0.5 → B2 不参与
+		RangeExpansion: 1.2,   // ≥1.0 → B2 不参与
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -245,7 +245,7 @@ func TestEngine_CrossingWithConfirm(t *testing.T) {
 	}
 
 	// 穿越: YES>0.7，BTC=50005（低于 open → 背离 ✓）
-	// range_exp = 5/40 = 0.125 < 0.5 → B2 +2
+	// range_exp = 5/40 = 0.125 < 1.0 → B2 +2
 	crossSnap := makeTestSnap(0.75, 0.15, 50005, openPrice, 230)
 	if sig := eng.ProcessSnapshot(crossSnap, 1); sig != nil {
 		t.Fatal("expected nil after crossing (should be in CONFIRMING)")
@@ -290,21 +290,21 @@ func TestEngine_NoScoreWithoutCoreSignals(t *testing.T) {
 	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
-	// BTC 下行（YES 侧背离），穿越时 range_exp = 25/40 = 0.625 ≥ 0.5 → B2 不参与
+	// BTC 下行（YES 侧背离），穿越时 range_exp = 40/40 = 1.0 ≥ 1.0 → B2 不参与
 	openPrice := 50000.0
 	for i := 0; i < 5; i++ {
-		price := openPrice - float64(i)*5
+		price := openPrice - float64(i)*8
 		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// 穿越: YES=0.75/NO=0.20 at 49975（div=+0.625 ✓, range=0.625 → 无 B2）
-	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.20, 49975, openPrice, 230), 1); sig != nil {
+	// 穿越: YES=0.75/NO=0.20 at 49960（div=+1.0 ✓, range=1.0 → 无 B2）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.20, 49960, openPrice, 230), 1); sig != nil {
 		t.Fatal("expected nil after crossing")
 	}
 
 	// 确认: 对侧回落 other_delta=-0.03 → B3 无贡献 → score=0 < 2 → 无信号
-	sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.17, 49975, openPrice, 225), 1)
+	sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.17, 49960, openPrice, 225), 1)
 	if sig != nil {
 		t.Errorf("expected nil (no core signal), got score=%d", sig.Score)
 	}
@@ -329,7 +329,7 @@ func TestEngine_DivergenceVeto(t *testing.T) {
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// 穿越: YES>0.7 且 BTC=50030（高于 open → btc_pos=+0.75 → div=-0.75 < 0.05）
+	// 穿越: YES>0.7 且 BTC=50030（高于 open → btc_pos=+0.75 → div=-0.75 < floor 0）
 	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50030, openPrice, 230), 1); sig != nil {
 		t.Fatal("expected B1 veto at crossing (BTC aligned with PM)")
 	}
@@ -488,7 +488,7 @@ func TestEngine_OneSignalPerCycle(t *testing.T) {
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// 穿越 + 确认（od=+0.05 → +2；range=25/40=0.625 → 无 B2；score=2 ≥2 → 信号）
+	// 穿越 + 确认（od=+0.05 → +2；range=25/40=0.625 < 1.0 → B2 +2；score=4 ≥2 → 信号）
 	eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 49975, 50000, 230), 1)
 	sig1 := eng.ProcessSnapshot(makeTestSnap(0.78, 0.20, 49975, 50000, 225), 1)
 	if sig1 == nil {
@@ -642,7 +642,7 @@ func TestEngine_YESFailedFallbackToNO(t *testing.T) {
 		t.Fatalf("expected stateWatching after YES fail, got %d", eng.state)
 	}
 
-	// NO 穿越: NO=0.75/YES=0.15，BTC 反弹到 50020（div=+0.5 ✓, range=0.5 → 无 B2）
+	// NO 穿越: NO=0.75/YES=0.15，BTC 反弹到 50020（div=+0.5 ✓, range=0.5 < 1.0 → B2 +2）
 	eng.ProcessSnapshot(makeTestSnap(0.15, 0.75, 50020, openPrice, 220), 1)
 	if eng.state != stateConfirming {
 		t.Fatalf("expected stateConfirming for NO crossing, got %d", eng.state)
@@ -680,9 +680,9 @@ func TestEngine_BothSidesFailResumeWatching(t *testing.T) {
 		t.Fatalf("expected stateWatching after YES fail, got %d", eng.state)
 	}
 
-	// NO 穿越（BTC 反弹到 50020，div=+0.5 ✓）→ 确认无核心信号
-	eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50020, openPrice, 220), 1)
-	sig := eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50020, openPrice, 215), 1)
+	// NO 穿越（BTC 反弹到 50045，div=+1.125 ✓, range=1.125 ≥ 1.0 → 无 B2）→ 确认无核心信号
+	eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50045, openPrice, 220), 1)
+	sig := eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50045, openPrice, 215), 1)
 	if sig != nil {
 		t.Fatal("expected nil when both sides fail")
 	}
