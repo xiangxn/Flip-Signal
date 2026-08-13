@@ -3,82 +3,8 @@ package flip
 import "math"
 
 // ═══════════════════════════════════════════════════════════════
-// 特征提取 —— 纯函数，与 backtest_flip_utils.py 对应
+// 特征提取 —— 纯函数，与 backtest_flip_utils.py 对应（Formula B）
 // ═══════════════════════════════════════════════════════════════
-
-// PathEfficiency 计算价格从开盘到当前位置的路径效率。
-// §2.2: path_eff = |lastPrice - openPrice| / (max(prices) - min(prices))
-//   ~1.0 = 单边趋势（价格直走，无回调）
-//   ~0.0 = 来回振荡（价格往返，净位移小）
-func PathEfficiency(prePrices []float64, openPrice float64) float64 {
-	if len(prePrices) == 0 {
-		return 0
-	}
-	lastPrice := prePrices[len(prePrices)-1]
-	netMove := math.Abs(lastPrice - openPrice)
-
-	preHigh := prePrices[0]
-	preLow := prePrices[0]
-	for _, p := range prePrices {
-		if p > preHigh {
-			preHigh = p
-		}
-		if p < preLow {
-			preLow = p
-		}
-	}
-	preRange := preHigh - preLow
-	if preRange == 0 {
-		return 0
-	}
-	return netMove / preRange
-}
-
-// TotalPath 计算 tick 级累计路径长度。
-// §2.3 辅助函数: Σ|p[i] - p[i-1]|
-func TotalPath(prePrices []float64) float64 {
-	var total float64
-	for i := 1; i < len(prePrices); i++ {
-		total += math.Abs(prePrices[i] - prePrices[i-1])
-	}
-	return total
-}
-
-// NoiseRatio 衡量价格运动的噪声程度。
-// §2.3: noise_ratio = total_path / net_move
-// 越高越振荡。振荡行情通常 >5，趋势行情通常 <3。
-func NoiseRatio(prePrices []float64, netMove float64) float64 {
-	totalPath := TotalPath(prePrices)
-	if netMove == 0 {
-		return totalPath // pure oscillation, net displacement = 0
-	}
-	return totalPath / netMove
-}
-
-// CountFlips 统计价格序列中的方向切换次数。
-// §2.4: 忽略平盘 tick（d==0）。
-func CountFlips(prePrices []float64) int {
-	if len(prePrices) < 3 {
-		return 0
-	}
-	flips := 0
-	for i := 2; i < len(prePrices); i++ {
-		d1 := prePrices[i-1] - prePrices[i-2]
-		d2 := prePrices[i] - prePrices[i-1]
-		if d1 != 0 && d2 != 0 && (d1 > 0) != (d2 > 0) {
-			flips++
-		}
-	}
-	return flips
-}
-
-// IsOscillating 判断价格是否处于振荡状态（三条件同时满足）。
-// §2.5: path_eff ≤ 阈值 AND noise_ratio > 阈值 AND flips > 阈值。
-func IsOscillating(pathEff, noiseRatio float64, flips int, cfg FlipConfig) bool {
-	return pathEff <= cfg.PathEffOscillating &&
-		noiseRatio > cfg.NoiseRatioOscillating &&
-		flips > cfg.FlipsOscillating
-}
 
 // RangeExpansion 衡量 BTC 位移相对于历史平均振幅的倍数。
 // §2.6: range_expansion = |price - openPrice| / histAvgRange
@@ -98,4 +24,15 @@ func BTCPosition(price, openPrice, histAvgRange float64) float64 {
 		return 0
 	}
 	return (price - openPrice) / histAvgRange
+}
+
+// Divergence 计算 BTC 与 PM 的背离度（方向校正后）。
+// 正 = BTC 与 PM 反向（flip edge）；负 = BTC 与 PM 同向。
+// YES 侧触发（PM 看涨）取 -btcPosition（BTC 跌 = 背离）；
+// NO 侧触发（PM 看跌）取 +btcPosition（BTC 涨 = 背离）。
+func Divergence(side string, btcPosition float64) float64 {
+	if side == "yes" {
+		return -btcPosition
+	}
+	return btcPosition
 }

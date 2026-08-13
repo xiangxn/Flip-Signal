@@ -19,19 +19,20 @@ func TestFlipRecorder_RecordAndResolve_Win(t *testing.T) {
 	}
 
 	sig := &FlipSignal{
-		Time:         time.Now().UTC(),
-		ConditionID:  "0xabc123",
-		Side:         "yes",
-		Score:        6,
-		EntryPrice:   0.15,
-		Shares:       1.0,
-		ExecStatus:   "filled",
-		FilledShares: 1.0,
-		AvgFillPrice: 0.15,
-		RemainingSec: 225,
-		PathEff:      0.75,
-		NoiseRatio:   1.2,
-		Flips:        2,
+		Time:           time.Now().UTC(),
+		ConditionID:    "0xabc123",
+		Side:           "yes",
+		Score:          4,
+		EntryPrice:     0.15,
+		Shares:         1.0,
+		ExecStatus:     "filled",
+		FilledShares:   1.0,
+		AvgFillPrice:   0.15,
+		RemainingSec:   225,
+		RangeExpansion: 0.2,
+		BTCPosition:    -0.1,
+		BtcDivergence:  0.1,
+		OtherDelta:     0.03,
 	}
 
 	if err := r.RecordSignal(sig); err != nil {
@@ -84,16 +85,20 @@ func TestFlipRecorder_RecordAndResolve_Loss(t *testing.T) {
 	}
 
 	sig := &FlipSignal{
-		Time:         time.Now().UTC(),
-		ConditionID:  "0xdef456",
-		Side:         "no",
-		Score:        7,
-		EntryPrice:   0.22,
-		Shares:       2.0,
-		ExecStatus:   "filled",
-		FilledShares: 2.0,
-		AvgFillPrice: 0.22,
-		RemainingSec: 200,
+		Time:           time.Now().UTC(),
+		ConditionID:    "0xdef456",
+		Side:           "no",
+		Score:          5,
+		EntryPrice:     0.22,
+		Shares:         2.0,
+		ExecStatus:     "filled",
+		FilledShares:   2.0,
+		AvgFillPrice:   0.22,
+		RemainingSec:   200,
+		RangeExpansion: 0.2,
+		BTCPosition:    0.1,
+		BtcDivergence:  0.1,
+		OtherDelta:     0.05,
 	}
 
 	if err := r.RecordSignal(sig); err != nil {

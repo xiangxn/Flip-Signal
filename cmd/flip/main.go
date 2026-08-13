@@ -298,8 +298,8 @@ func main() {
 	if cfg.Runtime.LabOutputDir != "" {
 		log.Printf(" Lab 数据: %s（events JSONL）", cfg.Runtime.LabOutputDir)
 	}
-	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick score_entry≥%d score_add≥%d multi_cross=%v",
-		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.ScoreEntry, flipCfg.ScoreAdd, flipCfg.AllowRetryCrossings)
+	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick min_div≥%.2f score_entry≥%d score_add≥%d",
+		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.MinDivergence, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
 	log.Println(" 数据源: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
 	log.Println("========================================")
 
@@ -491,10 +491,9 @@ func main() {
 						log.Printf("[Flip] 信号记录失败: %v", err)
 					}
 					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f shares=%.0f | "+
-						"osc=%v path_eff=%.2f noise=%.1f flips=%d range_exp=%.1f btc_pos=%.2f other_d=%+.3f rem=%ds",
+						"div=%+.2f range_exp=%.1f btc_pos=%+.2f other_d=%+.3f rem=%ds",
 						sig.Side, sig.Score, sig.EntryPrice, sig.Shares,
-						sig.IsOscillating, sig.PathEff, sig.NoiseRatio, sig.Flips,
-						sig.RangeExpansion, sig.BTCPosition, sig.OtherDelta,
+						sig.BtcDivergence, sig.RangeExpansion, sig.BTCPosition, sig.OtherDelta,
 						sig.RemainingSec)
 
 					// ── 交易执行（纸面/实盘统一路径）──

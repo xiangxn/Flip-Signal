@@ -186,19 +186,19 @@ def score_candidate(c: Cand, cfg: FlipBacktestConfig,
     # 结构性过滤（搜索用，通过 _ 前缀动态属性挂载）
     if getattr(cfg, "_side_only", "both") == "yes" and c.side != "yes":
         return None
-    veto_thr = getattr(cfg, "_veto_align", 0.0)  # >0 启用：同向超阈值否决
-    min_div = getattr(cfg, "_min_div", -9.0)     # >-9 启用：背离必须超过此值
+    veto_thr = getattr(cfg, "_veto_align", 0.0)  # >0 启用：同向超阈值否决（研究用）
+    min_div = getattr(cfg, "_min_div", cfg.min_divergence)  # B1 背离硬要求
     # 背离度：正 = BTC 与 PM 反向（YES侧=btc跌, NO侧=btc涨）
     div = -c.btc_pos if c.side == "yes" else c.btc_pos
     if veto_thr > 0 and div < -veto_thr:  # 同向（BTC 与 PM 方向一致）→ 否决
         return None
-    if min_div > -9 and div < min_div:    # 背离不足 → 否决
+    if min_div > 0 and div < min_div:     # 背离不足 → 否决
         return None
-    # T=0 硬过滤（与 backtest_flip_utils 一致：noise>3.0 否决、path_eff<0.4 否决；
-    # 减法实验可通过 _noise_veto/_path_eff_veto 关闭）
-    if getattr(cfg, "_noise_veto", True) and c.noise_ratio > 3.0:
+    # T=0 硬过滤（Formula B 已删除 path_eff/noise 否决；
+    # 研究脚本保留 _noise_veto/_path_eff_veto 开关，默认关闭）
+    if getattr(cfg, "_noise_veto", False) and c.noise_ratio > 3.0:
         return None
-    if getattr(cfg, "_path_eff_veto", True) and c.path_eff < 0.4:
+    if getattr(cfg, "_path_eff_veto", False) and c.path_eff < 0.4:
         return None
     if c.range_exp is not None and c.range_exp >= cfg.range_exp_max:
         return None
@@ -208,11 +208,8 @@ def score_candidate(c: Cand, cfg: FlipBacktestConfig,
     gate_price = fill_ask if gate_mode == "ask" else other_bid_confirm
     if cfg.max_entry_price > 0 and gate_price > cfg.max_entry_price:
         return None
-    # 评分
+    # 评分（Formula B：B3 确认回归 + B2 过度自信）
     other_delta = c.other_delta_d[delay]
-    osc = (c.path_eff <= cfg.path_eff_oscillating
-           and c.noise_ratio > cfg.noise_ratio_oscillating
-           and c.flips > cfg.flips_oscillating)
     score = 0
     if other_delta > cfg.other_delta_vstrong:
         score += cfg.w_other_d5_vstrong
@@ -220,18 +217,8 @@ def score_candidate(c: Cand, cfg: FlipBacktestConfig,
         score += cfg.w_other_d5_strong
     elif other_delta > cfg.other_delta_weak:
         score += cfg.w_other_d5_weak
-    if osc:
-        score += cfg.w_oscillating
-    # F4/F5 低价入场 — 与当前引擎一致：用对侧 bid（entry_cheap_strong/weak 口径）
-    if c.other_bid_cross < cfg.entry_cheap_strong:
-        score += cfg.w_cheap_entry_strong
-    elif c.other_bid_cross < cfg.entry_cheap_weak:
-        score += cfg.w_cheap_entry_weak
     if c.range_exp is not None and c.range_exp < cfg.range_exp_threshold:
         score += cfg.w_range_expansion
-    btc_extreme = (c.btc_pos < cfg.btc_pos_min) if c.side == "yes" else (c.btc_pos > cfg.btc_pos_max)
-    if btc_extreme:
-        score += cfg.w_btc_extreme
     if score < cfg.score_entry:
         return None
     return score, fill_ask, other_delta, other_bid_confirm
@@ -506,17 +493,9 @@ def section_search(cands: list[Cand], days: list[str]):
     v._side_only = "yes"
     ablations.append(("+只做YES侧", v))
     v = FlipBacktestConfig()
-    v.w_oscillating = 0
-    ablations.append(("+振荡权重归零 (w_osc=0)", v))
-    v = FlipBacktestConfig()
-    v._veto_align = 0.05
-    v.w_oscillating = 0
-    ablations.append(("+veto@0.05 + w_osc=0", v))
-    v = FlipBacktestConfig()
     v._veto_align = 0.05
     v._side_only = "yes"
-    v.w_oscillating = 0
-    ablations.append(("+veto@0.05 + 只YES侧 + w_osc=0", v))
+    ablations.append(("+veto@0.05 + 只YES侧", v))
     for name, cfg in ablations:
         run(cfg, name)
 
@@ -560,7 +539,7 @@ def section_search(cands: list[Cand], days: list[str]):
         cfg.other_delta_strong = od_w * 2
         cfg.other_delta_vstrong = od_w * 5
         cfg._side_only = side_only
-        cfg._min_div = min_div
+        cfg.min_divergence = min_div
         name = f"S4 min_div={min_div} delay={delay} sc>={sc_entry} side={side_only} od={od_w}"
         run(cfg, name)
 
@@ -603,173 +582,6 @@ def section_search(cands: list[Cand], days: list[str]):
         print()
 
 
-def section_subtract(cands: list[Cand], days: list[str]):
-    """特征减法分析：拆特征、拆否决、重标定分数门槛，观察信号量与质量。
-
-    核心问题：当前公式 7 特征叠加 + 3 个硬否决 → 信号稀缺。哪些可以拆？
-      特征层证据：振荡 χ²=3.5(p=0.32) 无效；低价入场方向相反（越便宜 WR 越低）；
-                 path_eff<0.4 否决滤掉的反而是 EV 偏好的候选；noise>3 否决中性。
-    """
-    print("\n" + "=" * 100)
-    print("  五、特征减法分析（ask 口径；目标：少特征、多信号、质量不降）")
-    print("=" * 100)
-    full_days = [d for d in days if d not in ("08-05", "08-12")]
-    splitA_train = set(full_days[:-1])
-    splitA_test = set(full_days[-1:])
-    splitB_train = set(full_days[:4])
-    splitB_test = set(full_days[4:])
-
-    results = []
-
-    def run(cfg, name, cat):
-        st = {}
-        for split, (tr, te) in (("A", (splitA_train, splitA_test)),
-                                ("B", (splitB_train, splitB_test))):
-            st[split] = (
-                stats(_select([c for c in cands if c.day in tr], cfg)),
-                stats(_select([c for c in cands if c.day in te], cfg)),
-            )
-        st["full"] = stats(_select(cands, cfg))
-        results.append((cat, name, st))
-
-    def cstr(s):
-        if s["n"] == 0:
-            return "n=0"
-        return f"n={s['n']:>3} WR={s['wr']:>4.0f}% EV={s['ev']:>+.3f} P&L={s['pnl']:>+6.2f}"
-
-    base = FlipBacktestConfig()
-    run(base, "当前参数 (7特征+3否决, sc>=5)", "基线")
-
-    # ── 1. 单特征删除（其余不动，sc>=5 固定）──
-    v = FlipBacktestConfig(); v.w_oscillating = 0
-    run(v, "-F3 振荡 (w_osc=0)", "单删")
-    v = FlipBacktestConfig(); v.w_cheap_entry_strong = 0; v.w_cheap_entry_weak = 0
-    run(v, "-F4/F5 低价入场 (w_cheap=0)", "单删")
-    v = FlipBacktestConfig(); v.w_btc_extreme = 0
-    run(v, "-F7 BTC背离加分 (w_btc=0)", "单删")
-    v = FlipBacktestConfig(); v._path_eff_veto = False
-    run(v, "-否决 path_eff<0.4", "单删")
-    v = FlipBacktestConfig(); v._noise_veto = False
-    run(v, "-否决 noise>3.0", "单删")
-    v = FlipBacktestConfig(); v._path_eff_veto = False; v._noise_veto = False
-    run(v, "-两个否决 (path_eff+noise)", "单删")
-    v = FlipBacktestConfig(); v._path_eff_veto = False; v._noise_veto = False; v.w_oscillating = 0
-    run(v, "-两否决 -振荡", "单删")
-
-    # ── 2. 精简公式（od + range + btc 三特征，无 osc/cheap，重标定 sc）──
-    def lean(sc, use_btc=True, veto=True, md=None, od_w=0.01):
-        v = FlipBacktestConfig()
-        v.w_oscillating = 0
-        v.w_cheap_entry_strong = 0
-        v.w_cheap_entry_weak = 0
-        v.w_btc_extreme = 1 if use_btc else 0
-        v._path_eff_veto = veto
-        v._noise_veto = veto
-        v.score_entry = sc
-        if md is not None:
-            v._min_div = md
-        v.other_delta_weak = od_w
-        v.other_delta_strong = od_w * 2
-        v.other_delta_vstrong = od_w * 5
-        return v
-
-    for sc in (3, 4):
-        run(lean(sc, use_btc=True, veto=True), f"精简 od+range+btc, sc>={sc}", "精简")
-    for sc in (2, 3):
-        run(lean(sc, use_btc=False, veto=True), f"精简 od+range, sc>={sc}", "精简")
-    for sc in (3, 4):
-        run(lean(sc, use_btc=True, veto=False), f"精简 od+range+btc, 无否决, sc>={sc}", "精简")
-    for sc in (2, 3):
-        run(lean(sc, use_btc=False, veto=False), f"精简 od+range, 无否决, sc>={sc}", "精简")
-
-    # ── 3. 精简 + min_div（唯一硬过滤，其他否决全拆）──
-    for md, sc in ((0.05, 3), (0.05, 4), (0.05, 5), (0.0, 3), (0.0, 4)):
-        run(lean(sc, use_btc=True, veto=False, md=md), f"精简+min_div={md}, sc>={sc}", "min_div")
-    for md, sc in ((0.05, 2), (0.05, 3)):
-        run(lean(sc, use_btc=False, veto=False, md=md), f"精简(无btc)+min_div={md}, sc>={sc}", "min_div")
-
-    # ── 输出：按类别，train EV 一致为正且 n 大者优先 ──
-    def sort_key(r):
-        cat, name, st = r
-        evs = [st[s][0]["ev"] if st[s][0]["n"] >= 20 else -9 for s in ("A", "B")]
-        ns = [st[s][0]["n"] for s in ("A", "B")]
-        ok = all(ev > 0 for ev in evs)
-        return (0 if ok else 1, -min(evs), -sum(ns))
-
-    results.sort(key=sort_key)
-    hdr = f"  {'配置':<40} | {'trainA':>24} | {'testA':>24} | {'trainB':>24} | {'testB':>24} | {'full':>24}"
-    for cat in ("基线", "单删", "精简", "min_div"):
-        print(f"\n  ── {cat} ──")
-        print(hdr)
-        print("  " + "-" * len(hdr))
-        for rcat, name, st in results:
-            if rcat != cat:
-                continue
-            print(f"  {name:<40} | {cstr(st['A'][0]):>24} | {cstr(st['A'][1]):>24} "
-                  f"| {cstr(st['B'][0]):>24} | {cstr(st['B'][1]):>24} | {cstr(st['full']):>24}")
-    print()
-    """决赛圈验证：逐日分解、原始穿越语义、div×fill 交叉、实盘换算。"""
-    print("\n" + "=" * 100)
-    print("  四、决赛圈验证（ask 口径）")
-    print("=" * 100)
-
-    def mk(name, **kw):
-        cfg = FlipBacktestConfig()
-        for k, v in kw.items():
-            setattr(cfg, k, v)
-        return name, cfg
-
-    finalists = [
-        mk("当前参数"),
-        mk("冠军A: min_div=0.05 sc>=5", _min_div=0.05),
-        mk("冠军B: min_div=0.05 sc>=3", _min_div=0.05, score_entry=3),
-        mk("冠军C: min_div=0.0 sc>=5", _min_div=0.0),
-        mk("备选: veto@0.05 (保留中性)", _veto_align=0.05),
-    ]
-
-    for name, cfg in finalists:
-        sigs = _select(cands, cfg)
-        s = stats(sigs)
-        print(f"\n【{name}】全量: {fmt(s)}")
-        bd = day_breakdown(sigs)
-        print("  逐日: " + " | ".join(
-            f"{d} n={v['n']} WR={v['wr']:.0f}% EV={v['ev']:+.2f}" for d, v in bd.items()))
-        # 实盘换算（2 USDC stake，FAK）
-        if sigs:
-            import numpy as _np
-            live_pnl = sum((s["pnl"] * 2.0 / s["fill"]) for s in sigs)
-            n_days = max((max(s["event_idx"] for s in sigs) - min(s["event_idx"] for s in sigs)) / 288, 0)
-            days_span = (max(x["day"] for x in [{"day": s["day"]} for s in sigs]),
-                         min(x["day"] for x in [{"day": s["day"]} for s in sigs]))
-            print(f"  实盘换算 (stake=2 USDC/signal, fill 时股数=2/fill): "
-                  f"总 P&L ≈ {live_pnl:+.1f} USDC / 8 天")
-
-    # ── 原始穿越语义 vs 窗口语义（引擎当前行为）──
-    print("\n  ── 穿越语义稳健性：原始价格穿越 (max_rem=295) vs 引擎窗口语义 (max_rem=260) ──")
-    raw_cands = extract_candidates(load_events(DATA_DIR), max_rem=295)
-    for name, cfg in finalists:
-        s_win = stats(_select(cands, cfg))
-        s_raw = stats(_select(raw_cands, cfg))
-        print(f"  {name:<36} | 窗口语义: {fmt(s_win):<52} | 原始语义: {fmt(s_raw)}")
-
-    # ── 冠军 div×fill 交叉表 ──
-    name, cfg = finalists[1]
-    sigs = _select(cands, cfg)
-    print(f"\n  ── {name} 的 fill×won 交叉 ──")
-    buckets = defaultdict(list)
-    for s in sigs:
-        f = s["fill"]
-        key = ("<0.30" if f < 0.30 else "0.30-0.35" if f < 0.35 else
-               "0.35-0.40" if f < 0.40 else "0.40-0.45" if f <= 0.45 else ">0.45")
-        buckets[key].append(s)
-    for k in ("<0.30", "0.30-0.35", "0.35-0.40", "0.40-0.45", ">0.45"):
-        sub = buckets.get(k, [])
-        if sub:
-            w = sum(1 for s in sub if s["won"])
-            ev = sum(s["pnl"] for s in sub) / len(sub)
-            print(f"    fill {k:>8}: n={len(sub):>3} WR={w/len(sub)*100:>5.1f}% EV={ev:>+6.3f}")
-
-
 def main():
     events = load_events(DATA_DIR)
     print(f"事件: {len(events)}")
@@ -787,8 +599,6 @@ def main():
         section_search(cands, days)
     if section in ("all", "validate"):
         section_validate(cands, days)
-    if section in ("all", "subtract"):
-        section_subtract(cands, days)
 
 
 if __name__ == "__main__":

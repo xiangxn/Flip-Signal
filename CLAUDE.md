@@ -140,9 +140,9 @@ Idle ──Reset()──▶ Watching ──price>0.7──▶ Confirming ──s
 | **Price Gate（ask 口径）** | 确认时刻对侧 **ask = 1 - 触发侧 bid** > max_entry_price（0.45，与 trading.max_price 一致） | 信号无效 |
 
 - `score_entry = 2`：任一核心信号成立即触发（od>0.02 或 range<0.5），无需特征堆叠
-- **已停用**（权重/阈值置 0，字段保留）：F3 振荡（χ² p=0.32 无效力）、F4/F5 低价入场
-  （越便宜 WR 越低，且用不可成交的对侧 bid）、F7 btc_extreme 加分（由 B1 取代）、
-  path_eff<0.4 否决（滤掉 EV 偏好候选）、noise>3 否决（中性）
+- **已删除**（2026-08-13 Formula B 落地时从配置与代码中移除）：F3 振荡、F4/F5 低价入场、
+  F7 btc_extreme 加分、path_eff<0.4 与 noise>3 否决、`allow_retry_crossings` 兼容模式
+  （引擎始终多穿越重试）。详见方案文档 §2
 - **成交口径**：`yes_price/no_price` 存的是各订单簿 **best bid**。实盘 FAK 买入对侧
   成交在 **ask = 1 - 触发侧 bid**（双 token 互补）。回测 fill 与 gate 均按 ask 口径；
   Go 引擎的 gate 需同步改为 ask 口径（与 trader.go 最优卖价校验一致），见方案文档 §5.2
@@ -347,7 +347,7 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
 
 6. **5秒采样**: 与 Polymarket CLOC 盘口更新频率匹配，减少噪声。
 
-7. **多穿越重试（allow_retry_crossings）**: 每个向上穿越 0.7 的上升沿都触发检测，首个评分通过者下注。每周期最多一注，YES 优先。已下注后不再观察后续穿越。
+7. **多穿越重试**: 每个向上穿越 0.7 的上升沿都触发检测，首个评分通过者下注。每周期最多一注，YES 优先。已下注后不再观察后续穿越。
 
 8. **纸面交易 + 实盘可选**: 默认纸面交易，配置 `trading.enabled: true` 或 `-trading` flag 启用 FAK 市价单实盘执行。需要有 CLOB 凭证。
 

@@ -54,34 +54,26 @@ type stateResponse struct {
 	TraderCumPnl       float64 `json:"trader_cumulative_pnl"` // 全部 Position PnL 之和
 
 	// 多穿越重试
-	AllowRetryCrossings bool         `json:"allow_retry_crossings"`
 	RetryCount          int          `json:"retry_count"`
 	CrossFeatures       *crossDetail `json:"cross_features"`       // 当前 Confirming 中
 	LastFailedFeatures  *crossDetail `json:"last_failed_features"` // 最近一次失败穿越（多穿越模式诊断用）
 
 	// Config thresholds for feature pass/fail evaluation（前端诊断用）
-	PathEffVetoMinCfg    float64 `json:"path_eff_veto_min_cfg"`
-	NoiseRatioVetoMaxCfg float64 `json:"noise_ratio_veto_max_cfg"`
+	MinDivergenceCfg    float64 `json:"min_divergence_cfg"`
 	RangeExpMaxCfg       float64 `json:"range_exp_max_cfg"`
 	RangeExpThresholdCfg float64 `json:"range_exp_threshold_cfg"`
 	OtherDeltaVStrongCfg float64 `json:"other_delta_vstrong_cfg"`
 	OtherDeltaStrongCfg  float64 `json:"other_delta_strong_cfg"`
 	OtherDeltaWeakCfg    float64 `json:"other_delta_weak_cfg"`
-	EntryCheapStrongCfg  float64 `json:"entry_cheap_strong_cfg"`
-	EntryCheapWeakCfg    float64 `json:"entry_cheap_weak_cfg"`
 	ScoreEntryCfg        int     `json:"score_entry_cfg"`
 	MaxLatencyMsCfg      int64   `json:"max_latency_ms_cfg"`
 }
 
 type crossDetail struct {
 	Side               string  `json:"side"`
-	PathEff            float64 `json:"path_eff"`
-	NoiseRatio         float64 `json:"noise_ratio"`
-	Flips              int     `json:"flips"`
-	IsOscillating      bool    `json:"is_oscillating"`
 	RangeExpansion     float64 `json:"range_expansion"`
 	BTCPosition        float64 `json:"btc_position"`
-	BTCExtreme         bool    `json:"btc_extreme"`
+	BtcDivergence      float64 `json:"btc_divergence"` // 背离度：正=BTC 与 PM 反向
 	ConfirmTicksWaited int     `json:"confirm_ticks_waited"`
 
 	// 评分阶段特征（LastFailed 中填充，诊断用）
@@ -116,25 +108,21 @@ type histRangeResponse struct {
 }
 
 type configResponse struct {
-	AllowRetryCrossings   bool    `json:"allow_retry_crossings"`
-	TriggerThreshold      float64 `json:"trigger_threshold"`
-	MinPreSnaps           int     `json:"min_pre_snaps"`
-	MaxRemainingSec       int     `json:"max_remaining_sec"`
-	ConfirmDelayTicks     int     `json:"confirm_delay_ticks"`
-	ScoreEntry            int     `json:"score_entry"`
-	ScoreAdd              int     `json:"score_add"`
-	PathEffOscillating    float64 `json:"path_eff_oscillating"`
-	NoiseRatioOscillating float64 `json:"noise_ratio_oscillating"`
-	FlipsOscillating      int     `json:"flips_oscillating"`
-	RangeExpThreshold     float64 `json:"range_exp_threshold"`
-	RangeExpMax           float64 `json:"range_exp_max"`
-	OtherDeltaVStrong     float64 `json:"other_delta_vstrong"`
-	OtherDeltaStrong      float64 `json:"other_delta_strong"`
-	OtherDeltaWeak        float64 `json:"other_delta_weak"`
-	BTCPosMax             float64 `json:"btc_pos_max"`
-	BTCPosMin             float64 `json:"btc_pos_min"`
-	EntryCheapStrong      float64 `json:"entry_cheap_strong"`
-	EntryCheapWeak        float64 `json:"entry_cheap_weak"`
+	TriggerThreshold  float64 `json:"trigger_threshold"`
+	MinPreSnaps       int     `json:"min_pre_snaps"`
+	MaxRemainingSec   int     `json:"max_remaining_sec"`
+	MinRemainingSec   int     `json:"min_remaining_sec"`
+	MinDivergence     float64 `json:"min_divergence"`
+	ConfirmDelayTicks int     `json:"confirm_delay_ticks"`
+	ScoreEntry        int     `json:"score_entry"`
+	ScoreAdd          int     `json:"score_add"`
+	RangeExpThreshold float64 `json:"range_exp_threshold"`
+	RangeExpMax       float64 `json:"range_exp_max"`
+	OtherDeltaVStrong float64 `json:"other_delta_vstrong"`
+	OtherDeltaStrong  float64 `json:"other_delta_strong"`
+	OtherDeltaWeak    float64 `json:"other_delta_weak"`
+	MaxEntryPrice     float64 `json:"max_entry_price"`
+	MaxLatencyMs      int64   `json:"max_latency_ms"`
 }
 
 // ── Handlers ──
@@ -185,7 +173,6 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		WinRate:       winRate,
 		CumulativePnl: cumPnl,
 
-		AllowRetryCrossings: s.Engine.Config().AllowRetryCrossings,
 		RetryCount:          s.Engine.RetryCount(),
 	}
 
@@ -200,15 +187,12 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 
 	// Config thresholds for frontend feature pass/fail evaluation
 	cfg := s.Engine.Config()
-	resp.PathEffVetoMinCfg = cfg.PathEffVetoMin
-	resp.NoiseRatioVetoMaxCfg = cfg.NoiseRatioVetoMax
+	resp.MinDivergenceCfg = cfg.MinDivergence
 	resp.RangeExpMaxCfg = cfg.RangeExpMax
 	resp.RangeExpThresholdCfg = cfg.RangeExpThreshold
 	resp.OtherDeltaVStrongCfg = cfg.OtherDeltaVStrong
 	resp.OtherDeltaStrongCfg = cfg.OtherDeltaStrong
 	resp.OtherDeltaWeakCfg = cfg.OtherDeltaWeak
-	resp.EntryCheapStrongCfg = cfg.EntryCheapStrong
-	resp.EntryCheapWeakCfg = cfg.EntryCheapWeak
 	resp.ScoreEntryCfg = cfg.ScoreEntry
 	resp.MaxLatencyMsCfg = cfg.MaxLatencyMs
 
@@ -235,13 +219,9 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		if t0 != nil {
 			resp.CrossFeatures = &crossDetail{
 				Side:               t0.Side,
-				PathEff:            t0.PathEff,
-				NoiseRatio:         t0.NoiseRatio,
-				Flips:              t0.Flips,
-				IsOscillating:      t0.Oscillating,
 				RangeExpansion:     t0.RangeExpansion,
 				BTCPosition:        t0.BTCPosition,
-				BTCExtreme:         t0.BTCExtreme,
+				BtcDivergence:      t0.BtcDivergence,
 				ConfirmTicksWaited: s.Engine.ConfirmTicksWaited(),
 				OrderBookLatency:   t0.OrderBookLatency,
 			}
@@ -252,13 +232,9 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	if t0 := s.Engine.LastFailedT0(); t0 != nil {
 		resp.LastFailedFeatures = &crossDetail{
 			Side:             t0.Side,
-			PathEff:          t0.PathEff,
-			NoiseRatio:       t0.NoiseRatio,
-			Flips:            t0.Flips,
-			IsOscillating:    t0.Oscillating,
 			RangeExpansion:   t0.RangeExpansion,
 			BTCPosition:      t0.BTCPosition,
-			BTCExtreme:       t0.BTCExtreme,
+			BtcDivergence:    t0.BtcDivergence,
 			OtherDelta:       t0.OtherDelta,
 			EntryPrice:       t0.EntryPrice,
 			Score:            t0.Score,
@@ -325,25 +301,21 @@ func (s *State) handleHistRange(w http.ResponseWriter, r *http.Request) {
 func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := s.Engine.Config()
 	writeJSON(w, http.StatusOK, configResponse{
-		AllowRetryCrossings:   cfg.AllowRetryCrossings,
-		TriggerThreshold:      cfg.TriggerThreshold,
-		MinPreSnaps:           cfg.MinPreSnaps,
-		MaxRemainingSec:       cfg.MaxRemainingSec,
-		ConfirmDelayTicks:     cfg.ConfirmDelayTicks,
-		ScoreEntry:            cfg.ScoreEntry,
-		ScoreAdd:              cfg.ScoreAdd,
-		PathEffOscillating:    cfg.PathEffOscillating,
-		NoiseRatioOscillating: cfg.NoiseRatioOscillating,
-		FlipsOscillating:      cfg.FlipsOscillating,
-		RangeExpThreshold:     cfg.RangeExpThreshold,
-		RangeExpMax:           cfg.RangeExpMax,
-		OtherDeltaVStrong:     cfg.OtherDeltaVStrong,
-		OtherDeltaStrong:      cfg.OtherDeltaStrong,
-		OtherDeltaWeak:        cfg.OtherDeltaWeak,
-		BTCPosMax:             cfg.BTCPosMax,
-		BTCPosMin:             cfg.BTCPosMin,
-		EntryCheapStrong:      cfg.EntryCheapStrong,
-		EntryCheapWeak:        cfg.EntryCheapWeak,
+		TriggerThreshold:  cfg.TriggerThreshold,
+		MinPreSnaps:       cfg.MinPreSnaps,
+		MaxRemainingSec:   cfg.MaxRemainingSec,
+		MinRemainingSec:   cfg.MinRemainingSec,
+		MinDivergence:     cfg.MinDivergence,
+		ConfirmDelayTicks: cfg.ConfirmDelayTicks,
+		ScoreEntry:        cfg.ScoreEntry,
+		ScoreAdd:          cfg.ScoreAdd,
+		RangeExpThreshold: cfg.RangeExpThreshold,
+		RangeExpMax:       cfg.RangeExpMax,
+		OtherDeltaVStrong: cfg.OtherDeltaVStrong,
+		OtherDeltaStrong:  cfg.OtherDeltaStrong,
+		OtherDeltaWeak:    cfg.OtherDeltaWeak,
+		MaxEntryPrice:     cfg.MaxEntryPrice,
+		MaxLatencyMs:      cfg.MaxLatencyMs,
 	})
 }
 

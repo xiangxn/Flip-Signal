@@ -27,21 +27,26 @@
 
 ## 2. Formula B 完整参数规格
 
-### 2.1 触发与窗口（Layer 0，不变）
+> ✅ **已落地（2026-08-13）**：Go（flip 包/配置/测试）+ Python 回测均已按本规格实现并验收。
+> 停用特征与兼容模式的配置项/代码已**全部删除**（非置零保留）。
+
+### 2.1 触发与窗口（Layer 0）
 
 | 参数 | 值 | 说明 |
 |---|---|---|
 | `trigger_threshold` | 0.7 | 一侧 bid > 0.7 触发 |
-| `allow_retry_crossings` | true | 每个上升沿都尝试评分，首过者胜，每周期一注 |
 | `min_pre_snaps` | 5 | 穿越前至少 5 个 snapshot |
 | `max_remaining_sec` | 260 | 太早 = BTC 路径太短 |
 | `min_remaining_sec` | 35 | 确认(2 ticks)+FAK 下单余量 |
+
+多穿越重试为引擎固定行为（每个上升沿都尝试评分，首过者胜，每周期一注），
+不再作为配置项（原 `allow_retry_crossings` 兼容模式已删除）。
 
 ### 2.2 信号条件（Formula B 核心）
 
 | 参数 | 值 | 说明 |
 |---|---|---|
-| **`min_divergence`** | **0.05（新增）** | 背离硬要求：YES 侧触发要求 `btc_pos < -0.05`；NO 侧触发要求 `btc_pos > 0.05`。不满足 → 否决 |
+| **`min_divergence`** | **0.05（新增）** | 背离硬要求：YES 侧触发要求 `btc_pos < -0.05`；NO 侧触发要求 `btc_pos > 0.05`。不满足 → 否决；历史振幅未就绪的事件整体跳过（与回测一致） |
 | `range_exp_threshold` | 0.5 | `range_exp < 0.5` → +2（B2）|
 | `range_exp_max` | 1.5 | `range_exp ≥ 1.5` → 真突破否决（F0）|
 | `confirm_delay_ticks` | 2 | 确认等待 10s（B3）|
@@ -49,15 +54,16 @@
 | **`score_entry`** | **2** | 任一核心信号成立即触发（od>0.02 或 range<0.5）|
 | `score_add` | 99 | 加仓禁用 |
 
-### 2.3 已停用特征（权重/阈值置 0）
+### 2.3 已删除的特征与配置项
 
-| 参数 | 原值 → 新值 | 停用理由 |
-|---|---|---|
-| `w_oscillating` | 1 → **0** | χ² p=0.32 无统计效力 |
-| `w_cheap_entry_strong/weak` | 1/1 → **0/0** | 越便宜 WR 越低，且用不可成交的对侧 bid 判价 |
-| `w_btc_extreme` | 1 → **0** | 由 B1 硬过滤取代 |
-| `path_eff_veto_min` | 0.4 → **0（禁用）** | 否决滤掉 EV 偏好的候选 |
-| `noise_ratio_veto_max` | 3.0 → **0（禁用）** | 中性，纯减信号 |
+| 删除项 | 删除理由 |
+|---|---|
+| `w_oscillating` + `path_eff_oscillating` + `noise_ratio_oscillating` + `flips_oscillating`（F3 振荡） | χ² p=0.32 无统计效力 |
+| `w_cheap_entry_strong/weak` + `entry_cheap_strong/weak`（F4/F5 低价入场） | 越便宜 WR 越低，且用不可成交的对侧 bid 判价 |
+| `w_btc_extreme` + `btc_pos_max/min`（F7） | 由 B1 硬过滤取代 |
+| `path_eff_veto_min`（0.4） | 否决滤掉 EV 偏好的候选 |
+| `noise_ratio_veto_max`（3.0） | 中性，纯减信号 |
+| `allow_retry_crossings`（兼容模式） | 引擎固定多穿越重试，兼容分支已删 |
 
 ### 2.4 成交与 gate 口径（实盘对齐，重要）
 
@@ -88,9 +94,8 @@ Split B: train +0.206 / test +0.263
 
 ## 4. 上线步骤
 
-1. **Python 回测复核**（本轮）：`python backtest_flip_scoring.py --profile btc --data ../data_0/lab/`
-   验收线：n=126、WR 46.0%、P&L +26.91、PF 2.60、avg_fill 0.247。
-2. **Go 侧落地**（§5 改动清单，需先通过 go build + go test）。
+1. ~~**Python 回测复核**~~ ✅ 已完成：n=126、WR 46.0%、P&L +26.91、PF 2.60、avg_fill 0.247，验收通过。
+2. ~~**Go 侧落地**~~ ✅ 已完成（2026-08-13）：见 §5 执行记录，`go build` + `go test ./...` 全绿。
 3. **纸面运行 2-3 天**：核对信号频率（预期 ~20/日）、逐笔特征与回测分布一致、
    FAK 前 gate 行为（ask 口径）无异常。
 4. **实盘小 stake 起步**：`trading.enabled: true`、`stake_per_signal: 2.0`、
@@ -99,92 +104,24 @@ Split B: train +0.206 / test +0.263
 
 ---
 
-## 5. Go 侧改动清单（待执行）
+## 5. Go 侧执行记录（✅ 已完成 2026-08-13）
 
-### 5.1 `internal/flip/types.go`
+停用特征与兼容模式的**配置项与代码全部删除**（非置零保留）：
 
-1. `FlipConfig` 新增字段：
-   ```go
-   // B1 背离硬要求：穿越时刻 BTC 必须与 PM 反向（背离度 = ±btc_pos，YES侧取负）。
-   // 背离度 < 此值 → 否决。0 = 禁用。2026-08-13 Formula B: 0.05
-   MinDivergence float64 `mapstructure:"min_divergence"`
-   ```
-2. `DefaultConfig()` 变更：
-   - `MinDivergence: 0.05`（新增）
-   - `ScoreEntry: 2`（原 5）
-   - `WOscillating: 0`、`WCheapEntryStr/Weak: 0`、`WBtcExtreme: 0`
-   - `PathEffVetoMin: 0`（禁用，原 0.4）、`NoiseRatioVetoMax: 0`（禁用，原 3.0）
-   - 其余（TriggerThreshold/AllowRetryCrossings/MinPreSnaps/MaxRemainingSec/MinRemainingSec/
-     HistWindowN/RangeExpThreshold/RangeExpMax/ConfirmDelayTicks/OD 三档/MaxEntryPrice 0.45/
-     MaxLatencyMs）不变
-   - 更新注释：引用 `docs/flip_strategy_plan_2026-08-13.md`，删除「2026-08-12 网格搜索」旧注释
+| 文件 | 改动 |
+|---|---|
+| `internal/flip/types.go` | FlipConfig：新增 `MinDivergence=0.05`、`ScoreEntry=2`；删除振荡三条件/低价入场两档/btc_pos 阈值/两个 T=0 否决/对应权重/`AllowRetryCrossings` 全部字段。FlipSignal/ScoreParams：删除 path_eff/noise/flips/osc/btc_extreme，新增 `BtcDivergence` |
+| `internal/flip/features.go` | 删除 PathEfficiency/TotalPath/NoiseRatio/CountFlips/IsOscillating；保留 RangeExpansion/BTCPosition；新增 `Divergence(side, btcPos)` |
+| `internal/flip/scoring.go` | `ComputeFlipScore` 改为 Formula B：L0 延迟否决 + F0 真突破否决 + B3 三档 + B2 过度自信 |
+| `internal/flip/engine.go` | 删除兼容模式分支与旧特征计算；`enterConfirming`/`evaluateCrossingAt` 新增 B1 背离硬过滤（hist 未就绪即否决，与回测一致）；gate 已为 ask 口径；信号字段对齐 |
+| `internal/dashboard/` | handlers.go/app.js/index.html：PathEff/Noise/Osc/BTCExtreme 列与面板替换为 BtcDivergence；删除 Multi-Crossing 开关显示 |
+| `cmd/flip/main.go` | 启动日志与 SIGNAL 日志改为 Formula B 字段（div/range/other_d） |
+| `config.yaml` / `config.example.yaml` | flip 段重写：删除全部停用项与 `allow_retry_crossings`，新增 `min_divergence: 0.05`、`score_entry: 2` |
+| `internal/flip/engine_test.go` | 重写：删除振荡/veto/兼容模式用例；新增 B1 背离否决、hist 未就绪否决、pending 穿越评估用例；gate 用例按 ask 口径 |
+| `python/` | backtest_flip_config/utils/scoring 同步删除停用项与兼容分支；验收 n=126/WR 46.0%/+26.91 与分析一致 |
 
-### 5.2 `internal/flip/scoring.go` / `engine.go`
-
-1. **新增 B1 背离硬过滤**：在 `evaluateCrossingAt`/`enterConfirming` 的 T=0 过滤处：
-   ```go
-   divergence := btcPos
-   if side == "yes" { divergence = -btcPos }
-   if cfg.MinDivergence > 0 && divergence < cfg.MinDivergence {
-       return nil // 同向/中性穿越：EV≈0，否决
-   }
-   ```
-2. ~~**gate 口径统一为 ask**~~ ✅ **已完成（2026-08-13）**：
-   `engine.go` 两处 gate（`evaluateCrossingAt` 与 `onConfirmed`）已改为
-   `confirmPrice = 1.0 - 触发侧bid`（对侧 ask），与 trader.go 的最优卖价校验
-   口径一致；`types.go`/`config.example.yaml` 注释同步（gate 0.45 ask 口径）；
-   新增 `TestEngine_MaxEntryPriceAskPass` 用例并修复旧 `TestEngine_MaxEntryPriceVeto`
-   （原用例因默认值 0.30→0.45 已失效，本次一并修正），`go build` + `go test ./...` 全绿。
-3. 评分函数 `ComputeFlipScore`：振荡/低价入场/btc_extreme 分支保留代码但权重由
-   config 控制（已置 0），无需删除逻辑。
-4. FlipSignal 输出新增 `BtcDivergence` 字段（JSON: `btc_divergence`），与 Python 对齐。
-
-### 5.3 `config.yaml` / `config.example.yaml`
-
-```yaml
-flip:
-  trigger_threshold: 0.7
-  allow_retry_crossings: true
-  min_pre_snaps: 5
-  max_remaining_sec: 260
-  min_remaining_sec: 35
-  min_divergence: 0.05        # 新增：B1 背离硬要求
-  path_eff_oscillating: 0.7   # 停用特征，字段保留
-  noise_ratio_oscillating: 1.5
-  flips_oscillating: 1
-  hist_window_n: 18
-  range_exp_threshold: 0.5
-  range_exp_max: 1.5
-  confirm_delay_ticks: 2
-  od_hard_filter: -999.0
-  other_delta_vstrong: 0.05
-  other_delta_strong: 0.02
-  other_delta_weak: 0.01
-  btc_pos_max: 0.1            # 停用特征，字段保留
-  btc_pos_min: -0.1
-  path_eff_veto_min: 0        # 停用（原 0.4）
-  noise_ratio_veto_max: 0     # 停用（原 3.0）
-  entry_cheap_strong: 0.20    # 停用特征，字段保留
-  entry_cheap_weak: 0.25
-  max_entry_price: 0.45       # ASK 口径 gate，与 trading.max_price 一致
-  w_other_delta_vstrong: 3
-  w_other_delta_strong: 2
-  w_other_delta_weak: 1
-  w_oscillating: 0            # 停用（原 1）
-  w_cheap_entry_strong: 0     # 停用（原 1）
-  w_cheap_entry_weak: 0       # 停用（原 1）
-  w_range_expansion: 2
-  w_btc_extreme: 0            # 停用（原 1），由 min_divergence 取代
-  score_entry: 2              # 原 5
-  score_add: 99
-  max_latency_ms: 0
-```
-
-### 5.4 单元测试
-
-- `engine_test.go` 需同步：现有用例按 Formula A 参数断言，需改为 Formula B 参数
-  或显式构造旧参数跑兼容用例。
-- 新增用例：B1 背离否决（同向穿越不触发）、ask 口径 gate（触发侧 bid 回落 → gate 放行）。
+`min_divergence` 语义：YES 侧触发要求 `btc_pos < -0.05`，NO 侧触发要求 `btc_pos > 0.05`；
+历史振幅未就绪的事件整体跳过（与 Python 回测行为一致）。
 
 ---
 

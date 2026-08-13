@@ -120,7 +120,7 @@ function updateChart(snapshots) {
 // ── Data fetching ──
 
 let refreshSec = 5;
-let scoreEntryCfg = 5; // 从 /api/state 同步的 Score 入场阈值，用于前端着色
+let scoreEntryCfg = 2; // 从 /api/state 同步的 Score 入场阈值，用于前端着色
 
 async function fetchState() {
   try {
@@ -157,10 +157,6 @@ async function fetchState() {
     badge.textContent = d.engine_state_label;
     badge.className = 'state-badge ' + (STATE_CLASSES[d.engine_state_label] || 'state-idle');
 
-    const multixEl = document.getElementById('eng-multix');
-    multixEl.textContent = d.allow_retry_crossings ? 'ON' : 'OFF';
-    multixEl.className = d.allow_retry_crossings ? 'val-green' : '';
-
     document.getElementById('eng-retries').textContent = d.retry_count || 0;
     document.getElementById('eng-snaps').textContent = d.snap_count;
     document.getElementById('eng-remaining').textContent = d.remaining_sec + 's';
@@ -189,13 +185,9 @@ async function fetchState() {
       const f = d.cross_features;
       const items = [
         ['Side', f.side],
-        ['Path Eff', f.path_eff.toFixed(3)],
-        ['Noise Ratio', f.noise_ratio.toFixed(2)],
-        ['Flips', f.flips],
-        ['Oscillating', f.is_oscillating ? '✓' : '✗'],
         ['Range Exp.', f.range_expansion.toFixed(2)],
         ['BTC Position', f.btc_position.toFixed(2)],
-        ['BTC Extreme', f.btc_extreme ? '✓' : '✗'],
+        ['BTC Divergence', f.btc_divergence.toFixed(2)],
         ['Confirm Ticks', f.confirm_ticks_waited],
         ['Latency', (f.order_book_latency || 0) + 'ms'],
       ];
@@ -219,40 +211,33 @@ async function fetchState() {
       // 特征评估辅助函数：返回 true 表示该特征未通过（应加红边框）
       const isFail = (label, rawVal) => {
         switch (label) {
-          case 'Path Eff':     return rawVal < d.path_eff_veto_min_cfg;
-          case 'Noise Ratio':  return rawVal > d.noise_ratio_veto_max_cfg;
-          case 'Oscillating':  return !rawVal;
-          case 'Range Exp.':   return rawVal >= d.range_exp_threshold_cfg;
-          case 'BTC Extreme':  return !rawVal;
-          case 'Other Delta':  return rawVal <= d.other_delta_weak_cfg;
-          case 'Entry Price':  return rawVal >= d.entry_cheap_weak_cfg;
-          case 'Score':        return rawVal < d.score_entry_cfg;
-          case 'Latency':      return d.max_latency_ms_cfg > 0 && rawVal > d.max_latency_ms_cfg;
-          default:             return false;
+          case 'BTC Divergence': return rawVal < d.min_divergence_cfg;
+          case 'Range Exp.': return rawVal >= d.range_exp_threshold_cfg;
+          case 'Other Delta': return rawVal <= d.other_delta_weak_cfg;
+          case 'Score': return rawVal < d.score_entry_cfg;
+          case 'Latency': return d.max_latency_ms_cfg > 0 && rawVal > d.max_latency_ms_cfg;
+          default: return false;
         }
       };
 
       // [label, displayValue, rawValueForEval, evaluable]
       const items = [
-        ['Side',          f.side,                              f.side,                     false],
-        ['Path Eff',      f.path_eff.toFixed(3),               f.path_eff,                 true],
-        ['Noise Ratio',   f.noise_ratio.toFixed(2),            f.noise_ratio,              true],
-        ['Oscillating',   f.is_oscillating ? '✓' : '✗',       f.is_oscillating,           true],
-        ['Range Exp.',    f.range_expansion.toFixed(2),        f.range_expansion,          true],
-        ['BTC Position',  f.btc_position.toFixed(2),           f.btc_position,             false],
-        ['BTC Extreme',   f.btc_extreme ? '✓' : '✗',          f.btc_extreme,              true],
-        ['Latency',       (f.order_book_latency || 0) + 'ms',  f.order_book_latency || 0,  true],
+        ['Side', f.side, f.side, false],
+        ['Range Exp.', f.range_expansion.toFixed(2), f.range_expansion, true],
+        ['BTC Position', f.btc_position.toFixed(2), f.btc_position, false],
+        ['BTC Divergence', f.btc_divergence.toFixed(2), f.btc_divergence, true],
+        ['Latency', (f.order_book_latency || 0) + 'ms', f.order_book_latency || 0, true],
       ];
 
       // 附加评分阶段特征（仅当 onConfirmed 已执行时存在）
       if (f.other_delta !== undefined && f.other_delta !== 0) {
-        items.push(['Other Delta', f.other_delta.toFixed(3),   f.other_delta,              true]);
+        items.push(['Other Delta', f.other_delta.toFixed(3), f.other_delta, true]);
       }
       if (f.entry_price !== undefined && f.entry_price !== 0) {
-        items.push(['Entry Price', f.entry_price.toFixed(3),   f.entry_price,              true]);
+        items.push(['Entry Price', f.entry_price.toFixed(3), f.entry_price, false]);
       }
       if (f.score !== undefined) {
-        items.push(['Score',       f.score + '/' + scoreEntryCfg, f.score,                 true]);
+        items.push(['Score', f.score + '/' + scoreEntryCfg, f.score, true]);
       }
 
       fg.innerHTML = items.map(([l, v, raw, evaluable]) => {
@@ -299,7 +284,7 @@ async function fetchSignals() {
       let wl = '<span class="pending">-</span>';
       let pnl = '-';
       let pnlCls = '';
-      if (s.resolved_at) {
+      if (s.resolved_at && s.resolved_at !== "0001-01-01T00:00:00Z") {
         wl = s.won ? '<span class="won">WIN</span>' : '<span class="lost">LOSS</span>';
         const v = s.pnl || 0;
         pnl = (v >= 0 ? '+' : '') + v.toFixed(4);
@@ -318,9 +303,7 @@ async function fetchSignals() {
         <td>${s.exec_status === 'filled' ? s.avg_fill_price.toFixed(3) : s.entry_price.toFixed(3)}</td>
         <td>${(s.shares || 0).toFixed(2)}</td>
         <td>${execHtml}</td>
-        <td>${s.path_eff?.toFixed(2) || '-'}</td>
-        <td>${s.noise_ratio?.toFixed(2) || '-'}</td>
-        <td>${s.is_oscillating ? '✓' : '-'}</td>
+        <td>${s.btc_divergence?.toFixed(2) || '-'}</td>
         <td>${s.range_expansion?.toFixed(2) || '-'}</td>
         <td>${s.btc_position?.toFixed(2) || '-'}</td>
         <td>${s.other_delta?.toFixed(3) || '-'}</td>
@@ -367,4 +350,4 @@ function pollAll() {
 }
 
 pollAll();
-setInterval(pollAll, refreshSec*1000);
+setInterval(pollAll, refreshSec * 1000);

@@ -7,134 +7,8 @@ import (
 )
 
 // ═══════════════════════════════════════════════════════════════
-// Feature extraction tests
+// Feature extraction tests（Formula B）
 // ═══════════════════════════════════════════════════════════════
-
-func TestPathEfficiency_Trending(t *testing.T) {
-	// Price goes straight up: 100 → 101 → 102 → 103 → 104
-	// net_move = abs(104-100) = 4, pre_range = 104-100 = 4
-	// path_eff = 4/4 = 1.0
-	prices := []float64{100, 101, 102, 103, 104}
-	eff := PathEfficiency(prices, 100)
-	if eff != 1.0 {
-		t.Errorf("expected 1.0, got %.4f", eff)
-	}
-}
-
-func TestPathEfficiency_Oscillating(t *testing.T) {
-	// Price oscillates: 100 → 103 → 100 → 103 → 100
-	// net_move = abs(100-100) = 0, pre_range = 103-100 = 3
-	// path_eff = 0/3 = 0.0
-	prices := []float64{100, 103, 100, 103, 100}
-	eff := PathEfficiency(prices, 100)
-	if eff != 0.0 {
-		t.Errorf("expected 0.0, got %.4f", eff)
-	}
-}
-
-func TestPathEfficiency_Mixed(t *testing.T) {
-	// Price goes up with pullback: 100 → 102 → 101 → 103 → 104
-	// net_move = abs(104-100) = 4, pre_range = 104-100 = 4
-	// path_eff = 4/4 = 1.0 (range captures extremes)
-	prices := []float64{100, 102, 101, 103, 104}
-	eff := PathEfficiency(prices, 100)
-	if eff != 1.0 {
-		t.Errorf("expected 1.0, got %.4f", eff)
-	}
-}
-
-func TestTotalPath(t *testing.T) {
-	prices := []float64{100, 102, 101, 103}
-	// |102-100| + |101-102| + |103-101| = 2 + 1 + 2 = 5
-	tp := TotalPath(prices)
-	if tp != 5.0 {
-		t.Errorf("expected 5.0, got %.4f", tp)
-	}
-}
-
-func TestNoiseRatio(t *testing.T) {
-	// Trending: 100 → 101 → 102 → 103 → 104
-	// total_path = 1+1+1+1 = 4, net_move = 4 → ratio = 1.0
-	prices := []float64{100, 101, 102, 103, 104}
-	nr := NoiseRatio(prices, 4.0)
-	if nr != 1.0 {
-		t.Errorf("expected 1.0, got %.4f", nr)
-	}
-}
-
-func TestNoiseRatio_ZeroNetMove(t *testing.T) {
-	// Pure oscillation returning to start
-	prices := []float64{100, 103, 100, 103, 100}
-	// total_path = 3+3+3+3 = 12
-	nr := NoiseRatio(prices, 0)
-	if nr != 12.0 {
-		t.Errorf("expected 12.0, got %.4f", nr)
-	}
-}
-
-func TestCountFlips(t *testing.T) {
-	// 100 → 102 ↑, 102 → 101 ↓, 101 → 103 ↑ → 2 flips
-	prices := []float64{100, 102, 101, 103}
-	flips := CountFlips(prices)
-	if flips != 2 {
-		t.Errorf("expected 2, got %d", flips)
-	}
-}
-
-func TestCountFlips_FlatIgnored(t *testing.T) {
-	// 100 → 102 ↑, 102 → 102 (flat, ignored → d1=0 skip), 102 → 101 ↓
-	// At i=2: d1=0 (102-102), skip → 0 flips. Flat ticks absorb both surrounding moves.
-	// Python behavior is identical.
-	prices := []float64{100, 102, 102, 101}
-	flips := CountFlips(prices)
-	if flips != 0 {
-		t.Errorf("expected 0 (flat tick absorbs surrounding direction changes), got %d", flips)
-	}
-}
-
-func TestCountFlips_TooShort(t *testing.T) {
-	prices := []float64{100, 101}
-	flips := CountFlips(prices)
-	if flips != 0 {
-		t.Errorf("expected 0 for short slice, got %d", flips)
-	}
-}
-
-func TestIsOscillating_Yes(t *testing.T) {
-	cfg := DefaultConfig()
-	// Formula A: path_eff=0.3≤0.8, noise=8.0>1.5, flips=5>1 → oscillating
-	osc := IsOscillating(0.3, 8.0, 5, cfg)
-	if !osc {
-		t.Error("expected oscillating=true (Formula A thresholds)")
-	}
-}
-
-func TestIsOscillating_No_PathEff(t *testing.T) {
-	cfg := DefaultConfig()
-	// Formula A: path_eff=0.9 > 0.8 → not oscillating
-	osc := IsOscillating(0.9, 8.0, 5, cfg)
-	if osc {
-		t.Error("expected oscillating=false (path_eff=0.9 > 0.8)")
-	}
-}
-
-func TestIsOscillating_No_Noise(t *testing.T) {
-	cfg := DefaultConfig()
-	// Formula A: noise_ratio=1.0 ≤ 1.5 → not oscillating
-	osc := IsOscillating(0.3, 1.0, 5, cfg)
-	if osc {
-		t.Error("expected oscillating=false (noise_ratio=1.0 ≤ 1.5)")
-	}
-}
-
-func TestIsOscillating_No_Flips(t *testing.T) {
-	cfg := DefaultConfig()
-	// Formula A: flips=1 ≤ 1 → not oscillating (>1 means ≥2)
-	osc := IsOscillating(0.3, 8.0, 1, cfg)
-	if osc {
-		t.Error("expected oscillating=false (flips=1 ≤ 1)")
-	}
-}
 
 func TestRangeExpansion(t *testing.T) {
 	// BTC moved $50 from open, hist avg = $100 → 0.5
@@ -166,20 +40,32 @@ func TestBTCPosition_ZeroHist(t *testing.T) {
 	}
 }
 
+func TestDivergence(t *testing.T) {
+	// YES 侧触发（PM 看涨）：BTC 跌 = 背离（取 -btc_pos）
+	if d := Divergence("yes", -0.2); d != 0.2 {
+		t.Errorf("expected 0.2 for YES side, got %.4f", d)
+	}
+	if d := Divergence("yes", 0.2); d != -0.2 {
+		t.Errorf("expected -0.2 for YES side (BTC up = 同向), got %.4f", d)
+	}
+	// NO 侧触发（PM 看跌）：BTC 涨 = 背离（取 +btc_pos）
+	if d := Divergence("no", 0.2); d != 0.2 {
+		t.Errorf("expected 0.2 for NO side, got %.4f", d)
+	}
+	if d := Divergence("no", -0.2); d != -0.2 {
+		t.Errorf("expected -0.2 for NO side (BTC down = 同向), got %.4f", d)
+	}
+}
+
 // ═══════════════════════════════════════════════════════════════
-// Scoring tests
+// Scoring tests（Formula B：B3 三档 + B2 过度自信，最高 5 分）
 // ═══════════════════════════════════════════════════════════════
 
 func TestComputeFlipScore_MaxScore(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
-		Side:           "no",
-		OtherDelta:     0.06, // >0.05 → +3 (Formula A top tier)
-		IsOscillating:  true, // +1 (Formula A: 降低到 1)
-		EntryPrice:     0.15, // <0.20 → +1 (elif, no stacking)
-		RangeExpansion: 0.3,  // <0.5 → +2
-		BTCPosition:    0.25, // NO side, >0.1 → BTC diverges
-		BTCExtreme:     true, // pre-computed by engine
+		OtherDelta:     0.06, // >0.05 → +3（B3 最高档）
+		RangeExpansion: 0.3,  // <0.5 → +2（B2）
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -187,22 +73,16 @@ func TestComputeFlipScore_MaxScore(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 8 // 3+1+1+2+1 = 8 (Formula A max with these inputs)
-	if score != expected {
-		t.Errorf("expected %d, got %d", expected, score)
+	if score != 5 {
+		t.Errorf("expected 5 (Formula B max), got %d", score)
 	}
 }
 
-func TestComputeFlipScore_MinTrigger(t *testing.T) {
+func TestComputeFlipScore_BelowEntry(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
-		Side:           "no",
-		OtherDelta:     0.015,  // >0.01 → +1 (Formula A weak)
-		IsOscillating:  false,  // 0
-		EntryPrice:     0.22,   // <0.25 → +1 (elif)
-		RangeExpansion: 0.8,    // not <0.5 → 0
-		BTCPosition:    0.25,   // NO side, >0.1 → BTC diverges
-		BTCExtreme:     true,   // pre-computed by engine
+		OtherDelta:     0.015, // >0.01 → +1（B3 弱档）
+		RangeExpansion: 0.8,   // ≥0.5 → B2 不参与
 		HistReady:      true,
 		Cfg:            cfg,
 	}
@@ -210,77 +90,70 @@ func TestComputeFlipScore_MinTrigger(t *testing.T) {
 	if vetoed {
 		t.Error("unexpected veto")
 	}
-	expected := 3 // 1+1+1 = 3 (Formula A: weak od + entry + btc divergence)
-	if score != expected {
-		t.Errorf("expected %d, got %d", expected, score)
+	if score != 1 {
+		t.Errorf("expected 1 (below ScoreEntry=2), got %d", score)
 	}
 }
 
 func TestComputeFlipScore_F0Veto(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
-		Side:           "yes",
-		OtherDelta:     0.05,
-		IsOscillating:  true,
-		EntryPrice:     0.15,
-		RangeExpansion: 2.5, // ≥2.0 → veto
-		BTCPosition:    0.25,
+		OtherDelta:     0.06,
+		RangeExpansion: 2.5, // ≥1.5 → 真突破否决
 		HistReady:      true,
 		Cfg:            cfg,
 	}
 	_, vetoed := ComputeFlipScore(params)
 	if !vetoed {
-		t.Error("expected F0 veto for range_expansion >= 2.0")
+		t.Error("expected F0 veto for range_expansion >= 1.5")
 	}
 }
 
 func TestComputeFlipScore_F0NoVetoIfHistNotReady(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
-		Side:           "yes",
-		OtherDelta:     0.05,   // =0.05, not >0.05 → falls to strong tier (+2)
-		IsOscillating:  true,   // +1 (Formula A: 降低到 1)
-		EntryPrice:     0.15,   // <0.20 → +1
+		OtherDelta:     0.04, // >0.02 → +2（B3 中档）
 		RangeExpansion: 2.5,
-		BTCPosition:    0,
-		HistReady:      false, // hist not ready → skip F0, F6, F7
+		HistReady:      false, // hist 未就绪 → F0/B2 不参与
 		Cfg:            cfg,
 	}
 	score, vetoed := ComputeFlipScore(params)
 	if vetoed {
 		t.Error("F0 should not veto when hist not ready")
 	}
-	expected := 4 // 2+1+1 = 4 (Formula A: strong od + osc + entry, no F6/F7)
-	if score != expected {
-		t.Errorf("expected %d, got %d", expected, score)
+	if score != 2 {
+		t.Errorf("expected 2 (B3 strong only), got %d", score)
 	}
 }
 
 func TestComputeFlipScore_OtherDeltaExclusive(t *testing.T) {
 	cfg := DefaultConfig()
-	// Formula A: OtherDelta=0.04 > 0.02 (strong) → +2, doesn't also get weak +1
+	// OtherDelta=0.04 > 0.02（中档）→ +2，不叠加弱档 +1
 	params := ScoreParams{
-		Side:       "yes",
-		OtherDelta: 0.04, // >0.02 → +2, NOT >0.05
-		EntryPrice: 1.0,  // too high for cheap entry
+		OtherDelta: 0.04,
 		Cfg:        cfg,
 	}
 	score, _ := ComputeFlipScore(params)
 	if score != 2 {
-		t.Errorf("expected 2 (Formula A strong tier), got %d", score)
+		t.Errorf("expected 2 (B3 strong tier), got %d", score)
 	}
 }
 
-func TestComputeFlipScore_EntryPriceExclusive(t *testing.T) {
+func TestComputeFlipScore_RangeOnly(t *testing.T) {
 	cfg := DefaultConfig()
+	// 纯 B2 信号：od 无贡献，range_exp < 0.5 → +2 ≥ ScoreEntry
 	params := ScoreParams{
-		Side:       "yes",
-		EntryPrice: 0.18, // Formula A: <0.20 (strong) → +1, elif skips weak
-		Cfg:        cfg,
+		OtherDelta:     -0.02, // 对侧回落，无确认
+		RangeExpansion: 0.2,
+		HistReady:      true,
+		Cfg:            cfg,
 	}
-	score, _ := ComputeFlipScore(params)
-	if score != 1 {
-		t.Errorf("expected 1 (Formula A: strong entry, no stacking), got %d", score)
+	score, vetoed := ComputeFlipScore(params)
+	if vetoed {
+		t.Error("unexpected veto")
+	}
+	if score != 2 {
+		t.Errorf("expected 2 (B2 only), got %d", score)
 	}
 }
 
@@ -298,28 +171,33 @@ func makeTestSnap(yesPrice, noPrice, price, openPrice float64, remainingSec int)
 	}
 }
 
+// readyHist 构造就绪的历史振幅追踪器（3 段：50/30/40 → avg=40）。
+func readyHist() *HistRangeTracker {
+	ht := NewHistRangeTracker(18)
+	ht.AddRange(100, 150)
+	ht.AddRange(100, 130)
+	ht.AddRange(100, 140)
+	return ht
+}
+
 func TestEngine_SkipWhenIdle(t *testing.T) {
 	cfg := DefaultConfig()
-	ht := NewHistRangeTracker(18)
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 
 	snap := makeTestSnap(0.8, 0.2, 50000, 50000, 250)
-	sig := eng.ProcessSnapshot(snap, 0)
-	if sig != nil {
+	if sig := eng.ProcessSnapshot(snap, 0); sig != nil {
 		t.Error("expected nil when engine is idle")
 	}
 }
 
 func TestEngine_NoCrossing(t *testing.T) {
 	cfg := DefaultConfig()
-	ht := NewHistRangeTracker(18)
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	// Price below trigger
 	snap := makeTestSnap(0.5, 0.3, 50000, 50000, 250)
-	sig := eng.ProcessSnapshot(snap, 1)
-	if sig != nil {
+	if sig := eng.ProcessSnapshot(snap, 1); sig != nil {
 		t.Error("expected nil when no crossing")
 	}
 	if eng.state != stateWatching {
@@ -329,142 +207,171 @@ func TestEngine_NoCrossing(t *testing.T) {
 
 func TestEngine_TooFewPreSnaps(t *testing.T) {
 	cfg := DefaultConfig()
-	ht := NewHistRangeTracker(18)
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	// Crossing on second snapshot (< MinPreSnaps=5)
 	for i := 0; i < 3; i++ {
-		snap := makeTestSnap(0.5, 0.3, 50000+float64(i)*10, 50000, 250-i*5)
+		snap := makeTestSnap(0.5, 0.3, 50000-float64(i)*10, 50000, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
 	// 4th snapshot crosses but still too few (only 4)
-	snap := makeTestSnap(0.8, 0.2, 50030, 50000, 235)
-	sig := eng.ProcessSnapshot(snap, 1)
-	if sig != nil {
+	snap := makeTestSnap(0.8, 0.2, 49970, 50000, 235)
+	if sig := eng.ProcessSnapshot(snap, 1); sig != nil {
 		t.Error("expected nil when too few pre-snapshots")
 	}
-	// After veto, engine falls back to WATCHING (other side may still cross)
 	if eng.state != stateWatching {
-		t.Errorf("expected stateWatching after failing MinPreSnaps (fallback), got %d", eng.state)
+		t.Errorf("expected stateWatching after failing MinPreSnaps, got %d", eng.state)
 	}
 }
 
 func TestEngine_CrossingWithConfirm(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.MinPreSnaps = 2     // lower for test
-	cfg.ConfirmDelayTicks = 1 // single tick for test (default 5 too slow for unit tests)
-	ht := NewHistRangeTracker(18)
-	// Make hist ready with some dummy data
-	ht.AddRange(100, 150) // range=50
-	ht.AddRange(100, 130) // range=30
-	ht.AddRange(100, 140) // range=40 → avg=40
-
-	eng := NewEngine(cfg, ht)
+	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
-	// Feed 5 snapshots: BTC dips slightly below open (to trigger btc_extreme Formula A)
-	// Open=50010, prices trending down: 50010, 50009, 50008, 50007, 50006
-	// path_eff ≈ 1.0 (trending), noise_ratio ≈ 1.0 (low noise) → oscillating=false
+	// Feed 5 pre-cross snapshots: BTC trending down（YES 侧触发需背离 = BTC 跌）
+	// Open=50010, prices: 50010 → 50005 → btc_pos=-5/40=-0.125, div=+0.125
 	openPrice := 50010.0
 	for i := 0; i < 5; i++ {
-		price := openPrice - float64(i)*1 // 50010, 50009, 50008, 50007, 50006
+		price := openPrice - float64(i)*1
 		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
-		sig := eng.ProcessSnapshot(snap, 1)
-		if sig != nil {
+		if sig := eng.ProcessSnapshot(snap, 1); sig != nil {
 			t.Fatalf("unexpected signal at snap %d", i)
 		}
 	}
 
-	// Crossing: YES>0.7, BTC at 50005 (below open → btc_pos=-5/40=-0.125 < -0.1 → btc_extreme)
-	// range_exp = |50005-50010|/40 = 5/40 = 0.125 < 0.5 → F6 +2
+	// 穿越: YES>0.7，BTC=50005（低于 open → 背离 ✓）
+	// range_exp = 5/40 = 0.125 < 0.5 → B2 +2
 	crossSnap := makeTestSnap(0.75, 0.15, 50005, openPrice, 230)
-	sig := eng.ProcessSnapshot(crossSnap, 1)
-	if sig != nil {
+	if sig := eng.ProcessSnapshot(crossSnap, 1); sig != nil {
 		t.Fatal("expected nil after crossing (should be in CONFIRMING)")
 	}
 	if eng.state != stateConfirming {
 		t.Fatalf("expected stateConfirming, got %d", eng.state)
 	}
 
-	// Confirmation: NO moved up → other_delta=0.07 > 0.05 → +3 (Formula A top tier)
+	// 确认: NO 从 0.15 涨到 0.22 → other_delta=+0.07 > 0.05 → +3
+	// score = 3 + 2(B2) = 5 ≥ 2 → 信号
 	confSnap := makeTestSnap(0.78, 0.22, 50005, openPrice, 225)
-	sig = eng.ProcessSnapshot(confSnap, 1)
+	sig := eng.ProcessSnapshot(confSnap, 1)
 	if sig == nil {
-		t.Fatal("expected signal after confirmation (Formula A)")
+		t.Fatal("expected signal after confirmation")
 	}
-
-	// Verify signal
 	if sig.Side != "yes" {
 		t.Errorf("expected side=yes, got %s", sig.Side)
 	}
-	// other_delta = 0.22 - 0.15 = 0.07 > 0.05 → Formula A top tier +3
-	if sig.OtherDelta < 0.05 {
-		t.Errorf("other_delta expected >=0.05, got %.4f", sig.OtherDelta)
+	if sig.Score != 5 {
+		t.Errorf("expected score 5 (B3+3 + B2+2), got %d", sig.Score)
 	}
-	// entry = NO price = 0.15 → <0.20 → +1 (Formula A: re-activated)
-	if sig.EntryPrice != 0.15 {
-		t.Errorf("entry expected 0.15, got %.4f", sig.EntryPrice)
+	if sig.BtcDivergence < 0.05 {
+		t.Errorf("expected btc_divergence >= 0.05, got %.4f", sig.BtcDivergence)
 	}
-	// Score: od>0.05(+3) + osc=false(0) + entry<0.20(+1) + range_exp<0.5(+2) + btc_ext(+1) = 7 ≥ 5
-	if sig.Score < 5 {
-		t.Errorf("score expected >=5, got %d", sig.Score)
+	if sig.OtherDelta != 0.07 {
+		t.Errorf("other_delta expected 0.07, got %.4f", sig.OtherDelta)
 	}
-	// Shares 由调用方根据 stake_per_signal 计算，Engine 不再设置（设为 0）
 	if sig.Shares != 0 {
 		t.Errorf("expected 0 shares (caller sets it), got %.0f", sig.Shares)
 	}
 }
 
-func TestEngine_CrossingWithUnfavorableOtherDelta(t *testing.T) {
+func TestEngine_NoScoreWithoutCoreSignals(t *testing.T) {
+	// od 无贡献且 B2 不成立 → score 0 < 2 → 无信号，回到 Watching
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	cfg.ConfirmDelayTicks = 1
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
-	// Feed pre-cross snapshots (trending → oscillating=false)
+	// BTC 下行（YES 侧背离），穿越时 range_exp = 25/40 = 0.625 ≥ 0.5 → B2 不参与
+	openPrice := 50000.0
 	for i := 0; i < 5; i++ {
-		price := 50000.0 + float64(i)*10
-		snap := makeTestSnap(0.5, 0.3, price, 50000, 250-i*5)
+		price := openPrice - float64(i)*5
+		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// Crossing
-	crossSnap := makeTestSnap(0.75, 0.20, 50050, 50000, 230)
-	eng.ProcessSnapshot(crossSnap, 1)
+	// 穿越: YES=0.75/NO=0.20 at 49975（div=+0.625 ✓, range=0.625 → 无 B2）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.20, 49975, openPrice, 230), 1); sig != nil {
+		t.Fatal("expected nil after crossing")
+	}
 
-	// Confirmation with opposing side dropping: other_delta=-0.03
-	// Formula A: od hard filter disabled (ODHardFilter=-999)
-	// Score: od≤0.01(0) + osc(0) + entry=0.20<0.25(+1) + range_exp=50/40=1.25(0) + btc(0) = 1 < 5
-	// → signal should still be nil (fails by score)
-	confSnap := makeTestSnap(0.78, 0.17, 50050, 50000, 225)
-	sig := eng.ProcessSnapshot(confSnap, 1)
+	// 确认: 对侧回落 other_delta=-0.03 → B3 无贡献 → score=0 < 2 → 无信号
+	sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.17, 49975, openPrice, 225), 1)
 	if sig != nil {
-		t.Errorf("expected nil (Formula A: score too low with negative other_delta), got sig with other_delta=%.4f score=%d", sig.OtherDelta, sig.Score)
+		t.Errorf("expected nil (no core signal), got score=%d", sig.Score)
+	}
+	if eng.state != stateWatching {
+		t.Errorf("expected stateWatching after score fail, got %d", eng.state)
+	}
+}
+
+func TestEngine_DivergenceVeto(t *testing.T) {
+	// B1: BTC 与 PM 同向的穿越必须被否决（YES 侧触发 + BTC 上涨 = 同向）
+	cfg := DefaultConfig()
+	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1
+	eng := NewEngine(cfg, readyHist())
+	eng.Reset(1)
+
+	// BTC 上行（与 YES 同向）
+	openPrice := 50000.0
+	for i := 0; i < 5; i++ {
+		price := openPrice + float64(i)*5
+		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
+		eng.ProcessSnapshot(snap, 1)
+	}
+
+	// 穿越: YES>0.7 且 BTC=50030（高于 open → btc_pos=+0.75 → div=-0.75 < 0.05）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50030, openPrice, 230), 1); sig != nil {
+		t.Fatal("expected B1 veto at crossing (BTC aligned with PM)")
+	}
+	if eng.state != stateWatching {
+		t.Errorf("expected stateWatching after B1 veto, got %d", eng.state)
+	}
+
+	// BTC 回落到 open 之下 → 再穿越则背离成立，应进入 Confirming
+	eng.ProcessSnapshot(makeTestSnap(0.6, 0.4, 49980, openPrice, 225), 1)
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.76, 0.30, 49975, openPrice, 220), 1); sig != nil {
+		t.Fatal("expected nil after crossing (in confirming)")
+	}
+	if eng.state != stateConfirming {
+		t.Errorf("expected stateConfirming after diverging crossing, got %d", eng.state)
+	}
+}
+
+func TestEngine_HistNotReadyVeto(t *testing.T) {
+	// B1 依赖历史振幅；hist 未就绪时无法计算背离度 → 否决
+	// （与 Python 回测一致：无 hist_avg_range 的事件整体跳过）
+	cfg := DefaultConfig()
+	cfg.MinPreSnaps = 2
+	eng := NewEngine(cfg, NewHistRangeTracker(18))
+	eng.Reset(1)
+
+	for i := 0; i < 5; i++ {
+		snap := makeTestSnap(0.5, 0.3, 50000-float64(i), 50000, 250-i*5)
+		eng.ProcessSnapshot(snap, 1)
+	}
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 49995, 50000, 230), 1); sig != nil {
+		t.Fatal("expected veto when hist not ready (B1 unavailable)")
+	}
+	if eng.state != stateWatching {
+		t.Errorf("expected stateWatching, got %d", eng.state)
 	}
 }
 
 func TestEngine_MaxEntryPriceVeto(t *testing.T) {
 	// 确认时刻对侧 ASK > max_entry_price → 信号无效（盈亏比已恶化）
-	// ASK 口径：对侧 ask = 1 - 触发侧 bid。本用例中确认时刻 YES bid=0.60
-	// → NO ask=0.40 > 0.35 → 否决。旧口径看 NO bid=0.30 ≤ 0.35 会放行，
-	// 本用例显式验证新口径。
+	// ASK 口径：对侧 ask = 1 - 触发侧 bid。本用例确认时刻 YES bid=0.60
+	// → NO ask=0.40 > 0.35 → 否决。旧口径看 NO bid=0.30 ≤ 0.35 会放行。
 	cfg := DefaultConfig()
 	cfg.MaxEntryPrice = 0.35
 	cfg.MinPreSnaps = 2
 	cfg.ConfirmDelayTicks = 1
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	openPrice := 50010.0
@@ -475,13 +382,13 @@ func TestEngine_MaxEntryPriceVeto(t *testing.T) {
 		}
 	}
 
-	// 穿越: YES>0.7，对面 NO=0.15（廉价入场）
+	// 穿越: YES>0.7，对面 NO=0.15，BTC 低于 open（背离 ✓）
 	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50005, openPrice, 230), 1); sig != nil {
 		t.Fatal("expected nil after crossing")
 	}
 
 	// 确认: YES bid 回落到 0.60 → NO ask = 0.40 > 0.35 → 价格失效 gate，无信号
-	// （NO bid 仅 0.30，旧口径会放行；若无 gate，该信号将得 7 分并发出）
+	// （NO bid 仅 0.30，旧口径会放行；若无 gate，该信号将得 5 分并发出）
 	if sig := eng.ProcessSnapshot(makeTestSnap(0.60, 0.30, 50005, openPrice, 225), 1); sig != nil {
 		t.Fatalf("expected nil after confirm (ask price gate), got signal side=%s", sig.Side)
 	}
@@ -490,18 +397,12 @@ func TestEngine_MaxEntryPriceVeto(t *testing.T) {
 func TestEngine_MaxEntryPriceAskPass(t *testing.T) {
 	// ASK 口径放行用例：对侧 ask ≤ max_entry_price 但对侧 bid > max_entry_price
 	// 时，新口径必须放行（旧口径按 bid 判 gate 会误杀）。
-	// 确认时刻 YES bid=0.75 → NO ask=0.25 ≤ 0.35 放行；
-	// 但 NO bid=0.36 > 0.35，旧口径会误拒。
+	// 确认时刻 YES bid=0.75 → NO ask=0.25 ≤ 0.35 放行；NO bid=0.36 > 0.35。
 	cfg := DefaultConfig()
 	cfg.MaxEntryPrice = 0.35
 	cfg.MinPreSnaps = 2
 	cfg.ConfirmDelayTicks = 1
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	openPrice := 50010.0
@@ -512,7 +413,7 @@ func TestEngine_MaxEntryPriceAskPass(t *testing.T) {
 		}
 	}
 
-	// 穿越: YES>0.7，对面 NO=0.15（廉价入场）
+	// 穿越: YES>0.7，对面 NO=0.15，BTC 低于 open（背离 ✓）
 	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50005, openPrice, 230), 1); sig != nil {
 		t.Fatal("expected nil after crossing")
 	}
@@ -530,12 +431,7 @@ func TestEngine_MaxEntryPriceDisabled(t *testing.T) {
 	cfg.MaxEntryPrice = 0
 	cfg.MinPreSnaps = 2
 	cfg.ConfirmDelayTicks = 1
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	openPrice := 50010.0
@@ -555,62 +451,48 @@ func TestEngine_F0Veto_RealBreakout(t *testing.T) {
 	ht := NewHistRangeTracker(18)
 	ht.AddRange(100, 120) // range=20
 	ht.AddRange(100, 130) // range=30
-	ht.AddRange(100, 140) // range=40 → avg=30, ready=true
-
+	ht.AddRange(100, 140) // range=40 → avg=30
 	eng := NewEngine(cfg, ht)
 	eng.Reset(1)
 
-	// Feed snapshots with big BTC move: 50000 → 50100 （$100 = 3.3x hist range of ~$30）
+	// Feed snapshots with big BTC move: 50000 → 50100（$100 = 3.3x hist range）
 	for i := 0; i < 5; i++ {
-		price := 50000.0 + float64(i)*25 // 0, 25, 50, 75, 100
+		price := 50000.0 + float64(i)*25
 		snap := makeTestSnap(0.6, 0.3, price, 50000, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
 	// Crossing with big BTC move → F0 veto
-	crossSnap := makeTestSnap(0.75, 0.20, 50100, 50000, 230)
-	sig := eng.ProcessSnapshot(crossSnap, 1)
-	if sig != nil {
-		t.Error("expected F0 veto for range_expansion >= 2.0")
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.20, 50100, 50000, 230), 1); sig != nil {
+		t.Error("expected F0 veto for range_expansion >= 1.5")
 	}
-	// After F0 veto, engine falls back to WATCHING (other side may still cross)
 	if eng.state != stateWatching {
-		t.Errorf("expected stateWatching after F0 veto (fallback), got %d", eng.state)
+		t.Errorf("expected stateWatching after F0 veto, got %d", eng.state)
 	}
 }
 
-func TestEngine_OnlyFirstCrossing(t *testing.T) {
+func TestEngine_OneSignalPerCycle(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
-	cfg.ConfirmDelayTicks = 1 // single tick for test
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	cfg.ConfirmDelayTicks = 1
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
-	// Feed pre-cross
+	// Feed pre-cross（BTC 下行，YES 侧背离）
 	for i := 0; i < 5; i++ {
-		snap := makeTestSnap(0.3, 0.3, 50000, 50000, 250-i*5)
+		snap := makeTestSnap(0.3, 0.3, 50000-float64(i)*5, 50000, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// First crossing: YES>0.7
-	cross := makeTestSnap(0.75, 0.15, 50010, 50000, 230)
-	eng.ProcessSnapshot(cross, 1)
-	// Confirm
-	conf := makeTestSnap(0.78, 0.20, 50010, 50000, 225)
-	sig1 := eng.ProcessSnapshot(conf, 1)
+	// 穿越 + 确认（od=+0.05 → +2；range=25/40=0.625 → 无 B2；score=2 ≥2 → 信号）
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 49975, 50000, 230), 1)
+	sig1 := eng.ProcessSnapshot(makeTestSnap(0.78, 0.20, 49975, 50000, 225), 1)
 	if sig1 == nil {
 		t.Fatal("expected first signal")
 	}
 
-	// Next snapshot should not trigger (doneThisGen)
-	next := makeTestSnap(0.80, 0.18, 50010, 50000, 220)
-	sig2 := eng.ProcessSnapshot(next, 1)
-	if sig2 != nil {
+	// 后续 snapshot 不再触发（doneThisGen）
+	if sig2 := eng.ProcessSnapshot(makeTestSnap(0.80, 0.18, 49975, 50000, 220), 1); sig2 != nil {
 		t.Error("expected nil after doneThisGen")
 	}
 }
@@ -618,9 +500,7 @@ func TestEngine_OnlyFirstCrossing(t *testing.T) {
 func TestEngine_ResetForNewCycle(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
-	ht := NewHistRangeTracker(18)
-
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	// Complete a cycle
@@ -628,8 +508,7 @@ func TestEngine_ResetForNewCycle(t *testing.T) {
 		snap := makeTestSnap(0.3, 0.3, 50000, 50000, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
-	cross := makeTestSnap(0.75, 0.15, 50010, 50000, 230)
-	eng.ProcessSnapshot(cross, 1)
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 49990, 50000, 230), 1)
 	// (skip confirmation for this test)
 
 	// Reset for new cycle
@@ -647,39 +526,28 @@ func TestEngine_ResetForNewCycle(t *testing.T) {
 }
 
 func TestEngine_SkipEarlyCrossing(t *testing.T) {
-	// §2.1: crossings at remaining_sec >= MaxRemainingSec are invalid
-	// (window too early, BTC path too short). Only crossings after the
-	// window matures (rem < 260) should be tracked.
+	// crossings at remaining_sec >= MaxRemainingSec are invalid
+	// (window too early, BTC path too short)
 	cfg := DefaultConfig()
-	ht := NewHistRangeTracker(18)
-	eng := NewEngine(cfg, ht)
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	// Early crossing at rem=270 (>=260) — should NOT set wasAbove
-	snapEarly := makeTestSnap(0.75, 0.30, 50000, 50000, 270)
-	eng.ProcessSnapshot(snapEarly, 1)
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.30, 50000, 50000, 270), 1)
 	if eng.yesWasAbove {
 		t.Errorf("early YES crossing (rem=270 >= %d) should not set yesWasAbove", cfg.MaxRemainingSec)
 	}
-	if eng.noWasAbove {
-		t.Error("early: noPrice=0.30 < 0.7, noWasAbove should be false")
-	}
 
-	// Also verify early NO crossing is skipped
-	snapEarlyNO := makeTestSnap(0.30, 0.75, 50000, 50000, 265)
-	eng.ProcessSnapshot(snapEarlyNO, 1)
+	// Early NO crossing also skipped
+	eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50000, 50000, 265), 1)
 	if eng.noWasAbove {
 		t.Errorf("early NO crossing (rem=265 >= %d) should not set noWasAbove", cfg.MaxRemainingSec)
 	}
 
-	// Later crossing at rem=250 (<260) — SHOULD be detected as rising edge
-	snapValid := makeTestSnap(0.80, 0.20, 50010, 50000, 250)
-	eng.ProcessSnapshot(snapValid, 1)
+	// Valid crossing at rem=250 — SHOULD be detected as rising edge
+	eng.ProcessSnapshot(makeTestSnap(0.80, 0.20, 50010, 50000, 250), 1)
 	if !eng.yesWasAbove {
 		t.Error("valid YES crossing (rem=250 < 260) should set yesWasAbove")
-	}
-	if eng.noWasAbove {
-		t.Error("noPrice=0.20 < 0.7, noWasAbove should still be false")
 	}
 }
 
@@ -736,58 +604,50 @@ func TestHistRangeTracker_FIFOEviction(t *testing.T) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// Fallback path tests (Fix 13)
+// Fallback path tests（多穿越重试）
 // ═══════════════════════════════════════════════════════════════
 
 func TestEngine_YESFailedFallbackToNO(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
-	cfg.ConfirmDelayTicks = 1 // single tick for test
-	cfg.RangeExpMax = 2.0     // wider range for test (default 1.5 would veto NO crossing at btc_pos=1.5)
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	cfg.ConfirmDelayTicks = 1
+	cfg.RangeExpMax = 2.0 // 放宽测试用（默认 1.5 会在 btc_pos=1.25 附近误触发）
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
-	// Feed pre-cross snapshots (trending up: 50000 → 50040)
+	// Feed pre-cross snapshots（BTC 下行 → YES 侧背离）
 	openPrice := 50000.0
 	for i := 0; i < 5; i++ {
-		price := openPrice + float64(i)*10
+		price := openPrice - float64(i)*10
 		snap := makeTestSnap(0.3, 0.3, price, openPrice, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// YES crosses first → YES=0.75, NO=0.30. Entry would be NO=0.30.
-	yesCross := makeTestSnap(0.75, 0.30, 50050, openPrice, 230)
-	eng.ProcessSnapshot(yesCross, 1)
+	// YES 穿越: YES=0.75/NO=0.30，BTC=49950（div=+1.25 ✓, range=1.25 → 无 B2）
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.30, 49950, openPrice, 230), 1)
+	if eng.state != stateConfirming {
+		t.Fatalf("expected stateConfirming for YES crossing, got %d", eng.state)
+	}
 
-	// Confirm tick: NO dropped from 0.30 to 0.25 → other_delta=-0.05 → YES fails
-	yesConf := makeTestSnap(0.78, 0.25, 50050, openPrice, 225)
-	sig := eng.ProcessSnapshot(yesConf, 1)
+	// 确认: NO 从 0.30 跌到 0.25 → od=-0.05 → score=0 → YES 失败
+	sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.25, 49950, openPrice, 225), 1)
 	if sig != nil {
-		t.Fatal("YES should fail with unfavorable other_delta")
+		t.Fatal("YES should fail without core signal")
 	}
 	if eng.state != stateWatching {
 		t.Fatalf("expected stateWatching after YES fail, got %d", eng.state)
 	}
 
-	// NO crosses: NO=0.75, YES=0.15 (cheap entry!)
-	// BTC up from 50000 to 50060 → btc_pos=1.5 > 0.1 → btcExtreme for NO side
-	noCross := makeTestSnap(0.15, 0.75, 50060, openPrice, 220)
-	eng.ProcessSnapshot(noCross, 1)
+	// NO 穿越: NO=0.75/YES=0.15，BTC 反弹到 50020（div=+0.5 ✓, range=0.5 → 无 B2）
+	eng.ProcessSnapshot(makeTestSnap(0.15, 0.75, 50020, openPrice, 220), 1)
 	if eng.state != stateConfirming {
-		t.Fatalf("expected stateConfirming for NO fallback, got %d", eng.state)
+		t.Fatalf("expected stateConfirming for NO crossing, got %d", eng.state)
 	}
 
-	// Confirm NO: YES moves from 0.15 to 0.22 → other_delta=0.07 (>0.05 → +3)
-	// entry=0.15 (<0.20 → +1), btc_extreme → +1. Score=5 ≥ 5 → signal!
-	noConf := makeTestSnap(0.22, 0.78, 50060, openPrice, 215)
-	sig = eng.ProcessSnapshot(noConf, 1)
+	// 确认: YES 0.15 → 0.22 → od=+0.07 → +3 ≥2 → 信号
+	sig = eng.ProcessSnapshot(makeTestSnap(0.22, 0.78, 50020, openPrice, 215), 1)
 	if sig == nil {
-		t.Fatal("expected signal from NO side after YES fallback (Formula A)")
+		t.Fatal("expected signal from NO side after YES fallback")
 	}
 	if sig.Side != "no" {
 		t.Errorf("expected side=no, got %s", sig.Side)
@@ -797,41 +657,28 @@ func TestEngine_YESFailedFallbackToNO(t *testing.T) {
 func TestEngine_BothSidesFailResumeWatching(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
-	cfg.ConfirmDelayTicks = 1 // single tick for test
-	cfg.RangeExpMax = 2.0     // wider range for test (default 1.5 would veto NO crossing)
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	cfg.ConfirmDelayTicks = 1
+	cfg.RangeExpMax = 2.0
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	openPrice := 50000.0
 	for i := 0; i < 5; i++ {
-		price := openPrice + float64(i)*10
+		price := openPrice - float64(i)*10
 		snap := makeTestSnap(0.3, 0.3, price, openPrice, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// YES crosses
-	yesCross := makeTestSnap(0.75, 0.30, 50050, openPrice, 230)
-	eng.ProcessSnapshot(yesCross, 1)
-
-	// Confirm: unfavorable → YES fails, falls back
-	yesConf := makeTestSnap(0.78, 0.25, 50050, openPrice, 225)
-	eng.ProcessSnapshot(yesConf, 1)
+	// YES 穿越（背离 ✓）→ 确认失败
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.30, 49950, openPrice, 230), 1)
+	eng.ProcessSnapshot(makeTestSnap(0.78, 0.25, 49950, openPrice, 225), 1)
 	if eng.state != stateWatching {
 		t.Fatalf("expected stateWatching after YES fail, got %d", eng.state)
 	}
 
-	// NO crosses
-	noCross := makeTestSnap(0.30, 0.75, 50060, openPrice, 220)
-	eng.ProcessSnapshot(noCross, 1)
-
-	// Confirm: no movement in opposite side → NO also fails
-	noConf := makeTestSnap(0.30, 0.75, 50060, openPrice, 215)
-	sig := eng.ProcessSnapshot(noConf, 1)
+	// NO 穿越（BTC 反弹到 50020，div=+0.5 ✓）→ 确认无核心信号
+	eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50020, openPrice, 220), 1)
+	sig := eng.ProcessSnapshot(makeTestSnap(0.30, 0.75, 50020, openPrice, 215), 1)
 	if sig != nil {
 		t.Fatal("expected nil when both sides fail")
 	}
@@ -840,174 +687,83 @@ func TestEngine_BothSidesFailResumeWatching(t *testing.T) {
 	}
 }
 
-func TestEngine_ConfirmTickAlreadyInBuffer(t *testing.T) {
-	// When YES fails and falls back to a NO crossing that happened several
-	// ticks ago, the confirmation tick may already be in the buffer.
-	// The engine should evaluate synchronously via the confIdx < len(buffer) path.
+func TestEngine_PendingCrossingEvaluatedAfterConfirm(t *testing.T) {
+	// 盲窗期间记录的穿越（pendingCrossings）在确认数据到齐后被评估。
+	// 时序: YES 穿越 → 盲窗内 NO 穿越（记入 pending）→ YES 确认失败（score=0）
+	// → NO 回落到 0.7 以下（fallback 无对象）→ 下一 tick NO 确认数据到齐
+	// → pending 队列同步评估 → od 达标 → 信号。
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 2
-	cfg.ConfirmDelayTicks = 1
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	cfg.ConfirmDelayTicks = 2
+	cfg.RangeExpMax = 2.0
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	openPrice := 50000.0
-	// Snaps 0-4: pre-cross data, YES crosses at snap 4
-	for i := 0; i < 4; i++ {
-		price := openPrice + float64(i)*10
-		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
+	for i := 0; i < 5; i++ {
+		price := openPrice - float64(i)*10
+		snap := makeTestSnap(0.3, 0.3, price, openPrice, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// Snap 4: YES crosses
-	eng.ProcessSnapshot(makeTestSnap(0.75, 0.30, 50040, openPrice, 235), 1)
+	// snap5: YES 穿越（div=+1.25 ✓, range=1.25 → 无 B2）
+	eng.ProcessSnapshot(makeTestSnap(0.75, 0.30, 49950, openPrice, 235), 1)
 
-	// Snap 5: both YES confirm (unfavorable → fail) AND NO>0.7 crosses
-	// YES confirm: NO=0.25 → other_delta=-0.05 → fail → afterFailedConfirm
-	// NO is above threshold → findRecentCrossing("no") → enterConfirming on NO
-	eng.ProcessSnapshot(makeTestSnap(0.78, 0.75, 50040, openPrice, 230), 1)
-	// At this point: YES failed, fallback tried enterConfirming(5, "no")
-	// confIdx = 5 + 1 = 6, len(buffer)=6 → confIdx == len(buffer), NOT <
-	// So it goes to stateConfirming (normal path)
+	// snap6: 盲窗内 NO 向上穿越（BTC 反弹到 50020 → div=+0.5 ✓）→ pending
+	eng.ProcessSnapshot(makeTestSnap(0.20, 0.75, 50020, openPrice, 230), 1)
 
-	// Snap 6: NO confirm tick → should evaluate onConfirmed
-	sig := eng.ProcessSnapshot(makeTestSnap(0.20, 0.78, 50050, openPrice, 225), 1)
-	// NO side: other_delta = 0.20-0.30 = -0.10 unfavorable...
-	// Actually the crossSnap for NO is snap 5 where YES=0.78, NO=0.75
-	// entry = crossSnap.YesPrice = 0.78. Not cheap.
-	// other_delta = snap.YesPrice - crossSnap.YesPrice = 0.20-0.78 = -0.58 → no score
-	// Score < 5 → nil. But the key assertion: engine cycled through fallback correctly.
-	if eng.state == stateWatching {
-		// NO failed too, both sides done → back to Watching
-		t.Log("Both sides failed — engine correctly returned to Watching")
-	} else if sig != nil {
-		t.Logf("Unexpected signal: %+v", sig)
-	}
-	// Verify engine survived the double-crossing scenario without crashing
-	if eng.doneThisGen && sig == nil {
-		t.Log("Cycle completed without signal (expected)")
-	}
-}
-
-func TestEngine_VetoPathEff(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.MinPreSnaps = 2
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
-	eng.Reset(1)
-
-	// Create prices with path_eff < cfg.PathEffVetoMin (0.4):
-	// Open=50000, prices: 50005, 50001, 50006, 50002 (zigzag, small net move)
-	openPrice := 50000.0
-	snaps := []struct{ yes, no, price float64 }{
-		{0.5, 0.3, 50005},
-		{0.5, 0.3, 50001},
-		{0.5, 0.3, 50006},
-		{0.5, 0.3, 50002},
-	}
-	for i, s := range snaps {
-		snap := makeTestSnap(s.yes, s.no, s.price, openPrice, 250-i*5)
-		eng.ProcessSnapshot(snap, 1)
-	}
-
-	// YES crosses but path_eff is too low → veto
-	crossSnap := makeTestSnap(0.75, 0.20, 50002, openPrice, 235)
-	sig := eng.ProcessSnapshot(crossSnap, 1)
-	if sig != nil {
-		t.Error("expected veto for low path_eff")
-	}
-	// After quality veto, fall back to other side
+	// snap7: YES 确认 tick — NO 回落到 0.30（od=0 → score=0）→ YES 失败
+	// 此时 NO=0.30 < 0.7，fallback 无对象 → 回到 Watching（pending 保留）
+	eng.ProcessSnapshot(makeTestSnap(0.60, 0.30, 49950, openPrice, 225), 1)
 	if eng.state != stateWatching {
-		t.Errorf("expected stateWatching after path_eff veto (fallback), got %d", eng.state)
-	}
-}
-
-func TestEngine_VetoNoiseRatio(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.MinPreSnaps = 2
-	ht := NewHistRangeTracker(18)
-
-	eng := NewEngine(cfg, ht)
-	eng.Reset(1)
-
-	// Create prices with high noise: many wobbles
-	openPrice := 50000.0
-	prices := []float64{50000, 50020, 50005, 50025, 50010, 50030, 50015}
-	for i, p := range prices {
-		snap := makeTestSnap(0.5, 0.3, p, openPrice, 250-i*5)
-		eng.ProcessSnapshot(snap, 1)
+		t.Fatalf("expected stateWatching after YES fail, got %d", eng.state)
 	}
 
-	// YES crosses but noise_ratio should exceed cfg.NoiseRatioVetoMax (3.0)
-	crossSnap := makeTestSnap(0.75, 0.20, 50015, openPrice, 225)
-	sig := eng.ProcessSnapshot(crossSnap, 1)
-	if sig != nil {
-		t.Error("expected veto for high noise_ratio")
+	// snap8: pending NO 穿越的确认数据到齐 → Watching 状态优先评估
+	// od = 0.28-0.20 = +0.08 > 0.05 → +3 ≥2 → 信号
+	sig := eng.ProcessSnapshot(makeTestSnap(0.28, 0.75, 50020, openPrice, 220), 1)
+	if sig == nil {
+		t.Fatal("expected signal from pending NO crossing")
 	}
-	if eng.state != stateWatching {
-		t.Errorf("expected stateWatching after noise_ratio veto (fallback), got %d", eng.state)
+	if sig.Side != "no" {
+		t.Errorf("expected side=no, got %s", sig.Side)
 	}
 }
 
 func TestEngine_MinPreSnapsNotEnough_RetriesOnNextTick(t *testing.T) {
-	// Multi-crossing mode: when the first crossing has too few pre-snaps,
-	// the engine returns to Watching. A later crossing with enough pre-snaps
-	// will be retried (unlike legacy first_crossing_only which marks the side
-	// as permanently tried).
+	// 首个穿越前置数据不足时引擎回到 Watching；后续穿越仍会重试。
 	cfg := DefaultConfig()
 	cfg.MinPreSnaps = 5
-	cfg.RangeExpMax = 2.0 // wider range for test (default 1.5 would veto retry crossing)
-	ht := NewHistRangeTracker(18)
-	ht.AddRange(100, 150)
-	ht.AddRange(100, 130)
-	ht.AddRange(100, 140)
-
-	eng := NewEngine(cfg, ht)
+	cfg.RangeExpMax = 2.0
+	eng := NewEngine(cfg, readyHist())
 	eng.Reset(1)
 
 	openPrice := 50000.0
 
-	// Feed only 3 snapshots before first crossing (nPre=4 < MinPreSnaps=5)
+	// 仅 3 个前置 snapshot（nPre=4 < MinPreSnaps=5）；BTC 下行（YES 侧背离）
 	for i := 0; i < 3; i++ {
-		price := openPrice + float64(i)*10
+		price := openPrice - float64(i)*10
 		snap := makeTestSnap(0.5, 0.3, price, openPrice, 250-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
 
-	// Early crossing at snapIdx=3 → nPre=4 < MinPreSnaps=5
-	sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.20, 50040, openPrice, 235), 1)
-	if sig != nil {
+	// 早期穿越 at snapIdx=3 → nPre=4 < 5 → 忽略
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.20, 49970, openPrice, 235), 1); sig != nil {
 		t.Error("expected nil when MinPreSnaps not met")
 	}
-	// Multi-crossing: the engine returns to Watching (side is NOT exhausted)
 	if eng.state != stateWatching {
 		t.Errorf("expected stateWatching after MinPreSnaps fail, got %d", eng.state)
 	}
 
-	// A later YES crossing SHOULD be retried (multi-crossing mode).
-	// Feed a few more snapshots so the next crossing has nPre >= 5.
+	// 补充前置数据后再次穿越 → 应进入 Confirming
 	for i := 0; i < 3; i++ {
-		price := openPrice + float64(i+3)*10
+		price := openPrice - float64(i+3)*10
 		snap := makeTestSnap(0.6, 0.3, price, openPrice, 220-i*5)
 		eng.ProcessSnapshot(snap, 1)
 	}
-	// Now YES crossed again with nPre >= 5 — should enter confirming.
-	sig2 := eng.ProcessSnapshot(makeTestSnap(0.80, 0.30, 50070, openPrice, 215), 1)
-	// The engine should be in Confirming (or Done if confirmation already buffered).
+	// BTC 继续下行至 49940（div=+1.5 ✓, range=1.5 < RangeExpMax=2.0 → 无 B2）
+	eng.ProcessSnapshot(makeTestSnap(0.80, 0.30, 49940, openPrice, 215), 1)
 	if eng.state != stateConfirming {
 		t.Errorf("expected stateConfirming on retry crossing, got %d", eng.state)
-	}
-	if sig2 != nil {
-		// It's fine if it produces a signal synchronously (buffered confirmation).
-		// What matters is it was NOT ignored.
-		t.Log("retry crossing produced a signal (buffered confirmation)")
 	}
 }

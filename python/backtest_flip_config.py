@@ -6,22 +6,17 @@
 完整方案见 docs/flip_strategy_plan_2026-08-13.md，
 分析过程见 docs/flip_optimization_analysis_2026-08-13.md。
 
-Formula B（减法版）— 三个信号条件，与策略哲学一一对应:
+Formula B — 三个信号条件，与策略哲学一一对应:
   B1 背离硬要求 min_divergence=0.05:
       穿越时刻 BTC 必须与 PM 反向（YES侧触发要求 btc_pos < -0.05，
       NO侧触发要求 btc_pos > 0.05）。χ²=125，全候选最强特征；
-      同向穿越 EV≈0，直接否决。
+      同向穿越 EV≈0，直接否决。历史振幅未就绪的事件整体跳过。
   B2 过度自信 range_expansion < 0.5 → +2:
       BTC 振幅 < 历史平均振幅的一半 = BTC 没动但 PM 已 0.7+。
   B3 确认回归 other_delta 三档 → +3/+2/+1:
       确认期（T+2 ticks）对侧 bid 回升 = 反转正在发生。
 
   score_entry = 2: 任一核心信号成立即触发（B2 或 od>0.02），无需特征堆叠。
-
-已停用（2026-08-13 减法，权重/阈值置 0）:
-  F3 振荡（χ² p=0.32 无效力）、F4/F5 低价入场（方向相反且用不可成交的
-  对侧 bid）、F7 btc_extreme 加分（由 B1 硬过滤取代）、
-  path_eff<0.4 否决（滤掉 EV 偏好候选）、noise>3.0 否决（中性）。
 
 成交口径（实盘对齐）:
   yes_price/no_price 存的是各订单簿 BEST BID。实盘 FAK 买对侧成交在
@@ -43,7 +38,6 @@ from dataclasses import dataclass
 class FlipBacktestConfig:
     # ── Layer 0: 前置条件 ──
     trigger_threshold: float = 0.7       # PM 一侧 bid 超过此值触发
-    allow_retry_crossings: bool = True   # 多穿越重试: 每个上升沿都尝试评分，首个通过者获胜
     min_pre_snaps: int = 5               # 穿越前至少需要的 snapshot 数
     max_remaining_sec: int = 260         # 窗口有效期上限: 仅 remaining_sec < 此值的穿越才有效
     min_remaining_sec: int = 35          # 窗口有效期下限: 确认(2 ticks×5s)+下单执行余量
@@ -75,29 +69,11 @@ class FlipBacktestConfig:
     w_other_d5_vstrong: int = 3          # 对侧确认大涨
     w_other_d5_strong: int = 2           # 对侧确认中涨
     w_other_d5_weak: int = 1             # 对侧确认小涨
-    w_oscillating: int = 0               # 停用（2026-08-13: χ² 无统计效力）
-    w_cheap_entry_strong: int = 0        # 停用（方向相反 + 用不可成交的 bid）
-    w_cheap_entry_weak: int = 0          # 停用
     w_range_expansion: int = 2           # BTC没动但PM 0.7+ → 过度自信
-    w_btc_extreme: int = 0               # 停用（由 min_divergence 硬过滤取代）
 
     # ── 入场阈值 ──
     score_entry: int = 2                 # ≥ 此值 → 开仓（od>0.02 或 range<0.5 即触发）
     score_add: int = 99                  # ≥ 此值 → 加仓（disabled）
-
-    # ── T=0 质量否决（0 = 禁用）──
-    # 2026-08-13 减法: path_eff<0.4 否决滤掉 EV 偏好的候选、noise>3 否决中性，均停用
-    path_eff_veto_min: float = 0.0       # path_eff < 此值 → 否决
-    noise_ratio_veto_max: float = 0.0    # noise_ratio > 此值 → 否决
-
-    # ── 停用特征阈值（保留字段，权重已归零）──
-    path_eff_oscillating: float = 0.7
-    noise_ratio_oscillating: float = 1.5
-    flips_oscillating: int = 1
-    btc_pos_max: float = 0.1             # NO侧触发: btc_pos > 此值 → 背离
-    btc_pos_min: float = -0.1            # YES侧触发: btc_pos < 此值 → 背离
-    entry_cheap_strong: float = 0.20     # 对侧 bid < 此值 → 极低价
-    entry_cheap_weak: float = 0.25       # 对侧 bid < 此值 → 低价
 
 
 # 默认配置实例
