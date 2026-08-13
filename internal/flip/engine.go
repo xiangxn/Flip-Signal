@@ -598,11 +598,15 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 	}
 
 	// ── 入场价上限 gate（与 onConfirmed 一致，保持多穿越重试路径同步）──
+	// ASK 口径：yes_price/no_price 存的是各订单簿 best bid，实盘 FAK 买对侧
+	// 成交在对侧 ask = 1 - 触发侧 bid（双 token 互补），与 Trader 的最优卖价
+	// 校验（trader.go）口径一致。旧口径用对侧 bid 判 gate 比真实买价低一个
+	// spread，引擎放行的信号可能被 Trader 拒绝。
 	var confirmPrice float64
 	if side == "yes" {
-		confirmPrice = confSnap.NoPrice
+		confirmPrice = 1.0 - confSnap.YesPrice // 买 NO: NO ask = 1 - YES bid
 	} else {
-		confirmPrice = confSnap.YesPrice
+		confirmPrice = 1.0 - confSnap.NoPrice // 买 YES: YES ask = 1 - NO bid
 	}
 	if e.cfg.MaxEntryPrice > 0 && confirmPrice > e.cfg.MaxEntryPrice {
 		return nil
@@ -725,17 +729,21 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 	}
 
 	// ── 入场价上限 gate（与回测 max_entry_price 一致）──
-	// 确认时刻对侧价 = 此刻真正可成交的 5s 采样代理。
+	// ASK 口径：确认时刻对侧 ask = 1 - 触发侧 bid（双 token 互补）。
+	// yes_price/no_price 存的是 best bid，实盘 FAK 买对侧必须跨 spread 成交
+	// 在 ask，与 Trader 的最优卖价校验（trader.go）口径一致。
+	// 旧口径用对侧 bid 判 gate 比真实买价低一个 spread，引擎放行后
+	// Trader 仍会拒绝，信号记录口径虚报。
 	// 强 other_delta 的确认意味着廉价入场已消失（穿越价是确认期前的旧价），
-	// 对侧价已超上限 → 盈亏比恶化，实盘 FAK 必被拒 → 信号无效。
+	// 对侧 ask 已超上限 → 盈亏比恶化，实盘 FAK 必被拒 → 信号无效。
 	var confirmPrice float64
 	if e.crossSide == "yes" {
-		confirmPrice = snap.NoPrice
+		confirmPrice = 1.0 - snap.YesPrice // 买 NO: NO ask = 1 - YES bid
 	} else {
-		confirmPrice = snap.YesPrice
+		confirmPrice = 1.0 - snap.NoPrice // 买 YES: YES ask = 1 - NO bid
 	}
 	if e.cfg.MaxEntryPrice > 0 && confirmPrice > e.cfg.MaxEntryPrice {
-		log.Printf("[Flip] 💸 价格失效: side=%s 确认价 %.3f > 上限 %.3f（穿越价 %.3f 已过期）",
+		log.Printf("[Flip] 💸 价格失效: side=%s 对侧ask %.3f > 上限 %.3f（穿越时对侧bid %.3f 已过期）",
 			e.crossSide, confirmPrice, e.cfg.MaxEntryPrice, entryPrice)
 		e.lastFailedOtherDelta = otherDelta
 		e.lastFailedEntryPrice = entryPrice

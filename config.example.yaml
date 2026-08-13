@@ -258,11 +258,13 @@ flip:
   # 默认值: 0.25
   entry_cheap_weak: 0.25
 
-  # 入场价上限 gate: 确认时刻（穿越 + confirm_delay_ticks×5s）对侧价 > 此值
+  # 入场价上限 gate: 确认时刻（穿越 + confirm_delay_ticks×5s）对侧 ASK > 此值
   # → 信号无效（盈亏比已恶化，实盘 FAK 也无法以可接受价格成交）
+  # ASK 口径: yes/no_price 存的是 best bid，对侧 ask = 1 - 触发侧 bid
+  # （双 token 互补），与 trading.max_price 的 FAK 最优卖价校验口径一致
   # 与 trading.max_price 保持一致；0 = 禁用
-  # 默认值: 0.30（6 天数据扫描：单笔盈亏比 2.97、利润因子 1.71）
-  max_entry_price: 0.30
+  # 默认值: 0.45（2026-08-13: fill≥0.50 桶 EV 转负，0.45 为自然边界）
+  max_entry_price: 0.45
 
   # ===== 评分权重 (§2.10) — Formula A =====
 
@@ -339,8 +341,9 @@ trading:
 
   # 最高允许价格：限价单的价格上限，直接设置绝对价格而非滑点百分比
   # 当盘口价很低时滑点百分比不实用（如 0.20 的 50% = 0.30，可能仍吃不到单）
-  # 默认值: 0.30（与 flip.max_entry_price 对齐，高盈亏比优先）
-  max_price: 0.30
+  # FAK 校验按最优卖价（ask）比对；flip.max_entry_price 已按 ask 口径对齐
+  # 默认值: 0.45（与 flip.max_entry_price 对齐，高盈亏比优先）
+  max_price: 0.45
 
   # 日亏上限（USDC）：当日累计 realized 亏损达到此值后停止交易至次日 UTC 零点
   # 也可通过命令行 -max-loss flag 覆盖

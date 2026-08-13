@@ -77,8 +77,9 @@ type FlipConfig struct {
 	EntryCheapStrong float64 `mapstructure:"entry_cheap_strong"`
 	// 对侧价格 < 此值 → 低价入场 → +1 分（elif 不叠加）
 	EntryCheapWeak float64 `mapstructure:"entry_cheap_weak"`
-	// 确认时刻对侧价 > 此值 → 信号无效（盈亏比已恶化，实盘 FAK 也无法成交）
-	// 与 trading.max_price 保持一致；0 = 禁用
+	// 确认时刻对侧 ASK > 此值 → 信号无效（盈亏比已恶化，实盘 FAK 也无法成交）
+	// ASK 口径：对侧 ask = 1 - 触发侧 bid（yes/no_price 存的是 best bid），
+	// 与 trading.max_price 的 FAK 最优卖价校验口径一致；0 = 禁用
 	MaxEntryPrice float64 `mapstructure:"max_entry_price"`
 
 	// ── 评分权重 ──
@@ -139,7 +140,7 @@ func DefaultConfig() FlipConfig {
 		BTCPosMin:             -0.1,   // YES>0.7: BTC 跌 >0.1 倍振幅 → 背离 → +1
 		EntryCheapStrong:      0.20,   // 对侧 <0.20 → 极低价入场 → +1
 		EntryCheapWeak:        0.25,   // 对侧 <0.25 → 低价入场 → +1（elif 不叠加）
-		MaxEntryPrice:         0.45,   // 确认时刻对侧价 >0.30 → 信号无效（与 trading.max_price 一致，2026-08-12 6天数据扫描）
+		MaxEntryPrice:         0.45,   // 确认时刻对侧 ASK >0.45 → 信号无效（与 trading.max_price 一致，fill≥0.50 转负 EV）
 		WOtherD5VStrong:       3,      // 对面大涨权重
 		WOtherD5Strong:        2,      // 对面中涨权重
 		WOtherD5Weak:          1,      // 对面小涨权重

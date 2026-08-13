@@ -451,8 +451,12 @@ func TestEngine_CrossingWithUnfavorableOtherDelta(t *testing.T) {
 }
 
 func TestEngine_MaxEntryPriceVeto(t *testing.T) {
-	// 确认时刻对侧价 > max_entry_price → 信号无效（盈亏比已恶化）
+	// 确认时刻对侧 ASK > max_entry_price → 信号无效（盈亏比已恶化）
+	// ASK 口径：对侧 ask = 1 - 触发侧 bid。本用例中确认时刻 YES bid=0.60
+	// → NO ask=0.40 > 0.35 → 否决。旧口径看 NO bid=0.30 ≤ 0.35 会放行，
+	// 本用例显式验证新口径。
 	cfg := DefaultConfig()
+	cfg.MaxEntryPrice = 0.35
 	cfg.MinPreSnaps = 2
 	cfg.ConfirmDelayTicks = 1
 	ht := NewHistRangeTracker(18)
@@ -476,10 +480,47 @@ func TestEngine_MaxEntryPriceVeto(t *testing.T) {
 		t.Fatal("expected nil after crossing")
 	}
 
-	// 确认: 对面 NO 已涨至 0.40 > 0.35 → 价格失效 gate，无信号
-	// （若无 gate，该信号将得 7 分并发出）
-	if sig := eng.ProcessSnapshot(makeTestSnap(0.78, 0.40, 50005, openPrice, 225), 1); sig != nil {
-		t.Fatalf("expected nil after confirm (price gate), got signal side=%s", sig.Side)
+	// 确认: YES bid 回落到 0.60 → NO ask = 0.40 > 0.35 → 价格失效 gate，无信号
+	// （NO bid 仅 0.30，旧口径会放行；若无 gate，该信号将得 7 分并发出）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.60, 0.30, 50005, openPrice, 225), 1); sig != nil {
+		t.Fatalf("expected nil after confirm (ask price gate), got signal side=%s", sig.Side)
+	}
+}
+
+func TestEngine_MaxEntryPriceAskPass(t *testing.T) {
+	// ASK 口径放行用例：对侧 ask ≤ max_entry_price 但对侧 bid > max_entry_price
+	// 时，新口径必须放行（旧口径按 bid 判 gate 会误杀）。
+	// 确认时刻 YES bid=0.75 → NO ask=0.25 ≤ 0.35 放行；
+	// 但 NO bid=0.36 > 0.35，旧口径会误拒。
+	cfg := DefaultConfig()
+	cfg.MaxEntryPrice = 0.35
+	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1
+	ht := NewHistRangeTracker(18)
+	ht.AddRange(100, 150)
+	ht.AddRange(100, 130)
+	ht.AddRange(100, 140)
+
+	eng := NewEngine(cfg, ht)
+	eng.Reset(1)
+
+	openPrice := 50010.0
+	for i := 0; i < 5; i++ {
+		snap := makeTestSnap(0.5, 0.3, openPrice-float64(i), openPrice, 250-i*5)
+		if sig := eng.ProcessSnapshot(snap, 1); sig != nil {
+			t.Fatalf("unexpected signal at snap %d", i)
+		}
+	}
+
+	// 穿越: YES>0.7，对面 NO=0.15（廉价入场）
+	if sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.15, 50005, openPrice, 230), 1); sig != nil {
+		t.Fatal("expected nil after crossing")
+	}
+
+	// 确认: YES bid 0.75 → NO ask = 0.25 ≤ 0.35，gate 放行 → 信号发出
+	sig := eng.ProcessSnapshot(makeTestSnap(0.75, 0.36, 50005, openPrice, 225), 1)
+	if sig == nil {
+		t.Fatal("expected signal (ask 0.25 within limit), got nil")
 	}
 }
 

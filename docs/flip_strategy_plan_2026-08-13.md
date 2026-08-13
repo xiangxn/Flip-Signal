@@ -129,13 +129,12 @@ Split B: train +0.206 / test +0.263
        return nil // 同向/中性穿越：EV≈0，否决
    }
    ```
-2. **gate 口径统一为 ask**（`engine.go:737` 与 `:603`）：
-   ```go
-   confirmPrice := 1.0 - confSnap.YesPrice // side=yes（买NO: 对侧ask = 1 - YES bid）
-   confirmPrice := 1.0 - confSnap.NoPrice  // side=no（买YES）
-   ```
-   替代现在的 `confSnap.NoPrice / confSnap.YesPrice`（对侧 bid），与 trader.go 的
-   最优卖价校验口径一致。
+2. ~~**gate 口径统一为 ask**~~ ✅ **已完成（2026-08-13）**：
+   `engine.go` 两处 gate（`evaluateCrossingAt` 与 `onConfirmed`）已改为
+   `confirmPrice = 1.0 - 触发侧bid`（对侧 ask），与 trader.go 的最优卖价校验
+   口径一致；`types.go`/`config.example.yaml` 注释同步（gate 0.45 ask 口径）；
+   新增 `TestEngine_MaxEntryPriceAskPass` 用例并修复旧 `TestEngine_MaxEntryPriceVeto`
+   （原用例因默认值 0.30→0.45 已失效，本次一并修正），`go build` + `go test ./...` 全绿。
 3. 评分函数 `ComputeFlipScore`：振荡/低价入场/btc_extreme 分支保留代码但权重由
    config 控制（已置 0），无需删除逻辑。
 4. FlipSignal 输出新增 `BtcDivergence` 字段（JSON: `btc_divergence`），与 Python 对齐。
