@@ -1,8 +1,9 @@
 // Command flip 是 Flip Signal Detection 交易引擎的入口。
 //
-// 连接 Binance WebSocket（aggTrade + depth20）和 Polymarket CLOB WebSocket
-// （订单簿），通过 lab.Collector 每 5 秒生成 ResearchSnapshot，使用 flip.Engine
-// 状态机检测 >0.7 穿越信号，并将信号及盈亏记录到 JSONL 文件。
+// 连接 Chainlink TWAP-60 推送（btc-updown-5m 结算口径）、Polymarket CLOB
+// WebSocket（订单簿）与 Binance WebSocket（aggTrade + depth20，研究对照），
+// 通过 lab.Collector 每 5 秒生成 ResearchSnapshot，使用 flip.Engine 状态机
+// 检测 >0.7 穿越信号，并将信号及盈亏记录到 JSONL 文件。
 //
 // 可选通过 -lab-output 输出完整事件快照（与 cmd/lab 格式一致），
 // 无需单独运行 cmd/lab。
@@ -142,6 +143,28 @@ func main() {
 	bookAdapter.Start(ctx)
 
 	// ================================================================
+	// Chainlink TWAP-60 适配器（btc-updown-5m 结算口径基准价格）
+	// ================================================================
+	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC")
+	twapAdapter := feed.NewTwapAdapter(twapMonitor, "BTC", sdk.ChainlinkTwapWindowSixty)
+	twapAdapter.Start(ctx)
+	go func() {
+		for {
+			err := twapMonitor.Run(ctx)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			// Run 退出 = WS 重连耗尽（SDK 内部 20 次重试后放弃），重启恢复。
+			log.Printf("[Twap] ⚠️ monitor 异常退出: %v —— 5 秒后重启", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}()
+
+	// ================================================================
 	// 实盘交易执行器（仅在有凭证时构造）
 	// ================================================================
 	var trader *trading.Trader
@@ -208,19 +231,41 @@ func main() {
 		}
 	}
 
-	// 预热：拉取历史 5m K 线以初始化 hist_avg_range
-	histErr := make(chan error, 1)
-	go func() {
-		histErr <- histTracker.Warmup(cfg.Binance.RestBaseURL, cfg.Binance.Symbol)
-	}()
-	select {
-	case <-ctx.Done():
-		log.Println("[Flip] 历史振幅预热被中断")
-		return
-	case err := <-histErr:
-		if err != nil {
-			log.Printf("[Flip] 历史振幅预热失败: %v（B1/B2 需等待积累 3 个周期后可用，期间不产生信号）", err)
+	// 等待 Chainlink TWAP 初始数据（首条推送通常在数秒内到达）
+	log.Println("[Flip] 等待 Chainlink TWAP 初始数据...")
+	for i := 0; i < 60; i++ {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(time.Second):
 		}
+		if twapPrice, _ := twapAdapter.Latest(); twapPrice != 0 {
+			log.Printf("[Flip] TWAP 数据就绪，耗时 %ds（twap=%.2f）", i+1, twapPrice)
+			break
+		}
+	}
+
+	// 历史振幅基准：默认冷启动 —— 仅由主循环每周期 AddRange(TWAP 官方
+	// open, close) 积累，≥3 个窗口后 IsReady，期间 B1/B2 不产生信号。
+	// 保证基准口径来自单一采集管线（Phase 3 标定期）。
+	// 可选预热：hist_warmup_enabled=true 时用官方 crypto-price 接口拉取
+	// 最近 HistWindowN 个窗口振幅，消除 15 分钟冷启动（接口有数据延迟，
+	// 口径验证稳定后再启用）。
+	if flipCfg.HistWarmupEnabled {
+		twapRanges := feed.FetchTwapRanges(client, flipCfg.HistWindowN,
+			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty)
+		for _, r := range twapRanges {
+			histTracker.AddRange(0, r) // 注入振幅：AddRange(open,close) = |close-open|
+		}
+		if histTracker.IsReady() {
+			log.Printf("[Flip] TWAP 历史振幅预热完成: %d/%d 个窗口, avg=%.2f",
+				len(twapRanges), flipCfg.HistWindowN, histTracker.AvgRange())
+		} else {
+			log.Printf("[Flip] ⚠️ TWAP 历史振幅预热不足: %d 个窗口（需 ≥3），B1/B2 转入冷启动积累", len(twapRanges))
+		}
+	} else {
+		log.Printf("[Flip] 历史振幅冷启动: 积累 %d 个窗口（~15 分钟）后 B1/B2 可用",
+			flipCfg.HistWindowN)
 	}
 
 	flipEngine := flip.NewEngine(flipCfg, histTracker)
@@ -298,9 +343,9 @@ func main() {
 	if cfg.Runtime.LabOutputDir != "" {
 		log.Printf(" Lab 数据: %s（events JSONL）", cfg.Runtime.LabOutputDir)
 	}
-	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick div≥%.2f (floor=%.1f) score_entry≥%d score_add≥%d",
-		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.MinDivergence, flipCfg.DivergenceFloor, flipCfg.ScoreEntry, flipCfg.ScoreAdd)
-	log.Println(" 数据源: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
+	log.Printf(" 运行参数: trigger>%.1f confirm_delay=%dtick div≥%.2f (floor=%.1f) score_entry≥%d score_add≥%d twap_max_age=%dms",
+		flipCfg.TriggerThreshold, flipCfg.ConfirmDelayTicks, flipCfg.MinDivergence, flipCfg.DivergenceFloor, flipCfg.ScoreEntry, flipCfg.ScoreAdd, flipCfg.MaxTwapAgeMs)
+	log.Println(" 数据源: [Chainlink TWAP-60(结算基准)] + [Polymarket CLOB books] + [Binance(研究对照)]")
 	log.Println("========================================")
 
 	// ================================================================
@@ -326,11 +371,34 @@ func main() {
 		}
 		marketSlug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
 
-		// 步骤 2：等待至窗口起点 + 2 秒
-		waitUntil := nextStart.Add(2 * time.Second)
-		if wait := time.Until(waitUntil); wait > 0 {
+		// 步骤 2：等待至窗口起点（5 分整）。官方 TWAP 开盘价接口有数据
+		// 延迟，需从边界起轮询才能及时拿到 openPrice。
+		if wait := time.Until(nextStart); wait > 0 {
 			log.Printf("[Cycle] next window %s, waiting %v (slug=%s)",
 				nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second), marketSlug)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+
+		// 步骤 2b：边界起轮询官方 TWAP 开盘价（2s 间隔，最长 15s）。
+		// 流采样作为兜底初值；超时未就绪则本周期沿用流采样。
+		twapOpen, _ := twapAdapter.Latest()
+		if officialOpen, ok := feed.PollOfficialOpenPrice(ctx, client, nextStart,
+			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 15*time.Second); ok {
+			twapOpen = officialOpen
+			log.Printf("[Cycle] ✅ 官方 TWAP 开盘价 %.2f（边界后 %.1fs）",
+				twapOpen, time.Since(nextStart).Seconds())
+		} else if twapOpen == 0 {
+			log.Printf("[Cycle] ⚠️ TWAP 开盘价不可用（官方超时且流无数据），本周期 B1/B2 特征停用")
+		} else {
+			log.Printf("[Cycle] ⚠️ 官方 TWAP 开盘价超时未就绪，使用流采样 %.2f", twapOpen)
+		}
+
+		// 确保 Binance 5m K 线已生成（窗口起点 + 2 秒）
+		if wait := time.Until(nextStart.Add(2 * time.Second)); wait > 0 {
 			select {
 			case <-ctx.Done():
 				return
@@ -464,9 +532,11 @@ func main() {
 
 		// 步骤 6：启动事件采集与翻转检测
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
+		collector.SetTwapOpen(twapOpen)
 		generation++
 		flipEngine.Reset(generation)
-		log.Printf("[Cycle] event=%s open=%.2f 开始采集...", conditionID, openPrice)
+		log.Printf("[Cycle] event=%s binance_open=%.2f twap_open=%.2f 开始采集...",
+			conditionID, openPrice, twapOpen)
 
 		ticker := time.NewTicker(5 * time.Second)
 		snapCount := 0
@@ -485,6 +555,10 @@ func main() {
 				nb := bookAdapter.GetLatestBook(noTok)
 
 				collector.UpdatePolymarket(bestBid(yb), bestBid(nb), maxLatency(yb, nb))
+
+				// 读取最新 TWAP-60（B1/B2 特征基准，结算口径）
+				twPrice, twAge := twapAdapter.Latest()
+				collector.UpdateTwap(twPrice, twAge)
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
@@ -509,10 +583,10 @@ func main() {
 						log.Printf("[Flip] 信号记录失败: %v", err)
 					}
 					log.Printf("[Flip] 🎯 SIGNAL: %s>0.7 score=%d entry=%.3f fill=%.3f shares=%.0f | "+
-						"div=%+.2f range_exp=%.1f btc_pos=%+.2f other_d=%+.3f rem=%ds",
+						"div=%+.2f range_exp=%.1f btc_pos=%+.2f other_d=%+.3f rem=%ds twap_age=%dms",
 						sig.Side, sig.Score, sig.EntryPrice, sig.FillPrice, sig.Shares,
 						sig.BtcDivergence, sig.RangeExpansion, sig.BTCPosition, sig.OtherDelta,
-						sig.RemainingSec)
+						sig.RemainingSec, sig.TwapAgeMs)
 
 					// ── 交易执行（纸面/实盘统一路径）──
 					if trader != nil {
@@ -536,16 +610,42 @@ func main() {
 
 				if snap.RemainingSec%30 == 0 && snap.RemainingSec != lastLogRemaining {
 					lastLogRemaining = snap.RemainingSec
-					log.Printf("[Event] %s remaining=%ds snaps=%d price=%.2f yes=%.4f no=%.4f",
+					log.Printf("[Event] %s remaining=%ds snaps=%d binance=%.2f twap=%.2f yes=%.4f no=%.4f",
 						conditionID, snap.RemainingSec, snapCount,
-						snap.CurrentPrice, snap.YesPrice, snap.NoPrice)
+						snap.CurrentPrice, snap.TwapPrice, snap.YesPrice, snap.NoPrice)
 				}
 			}
 		}
 
 		// 步骤 7：结束事件、持久化 Lab 数据、更新历史振幅、结算信号
 		event := collector.FinalizeEvent()
-		histTracker.AddRange(event.OpenPrice, event.ClosePrice)
+
+		// 官方 TWAP 结算价修正：窗口结束后 crypto-price 接口才产出
+		// closePrice（与开盘价同源的数据延迟）。轮询至 endTime+9s
+		// （不超过 10s，避免主循环跳窗），未就绪则沿用流采样值。
+		closeTimeout := time.Until(time.Unix(nextStart.Unix()+lab.WindowSec, 0).Add(9 * time.Second))
+		if closeTimeout < 0 {
+			closeTimeout = 0
+		}
+		if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
+			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, closeTimeout); ok {
+			event.TwapOpenPrice = officialOpen
+			event.TwapClosePrice = officialClose
+			event.Outcome = 1 // Down
+			if officialClose > officialOpen {
+				event.Outcome = 0 // Up
+			}
+		} else {
+			log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样 close", conditionID)
+		}
+
+		// 历史振幅按 TWAP 结算口径积累；TWAP 缺失的周期跳过，
+		// 避免 0 振幅污染均值（冷启动窗口不参与基准）
+		if event.TwapOpenPrice > 0 && event.TwapClosePrice > 0 {
+			histTracker.AddRange(event.TwapOpenPrice, event.TwapClosePrice)
+		} else {
+			log.Printf("[Event] ⚠️ %s TWAP 数据缺失，跳过历史振幅积累", conditionID)
+		}
 
 		// 若启用 Lab 输出，持久化完整事件快照
 		if labWriter != nil {
@@ -558,8 +658,9 @@ func main() {
 		if event.Outcome == 0 {
 			outcomeLabel = "UP"
 		}
-		log.Printf("[Event] %s 完成 —— open=%.2f close=%.2f outcome=%s snapshots=%d",
-			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
+		log.Printf("[Event] %s 完成 —— twap open=%.2f close=%.2f outcome=%s | binance open=%.2f close=%.2f snapshots=%d",
+			conditionID, event.TwapOpenPrice, event.TwapClosePrice, outcomeLabel,
+			event.OpenPrice, event.ClosePrice, len(event.Snapshots))
 
 		// 实盘交易对账（顺序关键：先对账 GTC 挂单，确保成交数据已回填至 FlipRecorder）
 		if trader != nil {

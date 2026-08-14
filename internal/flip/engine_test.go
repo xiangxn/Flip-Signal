@@ -95,6 +95,37 @@ func TestComputeFlipScore_BelowEntry(t *testing.T) {
 	}
 }
 
+func TestComputeFlipScore_TwapAgeVeto(t *testing.T) {
+	// L0: TWAP 数据陈旧 → 一票否决
+	cfg := DefaultConfig()
+	cfg.MaxTwapAgeMs = 1000
+	params := ScoreParams{
+		OtherDelta:     0.06,
+		RangeExpansion: 0.3,
+		HistReady:      true,
+		TwapAgeMs:      5000, // > 1000 → veto
+		Cfg:            cfg,
+	}
+	_, vetoed := ComputeFlipScore(params)
+	if !vetoed {
+		t.Error("expected TWAP staleness veto for age > max")
+	}
+
+	// 年龄在阈值内 → 不否决
+	params.TwapAgeMs = 500
+	if _, vetoed := ComputeFlipScore(params); vetoed {
+		t.Error("no veto expected for fresh TWAP")
+	}
+
+	// 禁用（0）→ 不否决
+	cfg.MaxTwapAgeMs = 0
+	params.Cfg = cfg
+	params.TwapAgeMs = 999999
+	if _, vetoed := ComputeFlipScore(params); vetoed {
+		t.Error("no veto expected when max_twap_age_ms disabled")
+	}
+}
+
 func TestComputeFlipScore_F0Veto(t *testing.T) {
 	cfg := DefaultConfig()
 	params := ScoreParams{
@@ -162,9 +193,13 @@ func TestComputeFlipScore_RangeOnly(t *testing.T) {
 // ═══════════════════════════════════════════════════════════════
 
 func makeTestSnap(yesPrice, noPrice, price, openPrice float64, remainingSec int) *lab.ResearchSnapshot {
+	// price/openPrice 同时填充 Binance 与 TWAP 字段：
+	// 引擎特征（B1/B2/F0）只读 TWAP 口径，Binance 字段仅作研究对照
 	return &lab.ResearchSnapshot{
 		CurrentPrice: price,
 		OpenPrice:    openPrice,
+		TwapPrice:    price,
+		TwapOpen:     openPrice,
 		YesPrice:     yesPrice,
 		NoPrice:      noPrice,
 		RemainingSec: remainingSec,
@@ -364,6 +399,61 @@ func TestEngine_HistNotReadyVeto(t *testing.T) {
 	}
 	if eng.state != stateWatching {
 		t.Errorf("expected stateWatching, got %d", eng.state)
+	}
+}
+
+func TestEngine_TwapNotReadyVeto(t *testing.T) {
+	// TWAP 数据未就绪（twap_price/twap_open 为 0）→ B1/B2/F0 无法计算，否决。
+	// 即使 Binance 侧背离成立也不回退 Binance 口径。
+	cfg := DefaultConfig()
+	cfg.MinPreSnaps = 2
+	eng := NewEngine(cfg, readyHist())
+	eng.Reset(1)
+
+	for i := 0; i < 5; i++ {
+		snap := makeTestSnap(0.5, 0.3, 50000-float64(i), 50000, 250-i*5)
+		eng.ProcessSnapshot(snap, 1)
+	}
+
+	// 穿越点 TWAP 字段清零 → 否决
+	snap := makeTestSnap(0.75, 0.15, 49995, 50000, 230)
+	snap.TwapPrice = 0
+	snap.TwapOpen = 0
+	if sig := eng.ProcessSnapshot(snap, 1); sig != nil {
+		t.Fatal("expected veto when TWAP not ready")
+	}
+	if eng.state != stateWatching {
+		t.Errorf("expected stateWatching after TWAP-not-ready veto, got %d", eng.state)
+	}
+}
+
+func TestEngine_TwapStalenessVeto(t *testing.T) {
+	// 穿越/确认任一时刻 TWAP 年龄超限 → 确认阶段 L0 否决
+	cfg := DefaultConfig()
+	cfg.MinPreSnaps = 2
+	cfg.ConfirmDelayTicks = 1
+	cfg.MaxTwapAgeMs = 1000
+	eng := NewEngine(cfg, readyHist())
+	eng.Reset(1)
+
+	openPrice := 50010.0
+	for i := 0; i < 5; i++ {
+		snap := makeTestSnap(0.5, 0.3, openPrice-float64(i), openPrice, 250-i*5)
+		eng.ProcessSnapshot(snap, 1)
+	}
+
+	// 穿越（背离 ✓，B2 ✓）但 TWAP 陈旧
+	crossSnap := makeTestSnap(0.75, 0.15, 50005, openPrice, 230)
+	crossSnap.TwapAgeMs = 5000
+	if sig := eng.ProcessSnapshot(crossSnap, 1); sig != nil {
+		t.Fatal("expected nil after crossing (in confirming)")
+	}
+
+	// 确认: od=+0.07 达标，但 TWAP 年龄超限 → L0 否决，无信号
+	confSnap := makeTestSnap(0.78, 0.22, 50005, openPrice, 225)
+	confSnap.TwapAgeMs = 5000
+	if sig := eng.ProcessSnapshot(confSnap, 1); sig != nil {
+		t.Fatalf("expected TWAP staleness veto, got signal score=%d", sig.Score)
 	}
 }
 

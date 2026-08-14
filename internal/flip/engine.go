@@ -27,6 +27,7 @@ type T0Features struct {
 	EntryPrice       float64 `json:"entry_price,omitempty"`
 	Score            int     `json:"score,omitempty"`
 	OrderBookLatency int64   `json:"order_book_latency,omitempty"` // 穿越时刻订单簿延迟（毫秒）
+	TwapAgeMs        int64   `json:"twap_age_ms,omitempty"`        // 穿越时刻 TWAP 年龄（毫秒）
 }
 
 // Engine 从 ResearchSnapshot 流中检测翻转信号。
@@ -75,6 +76,7 @@ type Engine struct {
 	btcPosition      float64
 	btcDivergence    float64
 	orderBookLatency int64 // 穿越时刻订单簿延迟（毫秒），用于风控
+	twapAgeMs        int64 // 穿越时刻 TWAP 年龄（毫秒），用于新鲜度风控
 }
 
 // NewEngine 创建一个新的翻转检测引擎。
@@ -111,6 +113,7 @@ func (e *Engine) Reset(generation int64) {
 	e.btcPosition = 0
 	e.btcDivergence = 0
 	e.orderBookLatency = 0
+	e.twapAgeMs = 0
 }
 
 // ProcessSnapshot 处理一个 ResearchSnapshot。满足全部条件时返回 FlipSignal，否则返回 nil。
@@ -221,11 +224,17 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 		return e.returnToWatching()
 	}
 
-	openPrice := crossSnap.OpenPrice
+	// TWAP 数据未就绪（无推送或开盘价缺失）→ B1/B2/F0 无法计算，否决。
+	// TWAP 为唯一 BTC 口径（市场结算基准），不回退 Binance（口径不同会失真）。
+	if crossSnap.TwapPrice <= 0 || crossSnap.TwapOpen <= 0 {
+		return e.returnToWatching()
+	}
+
+	twapOpen := crossSnap.TwapOpen
 
 	// 振幅扩张（仅在历史数据就绪后计算）
 	if e.histRange.IsReady() {
-		e.rangeExpansion = RangeExpansion(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		e.rangeExpansion = RangeExpansion(crossSnap.TwapPrice, twapOpen, e.histRange.AvgRange())
 	}
 
 	// F0: 振幅扩张过大 → 真突破，PM 判断正确，一票否决
@@ -233,7 +242,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 		return e.returnToWatching()
 	}
 
-	// B1: 背离硬要求 —— BTC 不得与 PM 同向（DivergenceFloor），
+	// B1: 背离硬要求 —— TWAP 不得与 PM 同向（DivergenceFloor），
 	// 可选再要求背离强度（MinDivergence > 0）。
 	// 历史振幅未就绪时无法计算背离度 → 否决（与 Python 回测一致：
 	// 无 hist_avg_range 的事件整体跳过，避免预热期放行无 B1 的信号）
@@ -241,7 +250,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 		if !e.histRange.IsReady() {
 			return e.returnToWatching()
 		}
-		e.btcPosition = BTCPosition(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		e.btcPosition = BTCPosition(crossSnap.TwapPrice, twapOpen, e.histRange.AvgRange())
 		e.btcDivergence = Divergence(side, e.btcPosition)
 		if e.btcDivergence < e.cfg.DivergenceFloor {
 			return e.returnToWatching()
@@ -257,6 +266,7 @@ func (e *Engine) enterConfirming(crossIdx int, side string) *FlipSignal {
 	e.crossIdx = crossIdx
 	e.confirmCount = 0
 	e.orderBookLatency = crossSnap.OrderBookLatency // 穿越时刻订单簿延迟，用于风控
+	e.twapAgeMs = crossSnap.TwapAgeMs               // 穿越时刻 TWAP 年龄，用于新鲜度风控
 
 	// 若确认 tick 已在 buffer 中（回退到另一侧更早穿越时会出现），
 	// 则同步评估 —— 对应 Python check_signal 一次性拥有全部数据。
@@ -374,6 +384,7 @@ func (e *Engine) returnToWatching() *FlipSignal {
 			EntryPrice:       e.lastFailedEntryPrice,
 			Score:            e.lastFailedScore,
 			OrderBookLatency: e.orderBookLatency,
+			TwapAgeMs:        e.twapAgeMs,
 		}
 	}
 	e.state = stateWatching
@@ -400,18 +411,23 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		return nil
 	}
 
-	openPrice := crossSnap.OpenPrice
+	// TWAP 数据未就绪 → B1/B2/F0 无法计算，否决（与 enterConfirming 一致）
+	if crossSnap.TwapPrice <= 0 || crossSnap.TwapOpen <= 0 {
+		return nil
+	}
+
+	twapOpen := crossSnap.TwapOpen
 
 	// 振幅扩张 + F0 真突破否决
 	var rangeExpansion float64
 	if e.histRange.IsReady() {
-		rangeExpansion = RangeExpansion(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		rangeExpansion = RangeExpansion(crossSnap.TwapPrice, twapOpen, e.histRange.AvgRange())
 		if rangeExpansion >= e.cfg.RangeExpMax {
 			return nil
 		}
 	}
 
-	// B1 背离硬要求：BTC 不得与 PM 同向（DivergenceFloor），
+	// B1 背离硬要求：TWAP 不得与 PM 同向（DivergenceFloor），
 	// 可选再要求背离强度（MinDivergence > 0）
 	// 历史振幅未就绪时无法计算背离度 → 否决（与 Python 回测一致）
 	var btcPosition, btcDivergence float64
@@ -419,7 +435,7 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		if !e.histRange.IsReady() {
 			return nil
 		}
-		btcPosition = BTCPosition(crossSnap.CurrentPrice, openPrice, e.histRange.AvgRange())
+		btcPosition = BTCPosition(crossSnap.TwapPrice, twapOpen, e.histRange.AvgRange())
 		btcDivergence = Divergence(side, btcPosition)
 		if btcDivergence < e.cfg.DivergenceFloor {
 			return nil
@@ -474,6 +490,11 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 	if confSnap.OrderBookLatency > latency {
 		latency = confSnap.OrderBookLatency
 	}
+	// TWAP 年龄同样取最大值（任一时刻数据陈旧均否决）
+	twapAge := crossSnap.TwapAgeMs
+	if confSnap.TwapAgeMs > twapAge {
+		twapAge = confSnap.TwapAgeMs
+	}
 
 	// ── Formula B 评分 ──
 	params := ScoreParams{
@@ -481,6 +502,7 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		RangeExpansion:   rangeExpansion,
 		HistReady:        e.histRange.IsReady(),
 		OrderBookLatency: latency,
+		TwapAgeMs:        twapAge,
 		Cfg:              e.cfg,
 	}
 
@@ -496,6 +518,7 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 			EntryPrice:       entryPrice,
 			Score:            score,
 			OrderBookLatency: latency,
+			TwapAgeMs:        twapAge,
 		}
 		e.lastFailedOtherDelta = otherDelta
 		e.lastFailedEntryPrice = entryPrice
@@ -511,6 +534,7 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 	e.btcPosition = btcPosition
 	e.btcDivergence = btcDivergence
 	e.orderBookLatency = crossSnap.OrderBookLatency
+	e.twapAgeMs = crossSnap.TwapAgeMs
 
 	return &FlipSignal{
 		Time:             time.Now().UTC(),
@@ -526,6 +550,7 @@ func (e *Engine) evaluateCrossingAt(crossIdx int, side string) *FlipSignal {
 		BtcDivergence:    btcDivergence,
 		OtherDelta:       otherDelta,
 		OrderBookLatency: latency,
+		TwapAgeMs:        twapAge,
 	}
 }
 
@@ -580,6 +605,8 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 
 	// 取穿越时刻与确认时刻延迟的最大值，防止确认 tick 延迟飙升漏检
 	latency := max(e.orderBookLatency, snap.OrderBookLatency)
+	// TWAP 年龄同样取最大值（任一时刻数据陈旧均否决）
+	twapAge := max(e.twapAgeMs, snap.TwapAgeMs)
 
 	// 计算 Formula B 评分
 	params := ScoreParams{
@@ -587,6 +614,7 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		RangeExpansion:   e.rangeExpansion,
 		HistReady:        e.histRange.IsReady(),
 		OrderBookLatency: latency,
+		TwapAgeMs:        twapAge,
 		Cfg:              e.cfg,
 	}
 
@@ -596,6 +624,11 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		if e.cfg.MaxLatencyMs > 0 && latency > e.cfg.MaxLatencyMs {
 			log.Printf("[Flip] 🐢 延迟否决: latency=%dms > max=%dms, side=%s entry=%.3f",
 				latency, e.cfg.MaxLatencyMs, e.crossSide, entryPrice)
+		}
+		// TWAP 陈旧否决时输出日志
+		if e.cfg.MaxTwapAgeMs > 0 && twapAge > e.cfg.MaxTwapAgeMs {
+			log.Printf("[Flip] ⏳ TWAP陈旧否决: twap_age=%dms > max=%dms, side=%s entry=%.3f",
+				twapAge, e.cfg.MaxTwapAgeMs, e.crossSide, entryPrice)
 		}
 		e.lastFailedOtherDelta = otherDelta
 		e.lastFailedEntryPrice = entryPrice
@@ -626,6 +659,7 @@ func (e *Engine) onConfirmed(snap *lab.ResearchSnapshot) *FlipSignal {
 		BtcDivergence:    e.btcDivergence,
 		OtherDelta:       otherDelta,
 		OrderBookLatency: latency,
+		TwapAgeMs:        twapAge,
 	}
 }
 

@@ -1,0 +1,149 @@
+package feed
+
+import (
+	"context"
+	"log"
+	"math"
+	"strings"
+	"sync"
+	"time"
+
+	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
+)
+
+// TwapAdapter 封装 SDK CryptoPriceMonitor 的 Chainlink TWAP 订阅，
+// 维护指定 symbol 的 TWAP 最新值与推送新鲜度，供 Collector 周期采样。
+//
+// btc-updown-5m 市场以 Chainlink TWAP-60（60 秒滚动窗口）判定胜负，
+// 因此本适配器只保留 60s 窗口的推送（30s 窗口与其它 symbol 直接丢弃）。
+type TwapAdapter struct {
+	symbol    string
+	windowSec int64
+	updates   <-chan sdk.ExternalPrice
+
+	mu           sync.RWMutex
+	price        float64
+	lastUpdateAt int64 // 最近一次有效推送的本地到达时间（unix 毫秒）
+}
+
+// NewTwapAdapter 从 CryptoPriceMonitor 的订阅通道创建 TWAP 适配器。
+// monitor 应以 MonitorChainlinkTwap 类型创建（SDK 同时订阅 30s/60s 窗口）。
+func NewTwapAdapter(monitor *sdk.CryptoPriceMonitor, symbol string, windowSec int64) *TwapAdapter {
+	return NewTwapAdapterWithChannel(monitor.Subscribe(), symbol, windowSec)
+}
+
+// NewTwapAdapterWithChannel 直接从推送通道创建适配器（测试用）。
+func NewTwapAdapterWithChannel(updates <-chan sdk.ExternalPrice, symbol string, windowSec int64) *TwapAdapter {
+	return &TwapAdapter{
+		symbol:    strings.ToUpper(symbol),
+		windowSec: windowSec,
+		updates:   updates,
+	}
+}
+
+// Start 启动推送消费 goroutine，持续刷新最新 TWAP 值，ctx 取消后退出。
+func (t *TwapAdapter) Start(ctx context.Context) {
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ep, ok := <-t.updates:
+				if !ok {
+					return
+				}
+				if !strings.EqualFold(ep.Symbol, t.symbol) || ep.WindowSeconds != t.windowSec {
+					continue
+				}
+				t.mu.Lock()
+				first := t.price == 0
+				t.price = ep.Price
+				t.lastUpdateAt = time.Now().UnixMilli()
+				t.mu.Unlock()
+				if first {
+					log.Printf("[Twap] 📡 首条 TWAP-%ds 推送: %s=%.2f", t.windowSec, t.symbol, ep.Price)
+				}
+			}
+		}
+	}()
+}
+
+// Latest 返回最新 TWAP 价格与距上次推送的毫秒数。
+// 尚未收到任何推送时返回 (0, 0)。
+func (t *TwapAdapter) Latest() (price float64, ageMs int64) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.price == 0 {
+		return 0, 0
+	}
+	age := time.Now().UnixMilli() - t.lastUpdateAt
+	if age < 0 {
+		age = 0
+	}
+	return t.price, age
+}
+
+// FetchTwapRanges 通过 Polymarket crypto-price 接口拉取最近 windowN 个
+// 完整窗口的官方 TWAP 开/收盘价，返回各窗口振幅 |close-open|（按时间升序）。
+// 用于启动时预热 HistRangeTracker，消除冷启动等待。
+// twapLookbackSeconds 为 TWAP 回看窗口秒数（btc-updown-5m 为 60）。
+// 个别窗口数据缺失时跳过；全部缺失时返回空切片（调用方回退冷启动）。
+func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapLookbackSeconds int64) []float64 {
+	// 对齐到最近的完整窗口边界，往前取 windowN 个已结束的窗口
+	now := time.Now().UTC()
+	aligned := now.Unix() / windowSec * windowSec
+
+	ranges := make([]float64, 0, windowN)
+	for k := windowN; k >= 1; k-- {
+		start := time.Unix(aligned-int64(k)*windowSec, 0).UTC()
+		end := start.Add(time.Duration(windowSec) * time.Second)
+		openPrice, closePrice := client.FetchOpenPrice(
+			sdk.BTC, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
+		if openPrice <= 0 || closePrice <= 0 {
+			log.Printf("[Twap] ⚠️ 历史窗口 %s 官方价格缺失，跳过", start.Format("15:04"))
+			continue
+		}
+		ranges = append(ranges, math.Abs(closePrice-openPrice))
+	}
+	return ranges
+}
+
+// pollOfficialPrice 以 2s 间隔轮询官方 crypto-price 接口，直至取得有效价格或超时。
+// needClose=true 时要求 close 也有效（窗口结束后接口才产出官方收盘价）。
+// ctx 取消时提前返回 ok=false。返回该窗口的官方 open/close。
+func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
+	windowSec, twapLookbackSeconds int64, timeout time.Duration, needClose bool) (open, close float64, ok bool) {
+	deadline := time.Now().Add(timeout)
+	for {
+		open, close = client.FetchOpenPrice(sdk.BTC, start,
+			start.Add(time.Duration(windowSec)*time.Second),
+			sdk.Fiveminute, true, int(twapLookbackSeconds))
+		if open > 0 && (!needClose || close > 0) {
+			return open, close, true
+		}
+		if time.Now().After(deadline) {
+			return 0, 0, false
+		}
+		select {
+		case <-ctx.Done():
+			return 0, 0, false
+		case <-time.After(2 * time.Second):
+		}
+	}
+}
+
+// PollOfficialOpenPrice 从窗口起点起轮询官方 TWAP 开盘价。
+// 接口有数据延迟，需从 5 分整边界开始轮询；超时或 ctx 取消时返回
+// ok=false（调用方回退流采样）。
+func PollOfficialOpenPrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
+	windowSec, twapLookbackSeconds int64, timeout time.Duration) (open float64, ok bool) {
+	open, _, ok = pollOfficialPrice(ctx, client, start, windowSec, twapLookbackSeconds, timeout, false)
+	return open, ok
+}
+
+// PollOfficialClosePrice 窗口结束后轮询官方 TWAP 收盘价（close 有数据延迟），
+// 同时返回官方 open 供事件记录修正。超时或 ctx 取消时返回 ok=false。
+func PollOfficialClosePrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
+	windowSec, twapLookbackSeconds int64, timeout time.Duration) (open, close float64, ok bool) {
+	return pollOfficialPrice(ctx, client, start, windowSec, twapLookbackSeconds, timeout, true)
+}

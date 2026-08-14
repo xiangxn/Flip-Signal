@@ -14,9 +14,16 @@ type ResearchSnapshot struct {
 	Timestamp    int64 `json:"ts"`
 	RemainingSec int   `json:"remaining_sec"`
 
-	// --- BTC price ---
+	// --- BTC price (Binance，研究对照) ---
 	OpenPrice    float64 `json:"open"`
 	CurrentPrice float64 `json:"price"`
+
+	// --- Chainlink TWAP-60（btc-updown-5m 结算口径，2026-08-14 起）---
+	// twap_open 为窗口起点的 TWAP 边界采样值；
+	// twap_age_ms 为采样时刻距上次 TWAP 推送的毫秒数
+	TwapPrice float64 `json:"twap_price"`
+	TwapOpen  float64 `json:"twap_open"`
+	TwapAgeMs int64   `json:"twap_age_ms,omitempty"`
 
 	// --- 10-second return (2-tick × 5s) ---
 	Return10s float64 `json:"ret_10s"`
@@ -58,8 +65,17 @@ type Event struct {
 	OpenPrice  float64 `json:"open_price"`
 	ClosePrice float64 `json:"close_price"`
 
+	// Chainlink TWAP-60 结算口径的开/收盘价（窗口边界采样）。
+	// 与 Polymarket 真实结算一致（2026-08-14 起）。
+	TwapOpenPrice  float64 `json:"twap_open_price"`
+	TwapClosePrice float64 `json:"twap_close_price"`
+
 	// Outcome: Polymarket convention — 0 = Up (YES), 1 = Down (NO)
+	// TWAP 口径（twap_close > twap_open → Up）；TWAP 数据缺失时回退 Binance。
 	Outcome int `json:"outcome"`
+
+	// Binance 口径 outcome（close > open → Up），研究对照用
+	BinanceOutcome int `json:"binance_outcome"`
 
 	// Snapshots collected during this 5-minute window
 	Snapshots []*ResearchSnapshot `json:"snapshots"`

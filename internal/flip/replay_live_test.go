@@ -24,6 +24,10 @@ type eventFile struct {
 		YesPrice         float64 `json:"yes_price"`
 		NoPrice          float64 `json:"no_price"`
 		OrderBookLatency int64   `json:"order_book_latency"`
+		// 2026-08-14 起的新 lab 数据携带 TWAP 字段；旧数据缺失时回放以
+		// Binance 值占位（见 replayLive）
+		TwapPrice float64 `json:"twap_price"`
+		TwapOpen  float64 `json:"twap_open"`
 	} `json:"snapshots"`
 }
 
@@ -31,9 +35,11 @@ type eventFile struct {
 // 不用 data/btc 实时文件 —— 实盘持续追加会改变信号数，导致断言漂移。
 const replayDataPath = "testdata/events_2026-08-13.jsonl"
 
-// warmupRanges 为实盘启动时 HistRangeTracker.Warmup 拉取的 18 根 5m K 线
-// |close-open| 振幅（按时间升序，最后一根为启动时的进行中 K 线，用其近似值）。
+// warmupRanges 为 2026-08-13 实盘启动时预热的 18 根 5m K 线 |close-open| 振幅
+// （按时间升序，最后一根为启动时的进行中 K 线，用其近似值）。
 // 数据来自 data-api.binance.vision 2026-08-13 06:45–08:10 UTC。
+// ⚠️ 2026-08-14 起实盘历史振幅改用 TWAP 口径冷启动（无历史预热）；
+// 此数据仅作引擎机械回放的占位基准，不代表 TWAP 振幅。
 var warmupRanges = []float64{
 	36.60, 3.98, 16.00, 39.85, 15.98, 13.71,
 	4.68, 11.84, 2.33, 32.50, 21.83, 11.15,
@@ -82,11 +88,21 @@ func replayLive(t *testing.T, events []*eventFile, cfg FlipConfig) []*FlipSignal
 	for i, e := range events {
 		engine.Reset(int64(i + 1))
 		for _, s := range e.Snapshots {
+			// TWAP 口径占位：旧回放数据无 TWAP 字段，以 Binance 值代替。
+			// 本测试只验证引擎机械行为（状态机/评分/延迟否决），
+			// 不验证口径标定 —— 后者待 TWAP lab 数据积累后在 Python 重做。
+			twPrice, twOpen := s.TwapPrice, s.TwapOpen
+			if twPrice == 0 {
+				twPrice = s.Price
+				twOpen = s.Open
+			}
 			snap := &lab.ResearchSnapshot{
 				Timestamp:        s.Ts,
 				RemainingSec:     s.RemainingSec,
 				OpenPrice:        s.Open,
 				CurrentPrice:     s.Price,
+				TwapPrice:        twPrice,
+				TwapOpen:         twOpen,
 				YesPrice:         s.YesPrice,
 				NoPrice:          s.NoPrice,
 				OrderBookLatency: s.OrderBookLatency,

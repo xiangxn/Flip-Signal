@@ -1,18 +1,21 @@
 package flip
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
 	"math"
-	"net/http"
 	"sync"
 )
 
-// HistRangeTracker 维护历史 5m K 线振幅（|close - open|）的滑动窗口，
+// HistRangeTracker 维护历史 5m 窗口振幅（|close - open|）的滑动窗口，
 // 提供均值作为 range_expansion 和 btc_position 计算的基准。
 //
-// 对应 Python compute_hist_avg_range() —— 跨市场周期维护最近 N 根 K 线的
+// ⚠️ 2026-08-14 起振幅为 Chainlink TWAP-60 口径（btc-updown-5m 结算基准）：
+// 由主循环在每个窗口结束时 AddRange(官方 TWAP open, 官方 TWAP close) 积累。
+// 启动时经 feed.FetchTwapRanges（crypto-price 接口）拉取官方历史振幅预热；
+// 接口不可用时冷启动积累 ≥3 个窗口后 IsReady 才为 true，期间 B1/B2
+// 不产生信号。不可用 Binance K 线振幅预热 —— 两套口径振幅尺度不同，
+// 混用会污染基准。
+//
+// 对应 Python compute_hist_avg_range() —— 跨市场周期维护最近 N 个振幅的
 // FIFO 队列。
 type HistRangeTracker struct {
 	mu       sync.RWMutex
@@ -30,54 +33,8 @@ func NewHistRangeTracker(windowN int) *HistRangeTracker {
 	}
 }
 
-// Warmup 从 Binance REST 获取最近 windowN 根 5m K 线，
-// 用其 |close - open| 初始化追踪器。启动时调用一次。
-//
-// restBaseURL 示例: "https://data-api.binance.vision"
-// symbol 示例: "BTCUSDT"
-func (t *HistRangeTracker) Warmup(restBaseURL, symbol string) error {
-	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=5m&limit=%d",
-		restBaseURL, symbol, t.windowN)
-
-	resp, err := http.Get(url)
-	if err != nil {
-		return fmt.Errorf("warmup fetch: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var klines [][]any
-	if err := json.NewDecoder(resp.Body).Decode(&klines); err != nil {
-		return fmt.Errorf("warmup decode: %w", err)
-	}
-
-	t.mu.Lock()
-	defer t.mu.Unlock()
-
-	t.ranges = t.ranges[:0]
-	for _, k := range klines {
-		// k[1] = 开盘价, k[4] = 收盘价（字符串格式）
-		if len(k) < 5 {
-			continue
-		}
-		openStr, ok1 := k[1].(string)
-		closeStr, ok2 := k[4].(string)
-		if !ok1 || !ok2 {
-			continue
-		}
-		open := parseFloat(openStr)
-		close := parseFloat(closeStr)
-		r := math.Abs(close - open)
-		t.ranges = append(t.ranges, r)
-	}
-
-	t.recalcAvg()
-	log.Printf("[HistRange] warmup complete: %d ranges, avg=%.4f ready=%v",
-		len(t.ranges), t.avgRange, t.ready)
-	return nil
-}
-
 // AddRange 追加一个已完成周期的振幅并更新均值。
-// 在每个 5 分钟市场周期结束时调用。
+// 在每个 5 分钟市场周期结束时调用（TWAP 口径）。
 func (t *HistRangeTracker) AddRange(openPrice, closePrice float64) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -116,22 +73,4 @@ func (t *HistRangeTracker) recalcAvg() {
 	}
 	t.avgRange = sum / float64(len(t.ranges))
 	t.ready = len(t.ranges) >= 3
-}
-
-// parseFloat 将 JSON 的字符串或数字解析为 float64。
-// 兼容 Binance 以字符串编码的数值。
-func parseFloat(v any) float64 {
-	switch val := v.(type) {
-	case string:
-		var f float64
-		fmt.Sscanf(val, "%f", &f)
-		return f
-	case float64:
-		return val
-	case json.Number:
-		f, _ := val.Float64()
-		return f
-	default:
-		return 0
-	}
 }

@@ -18,6 +18,9 @@
   **ask = 1 - 触发侧 bid** 计算（Go 引擎 gate 已按 ask 口径实现，见方案文档 §5）
 - **实盘注意**：`max_latency_ms=300` 的 L0 延迟否决只在实盘生效（回测 data_0 无 latency 字段），
   实盘信号率会低于回测基准
+- **结算口径（2026-08-14）**：btc-updown-5m 以 **Chainlink TWAP-60** 判定胜负，B1/B2/F0 的
+  BTC 侧输入已切换为 TWAP（Binance 仅研究对照）。⚠️ 现有阈值（range 1.0/1.5、gate 0.45 等）
+  基于 Binance 口径标定，待 TWAP lab 数据积累后需重标定
 
 ---
 
@@ -45,8 +48,9 @@ FlipSignal/
 │   │   ├── recorder.go                  # JSONL 信号记录 + P&L 结算
 │   │   └── engine_test.go              # 单元测试
 │   ├── feed/
-│   │   ├── binance_adapter.go           # Binance WS: 价格/量/深度
-│   │   └── orderbook_adapter.go         # Polymarket WS: YES/NO 盘口
+│   │   ├── binance_adapter.go           # Binance WS: 价格/量/深度（研究对照）
+│   │   ├── orderbook_adapter.go         # Polymarket WS: YES/NO 盘口
+│   │   └── twap_adapter.go              # Chainlink TWAP-60 流（结算基准）
 │   └── dashboard/
 │       ├── server.go                    # HTTP server
 │       ├── handlers.go                  # /api/state, /api/signals, /api/snapshots…
@@ -71,39 +75,39 @@ FlipSignal/
 ## 架构与数据流
 
 ```
-                         Binance                  Polymarket
-                    ┌───── WS ─────┐         ┌──── WS ──────┐
-                    │ btcusdt@trade│         │ MarketMonitor│
-                    │ @depth20     │         │ (CLOB books) │
-                    └──┬───────┬───┘         └──────┬───────┘
-                       │       │                    │
-                       ▼       ▼                    ▼
-                  BTC价格/量  深度              YES/NO价格
-                       │       │                    │
-                       └───────┼────────────────────┘
-                               ▼
-                    lab.Collector (5秒定时器)
-                               │
-                               ▼
-                       ResearchSnapshot
-                               │
-                               ▼
-                        Flip Engine
-                 (状态机 + Formula B)
-                               │
-                               ▼
-                        FlipRecorder
-                     (JSONL + P&L结算)
+               Polymarket RTDS          Polymarket CLOB          Binance
+             ┌─ WS(Chainlink) ─┐      ┌──── WS ──────┐      ┌── WS ──────┐
+             │ TWAP-60 (60s)   │      │ MarketMonitor│      │aggTrade    │
+             │ 结算基准价格     │      │ (CLOB books) │      │+depth20    │
+             └───────┬─────────┘      └──────┬───────┘      └─────┬──────┘
+                     │                       │                    │
+                     ▼                       ▼                    ▼
+                 TWAP价格              YES/NO价格(best bid)   BTC价格/量/深度
+                     │                       │              （研究对照）
+                     └───────────┬───────────┘
+                                 ▼
+                      lab.Collector (5秒定时器)
+                                 │
+                                 ▼
+                         ResearchSnapshot
+                                 │
+                                 ▼
+                          Flip Engine
+                   (状态机 + Formula B)
+                                 │
+                                 ▼
+                          FlipRecorder
+                       (JSONL + P&L结算)
 ```
 
 ### 数据源分工
 
 | 数据 | 来源 | 方式 |
 |------|------|------|
-| BTC 价格 | Binance `btcusdt@trade` | WebSocket |
-| BTC 5m 开盘价 | Binance REST `/api/v3/klines?interval=5m` | HTTP（每周期）|
-| 买卖成交量 | Binance `btcusdt@trade`（aggressor side）| WebSocket |
-| 订单簿深度 | Binance `btcusdt@depth20@100ms` | WebSocket |
+| **TWAP-60 价格（特征基准）** | Polymarket RTDS `crypto_prices_twap_sixty`（Chainlink） | WebSocket（SDK `CryptoPriceMonitor`）|
+| **TWAP 官方开/收盘价** | Polymarket REST `api/crypto/crypto-price`（twapEnabled+60s，SDK `FetchOpenPrice`） | HTTP —— 开盘价从 5 分整边界起轮询（接口有数据延迟）；收盘价窗口结束后轮询修正；启动时拉最近 N 个窗口预热历史振幅 |
+| BTC 价格/量/深度（研究对照） | Binance `btcusdt@trade` + `@depth20` | WebSocket |
+| BTC 5m 开盘价（研究对照） | Binance REST `/api/v3/klines?interval=5m` | HTTP（每周期）|
 | YES/NO 盘口 | Polymarket `MarketMonitor` | WebSocket |
 
 ### 市场循环流程
@@ -111,7 +115,7 @@ FlipSignal/
 ```
 1. 计算下个 5分钟对齐时间戳
 2. 等待窗口开始 + 2秒（确保 Binance kline 已生成）
-3. GET /api/v3/klines → 获取当前5m K线开盘价
+3. GET /api/v3/klines → Binance K线开盘价（研究对照）；采样 TWAP-60 开盘价（特征基准）
 4. GET gamma-api/markets/slug/btc-updown-5m-<ts> → 获取市场信息
 5. MarketMonitor.SubscribeTokens() → 订阅新市场的 YES/NO token
 6. Collector.StartEvent() → 设置 conditionID/openPrice/endTime
@@ -138,10 +142,11 @@ Idle ──Reset()──▶ Watching ──price>0.7──▶ Confirming ──s
 
 | 条件 | 说明 | 权重 |
 |------|------|------|
-| **B1 背离硬要求** | BTC 不得与 PM 同向：`divergence_floor=0.0`（div<0 直接否决，同向穿越 EV≈0，χ²=125）。`min_divergence`（默认 0）可额外要求背离强度 | 硬过滤 |
+| **B1 背离硬要求** | TWAP 不得与 PM 同向：`divergence_floor=0.0`（div<0 直接否决）。`min_divergence`（默认 0）可额外要求背离强度。⚠️ χ²=125 证据基于 Binance 口径，待 TWAP 数据重标定 | 硬过滤 |
 | B3 确认回归 OtherDelta | other_delta > 0.05 / 0.02 / 0.01 | +3 / +2 / +1 |
-| **B2 过度自信 RangeExpansion** | range_expansion < 1.0（BTC 移动不足 1 个历史振幅但 PM 已 0.7+） | +2 |
-| F0 Veto | range_expansion ≥ 1.5（真突破，PM 是对的） | 否决 |
+| **B2 过度自信 RangeExpansion** | range_expansion < 1.0（TWAP 移动不足 1 个历史振幅但 PM 已 0.7+）⚠️ 阈值待 TWAP 重标定 | +2 |
+| F0 Veto | range_expansion ≥ 1.5（真突破，PM 是对的）⚠️ 阈值待 TWAP 重标定 | 否决 |
+| **L0 TWAP 新鲜度** | twap_age > `max_twap_age_ms`（默认 5000ms，TWAP-60 推送间隔约 2s）→ 特征基于过期价格 | 否决 |
 | **Price Gate（ask 口径）** | 确认时刻对侧 **ask = 1 - 触发侧 bid** > max_entry_price（0.45，与 trading.max_price 一致） | 信号无效 |
 
 - `score_entry = 2`：任一核心信号成立即触发（od>0.02 或 range<1.0），无需特征堆叠
@@ -344,6 +349,15 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
 ## 关键设计决策
 
 1. **Binance 直连而非通过 Polymarket 转发**: Polymarket 的 `CryptoPriceMonitor` 只提供价格，没有成交量、深度、订单流。
+
+2. **TWAP-60 为唯一 BTC 特征口径（2026-08-14）**: btc-updown-5m 以 Chainlink TWAP-60
+   判定胜负，B1/B2/F0 与历史振幅全部基于 TWAP（SDK `CryptoPriceMonitor` 订阅
+   `crypto_prices_twap_sixty`）。Binance 数据保留仅作基差研究对照，禁止双口径特征叠加
+   （Formula B 减法哲学）。官方开/收盘价经 `FetchOpenPrice`（crypto-price 接口）获取：
+   开盘价从窗口边界起轮询（接口有数据延迟，最长 15s，超时回退流采样），收盘价窗口
+   结束后轮询修正（最长 9s）。历史振幅基准默认**冷启动**（`hist_warmup_enabled=false`，
+   主循环积累 ≥3 个窗口后 B1/B2 可用）—— 标定期保证基准口径来自单一采集管线；
+   预热开关（拉官方历史振幅）在口径验证稳定后启用。
 
 2. **单 WS 连接多流复用**: `btcusdt@trade` + `btcusdt@depth20` 合并为一个连接。
 

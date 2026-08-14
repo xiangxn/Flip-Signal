@@ -10,15 +10,23 @@ package flip
 // 理论最高分: 3 + 2 = 5。
 //
 //	L0:  OrderBookLatency > MaxLatencyMs → veto（延迟风控，数据不可信）
+//	L0:  TwapAgeMs > MaxTwapAgeMs → veto（TWAP 陈旧，特征基于过期价格）
 //	F0:  RangeExpansion ≥ RangeExpMax → veto（真突破，PM 是对的）
 //	B3:  OtherDelta > VStrong/Strong/Weak → +3/+2/+1（确认期对侧回归）
-//	B2:  RangeExpansion < RangeExpThreshold → +2（BTC 没动 = PM 过度自信）
+//	B2:  RangeExpansion < RangeExpThreshold → +2（TWAP 没动 = PM 过度自信）
 //
 // B1 背离硬要求（DivergenceFloor 否决同向 + MinDivergence 可选强度）
 // 由引擎在评分前硬过滤，不参与评分。
+//
+// ⚠️ 2026-08-14 起 B1/B2/F0 的 BTC 侧输入为 Chainlink TWAP-60 口径。
 func ComputeFlipScore(params ScoreParams) (score int, vetoed bool) {
 	// L0: 订单簿延迟过大 → 数据不可信，一票否决。
 	if params.Cfg.MaxLatencyMs > 0 && params.OrderBookLatency > params.Cfg.MaxLatencyMs {
+		return 0, true
+	}
+
+	// L0: TWAP 数据陈旧 → B1/B2 特征基于过期价格，一票否决。
+	if params.Cfg.MaxTwapAgeMs > 0 && params.TwapAgeMs > params.Cfg.MaxTwapAgeMs {
 		return 0, true
 	}
 

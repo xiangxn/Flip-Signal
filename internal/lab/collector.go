@@ -30,6 +30,12 @@ type Collector struct {
 	noPrice          float64
 	orderBookLatency int64
 
+	// Chainlink TWAP-60（每次 Tick 前由外部调用 UpdateTwap 更新；
+	// twapOpen 在 StartEvent 后由 SetTwapOpen 设置）
+	twapPrice float64
+	twapOpen  float64
+	twapAgeMs int64
+
 	// 采样间隔（秒）
 	tickIntervalSec int
 
@@ -69,6 +75,19 @@ func (c *Collector) UpdatePolymarket(yesPrice, noPrice float64, latencyMs int64)
 	c.orderBookLatency = latencyMs
 }
 
+// UpdateTwap 设置最新的 Chainlink TWAP-60 价格与距上次推送的毫秒数。
+// 由调用方从 TwapAdapter.Latest() 获取，每次 Tick 前更新。
+func (c *Collector) UpdateTwap(price float64, ageMs int64) {
+	c.twapPrice = price
+	c.twapAgeMs = ageMs
+}
+
+// SetTwapOpen 设置当前事件窗口起点的 TWAP-60 开盘价（结算口径基准）。
+// 在 StartEvent 之后调用。
+func (c *Collector) SetTwapOpen(open float64) {
+	c.twapOpen = open
+}
+
 // StartEvent 开始一个新的 5 分钟事件窗口。
 func (c *Collector) StartEvent(conditionID string, startTime int64, openPrice float64) {
 	c.conditionID = conditionID
@@ -80,6 +99,9 @@ func (c *Collector) StartEvent(conditionID string, startTime int64, openPrice fl
 	c.yesPrice = 0
 	c.noPrice = 0
 	c.orderBookLatency = 0
+	c.twapPrice = 0
+	c.twapOpen = 0
+	c.twapAgeMs = 0
 }
 
 // Tick 生成当前时刻的 ResearchSnapshot。
@@ -122,6 +144,9 @@ func (c *Collector) Tick(now time.Time) *ResearchSnapshot {
 		RemainingSec:  remaining,
 		OpenPrice:     c.openPrice,
 		CurrentPrice:  price,
+		TwapPrice:     c.twapPrice,
+		TwapOpen:      c.twapOpen,
+		TwapAgeMs:     c.twapAgeMs,
 		Return10s:      ret,
 		BuyVolume5s:   buyVol,
 		SellVolume5s:  sellVol,
@@ -184,19 +209,33 @@ func (c *Collector) FinalizeEvent() *Event {
 		closePrice = c.snapshots[len(c.snapshots)-1].CurrentPrice
 	}
 
-	// Polymarket outcomes[] 约定: [0]=Up, [1]=Down
-	outcome := 1 // Down
+	// Binance 口径 outcome（研究对照）
+	binanceOutcome := 1 // Down
 	if closePrice > c.openPrice {
-		outcome = 0 // Up
+		binanceOutcome = 0 // Up
+	}
+
+	// Polymarket outcomes[] 约定: [0]=Up, [1]=Down。
+	// Outcome 采用 TWAP 结算口径（与市场真实结算一致）：
+	// twap_close > twap_open → Up。TWAP 数据缺失时回退 Binance 口径。
+	outcome := binanceOutcome
+	if c.twapOpen > 0 && c.twapPrice > 0 {
+		outcome = 1 // Down
+		if c.twapPrice > c.twapOpen {
+			outcome = 0 // Up
+		}
 	}
 
 	return &Event{
-		ConditionID: c.conditionID,
-		StartTime:   c.startTime,
-		OpenPrice:   c.openPrice,
-		ClosePrice:  closePrice,
-		Outcome:     outcome,
-		Snapshots:   c.snapshots,
+		ConditionID:     c.conditionID,
+		StartTime:       c.startTime,
+		OpenPrice:       c.openPrice,
+		ClosePrice:      closePrice,
+		TwapOpenPrice:   c.twapOpen,
+		TwapClosePrice:  c.twapPrice,
+		Outcome:         outcome,
+		BinanceOutcome:  binanceOutcome,
+		Snapshots:       c.snapshots,
 	}
 }
 

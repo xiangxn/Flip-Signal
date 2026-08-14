@@ -1,9 +1,11 @@
 // lab 是特征研究实验室的数据采集器。
 //
-// 连接 Binance WebSocket (aggTrade + depth20) 和 Polymarket
-// CLOB WebSocket (order books)，以可配置的采样间隔生成
-// ResearchSnapshot，按 Polymarket conditionId 归类为 5 分钟 Event，
-// 并以 JSONL 格式写入磁盘。
+// 连接 Chainlink TWAP-60 推送（btc-updown-5m 结算口径）、Binance
+// WebSocket (aggTrade + depth20，研究对照) 和 Polymarket CLOB
+// WebSocket (order books)，以可配置的采样间隔生成 ResearchSnapshot，
+// 按 Polymarket conditionId 归类为 5 分钟 Event，并以 JSONL 格式写入磁盘。
+// 官方 TWAP 开/收盘价经 crypto-price 接口获取（开盘价从窗口边界起轮询，
+// 收盘价窗口结束后轮询修正）。
 //
 // Usage:
 //
@@ -86,6 +88,26 @@ func main() {
 	)
 	bookAdapter.Start(ctx)
 
+	// ── Chainlink TWAP-60 适配器（btc-updown-5m 结算口径基准价格）──
+	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC")
+	twapAdapter := feed.NewTwapAdapter(twapMonitor, "BTC", sdk.ChainlinkTwapWindowSixty)
+	twapAdapter.Start(ctx)
+	go func() {
+		for {
+			err := twapMonitor.Run(ctx)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			// Run 退出 = WS 重连耗尽（SDK 内部 20 次重试后放弃），重启恢复。
+			log.Printf("[Twap] ⚠️ monitor 异常退出: %v —— 5 秒后重启", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
+		}
+	}()
+
 	// 订单簿追踪：goroutine 写入，tick 循环加 RLock 读取
 	var (
 		bookMu  sync.RWMutex
@@ -135,7 +157,7 @@ func main() {
 	log.Printf(" 特征研究实验室 — %s 数据采集", *slugPrefix)
 	log.Printf(" 交易对: %s  |  Slug: %s  |  输出: %s  |  间隔: %ds",
 		*symbol, *slugPrefix, *outputDir, *tickInterval)
-	log.Println(" 数据源: [Binance aggTrade+depth20] + [Polymarket CLOB books]")
+	log.Println(" 数据源: [Chainlink TWAP-60(结算基准)] + [Binance aggTrade+depth20(研究对照)] + [Polymarket CLOB books]")
 	log.Println("========================================")
 
 	// 等待初始数据就绪
@@ -157,11 +179,33 @@ func main() {
 		nextStart := time.Unix(alignedTs, 0)
 		marketSlug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
 
-		// 步骤 2: 等待到窗口开始 + 2 秒
-		waitUntil := nextStart.Add(2 * time.Second)
-		if wait := time.Until(waitUntil); wait > 0 {
+		// 步骤 2: 等待至窗口起点（5 分整）。官方 TWAP 开盘价接口有数据
+		// 延迟，需从边界起轮询才能及时拿到 openPrice。
+		if wait := time.Until(nextStart); wait > 0 {
 			log.Printf("[Cycle] 下一个窗口 %s, 等待 %v (slug=%s)",
 				nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second), marketSlug)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+
+		// 边界起轮询官方 TWAP 开盘价（2s 间隔，最长 15s），流采样兜底
+		twapOpen, _ := twapAdapter.Latest()
+		if officialOpen, ok := feed.PollOfficialOpenPrice(ctx, client, nextStart,
+			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 15*time.Second); ok {
+			twapOpen = officialOpen
+			log.Printf("[Cycle] ✅ 官方 TWAP 开盘价 %.2f（边界后 %.1fs）",
+				twapOpen, time.Since(nextStart).Seconds())
+		} else if twapOpen == 0 {
+			log.Printf("[Cycle] ⚠️ TWAP 开盘价不可用（官方超时且流无数据）")
+		} else {
+			log.Printf("[Cycle] ⚠️ 官方 TWAP 开盘价超时未就绪，使用流采样 %.2f", twapOpen)
+		}
+
+		// 确保 Binance 5m K 线已生成（窗口起点 + 2 秒）
+		if wait := time.Until(nextStart.Add(2 * time.Second)); wait > 0 {
 			select {
 			case <-ctx.Done():
 				return
@@ -244,7 +288,9 @@ func main() {
 
 		// 步骤 6: 启动事件采集
 		collector.StartEvent(conditionID, nextStart.Unix(), openPrice)
-		log.Printf("[Cycle] event=%s open=%.2f 开始采集...", conditionID, openPrice)
+		collector.SetTwapOpen(twapOpen)
+		log.Printf("[Cycle] event=%s binance_open=%.2f twap_open=%.2f 开始采集...",
+			conditionID, openPrice, twapOpen)
 
 		ticker := time.NewTicker(time.Duration(*tickInterval) * time.Second)
 		snapCount := 0
@@ -265,6 +311,10 @@ func main() {
 				bookMu.RUnlock()
 
 				collector.UpdatePolymarket(bestBid(yb), bestBid(nb), maxLatency(yb, nb))
+
+				// 读取最新 TWAP-60（结算口径，特征基准）
+				twPrice, twAge := twapAdapter.Latest()
+				collector.UpdateTwap(twPrice, twAge)
 
 				snap := collector.Tick(tickTime)
 				if snap == nil {
@@ -288,12 +338,33 @@ func main() {
 
 		// 步骤 7: 封存并持久化事件
 		event := collector.FinalizeEvent()
+
+		// 官方 TWAP 结算价修正：窗口结束后 crypto-price 接口才产出
+		// closePrice（与开盘价同源的数据延迟）。轮询至 endTime+9s，
+		// 未就绪则沿用流采样值。
+		closeTimeout := time.Until(time.Unix(nextStart.Unix()+lab.WindowSec, 0).Add(9 * time.Second))
+		if closeTimeout < 0 {
+			closeTimeout = 0
+		}
+		if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
+			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, closeTimeout); ok {
+			event.TwapOpenPrice = officialOpen
+			event.TwapClosePrice = officialClose
+			event.Outcome = 1 // Down
+			if officialClose > officialOpen {
+				event.Outcome = 0 // Up
+			}
+		} else {
+			log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样 close", conditionID)
+		}
+
 		outcomeLabel := "DOWN/Flat"
 		if event.Outcome == 0 {
 			outcomeLabel = "UP"
 		}
-		log.Printf("[Event] %s 完成 — open=%.2f close=%.2f outcome=%s snapshots=%d",
-			conditionID, event.OpenPrice, event.ClosePrice, outcomeLabel, len(event.Snapshots))
+		log.Printf("[Event] %s 完成 — twap open=%.2f close=%.2f outcome=%s | binance open=%.2f close=%.2f snapshots=%d",
+			conditionID, event.TwapOpenPrice, event.TwapClosePrice, outcomeLabel,
+			event.OpenPrice, event.ClosePrice, len(event.Snapshots))
 
 		if err := writer.Write(event); err != nil {
 			log.Printf("[Writer] 写入失败: %v", err)

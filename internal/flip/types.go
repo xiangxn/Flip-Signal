@@ -5,10 +5,12 @@
 // 检测 Polymarket YES/NO 价格穿越 0.7 的时刻，通过三个信号条件判断
 // 该穿越是否可能发生翻转（flip）：
 //
-//	B1 背离硬要求: BTC 与 PM 反向（min_divergence）
-//	B2 过度自信:   BTC 振幅 < 历史平均的一半（range_expansion < 0.5）
+//	B1 背离硬要求: TWAP 与 PM 反向（divergence_floor）
+//	B2 过度自信:   TWAP 振幅 < 历史平均振幅（range_expansion < 1.0）
 //	B3 确认回归:   确认期对侧 bid 回升三档（other_delta）
 //
+// ⚠️ 2026-08-14 起 BTC 侧特征输入为 Chainlink TWAP-60（btc-updown-5m
+// 结算口径）；Binance 价格仅保留在研究快照中做对照。
 // 纯计算层零外部依赖，外加带状态机的引擎支持实时运行。
 package flip
 
@@ -32,21 +34,30 @@ type FlipConfig struct {
 
 	// ── B1 背离硬要求（Formula B 核心）──
 
-	// 背离度下限：div < 此值 → 否决。0 = 否决同向穿越（BTC 与 PM 同向
-	// EV≈0，χ²=125 分桶证据），-999 = 禁用。
-	// 2026-08-13 频率优化后默认 0（只否决同向，允许中性/背离入场）
+	// 背离度下限：div < 此值 → 否决。0 = 否决同向穿越（TWAP 与 PM 同向
+	// EV≈0），-999 = 禁用。
+	// 2026-08-13 频率优化后默认 0（只否决同向，允许中性/背离入场）。
+	// ⚠️ 2026-08-14 起 BTC 侧输入为 Chainlink TWAP-60（市场结算口径），
+	// 原 χ²=125 分桶证据基于 Binance 口径，待 TWAP 数据积累后重标定。
 	DivergenceFloor float64 `mapstructure:"divergence_floor"`
 	// 背离强度要求：div < 此值 → 否决（DivergenceFloor 之上的额外强度门槛）。
 	// 0 = 不要求额外强度（仅按 DivergenceFloor 过滤）
 	MinDivergence float64 `mapstructure:"min_divergence"`
 
-	// ── B2 过度自信（振幅扩张，tick 无关，基于前 N 根 K 线平均振幅）──
+	// ── B2 过度自信（振幅扩张，tick 无关，基于前 N 个窗口平均振幅）──
 
-	// 历史 K 线窗口大小，用于计算平均振幅
+	// 历史窗口大小，用于计算平均振幅（TWAP 5m 窗口 |close-open|，由主循环积累）
 	HistWindowN int `mapstructure:"hist_window_n"`
-	// 穿越时 BTC 振幅 < 此值 → BTC 没动但 PM 已 0.7+，过度自信 → +2 分
+	// 启动时是否用官方 crypto-price 接口预热历史振幅（消除 15 分钟冷启动）。
+	// false = 冷启动：仅由主循环每周期 AddRange 积累，≥3 个窗口后 B1/B2 可用。
+	// 官方接口有数据延迟且口径待验证（2026-08-14），Phase 3 标定期默认关闭
+	// 以保证基准口径来自单一采集管线。
+	HistWarmupEnabled bool `mapstructure:"hist_warmup_enabled"`
+	// 穿越时 TWAP 振幅 < 此值 → TWAP 没动但 PM 已 0.7+，过度自信 → +2 分
+	// ⚠️ 阈值基于 Binance 振幅标定，TWAP 振幅尺度更小，待重标定
 	RangeExpThreshold float64 `mapstructure:"range_exp_threshold"`
-	// 穿越时 BTC 振幅 ≥ 此值 → 真突破（BTC 确实大幅移动了），一票否决
+	// 穿越时 TWAP 振幅 ≥ 此值 → 真突破（TWAP 确实大幅移动了），一票否决
+	// ⚠️ 阈值基于 Binance 振幅标定，TWAP 振幅尺度更小，待重标定
 	RangeExpMax float64 `mapstructure:"range_exp_max"`
 
 	// ── B3 确认回归（T+N ticks 后观察对侧变化）──
@@ -87,10 +98,13 @@ type FlipConfig struct {
 	// 复合评分 ≥ 此值 → 加仓（99 = 禁用）
 	ScoreAdd int `mapstructure:"score_add"`
 
-	// ── 订单簿延迟风控 ──
+	// ── 数据新鲜度风控 ──
 
 	// 订单簿数据延迟超过此值（毫秒）则信号不可信，0 = 禁用
 	MaxLatencyMs int64 `mapstructure:"max_latency_ms"`
+	// TWAP 距上次推送超过此值（毫秒）则 B1/B2 特征基于过期价格、不可信，0 = 禁用
+	// TWAP-60 正常推送间隔约 2s，默认 5000ms 容忍短暂抖动
+	MaxTwapAgeMs int64 `mapstructure:"max_twap_age_ms"`
 }
 
 // DefaultConfig 返回翻转信号检测的默认参数配置。
@@ -98,6 +112,9 @@ type FlipConfig struct {
 // n=350, 2.44 信号/小时, WR 46.3%, EV +0.240/笔, P&L +83.90, PF 2.94。
 // 频率优化三改动：B1 改为「否决同向穿越」（floor=0）+
 // B2 放宽 range_exp_threshold 0.5→1.0 + 窗口下限 min_remaining_sec 35→15。
+// ⚠️ 2026-08-14 起 B1/B2/F0 的 BTC 侧输入切换为 Chainlink TWAP-60
+// （btc-updown-5m 真实结算口径）。上列基准数字基于 Binance 口径标定，
+// 待 TWAP lab 数据积累后需重新验证（Phase 3 重标定）。
 func DefaultConfig() FlipConfig {
 	return FlipConfig{
 		TriggerThreshold:    0.7,   // PM 一侧 bid >0.7 触发
@@ -106,7 +123,8 @@ func DefaultConfig() FlipConfig {
 		MinRemainingSec:     15,    // 窗口有效期下限：remaining_sec > 15s（确认 2 ticks×5s + FAK 执行缓冲 ~5-10s）
 		DivergenceFloor:     0.0,   // B1: div < 0 → 否决同向穿越（BTC 与 PM 同向 EV≈0）
 		MinDivergence:       0.0,   // B1: 背离强度要求，0 = 不要求（仅按 floor 过滤）
-		HistWindowN:         18,    // 前 18 根 K 线（~1.5h）算平均振幅
+		HistWindowN:         18,    // 前 18 个 TWAP 5m 窗口（~1.5h）算平均振幅
+		HistWarmupEnabled:   false, // 默认冷启动积累；官方接口口径验证后可开启预热
 		RangeExpThreshold:   1.0,   // 振幅 <1.0 → BTC 没真正突破（<1 个历史振幅）→ 过度自信 → +2
 		RangeExpMax:         1.5,   // 振幅 ≥1.5 → 真突破，否决
 		ConfirmDelayTicks:   2,     // 确认等待 2 ticks（10s）
@@ -122,6 +140,7 @@ func DefaultConfig() FlipConfig {
 		ScoreEntry:          2,     // ≥2 分开仓（B2 或 od>strong 任一成立即触发）
 		ScoreAdd:            99,    // 加仓禁用
 		MaxLatencyMs:        0,     // 0=禁用，实盘建议 300ms
+		MaxTwapAgeMs:        5000,  // 0=禁用；TWAP-60 推送间隔约 2s，5s 无更新视为流异常
 	}
 }
 
@@ -173,15 +192,17 @@ type FlipSignal struct {
 
 	// 数据质量
 	OrderBookLatency int64 `json:"order_book_latency,omitempty"` // 订单簿最大延迟（毫秒），诊断用
+	TwapAgeMs        int64 `json:"twap_age_ms,omitempty"`        // TWAP 距上次推送毫秒数（穿越/确认取大），诊断用
 }
 
 // ── 评分输入 ──
 
 // ScoreParams 封装 ComputeFlipScore 的全部输入参数（Formula B）。
 type ScoreParams struct {
-	OtherDelta       float64     // B3: 确认期对侧 bid 变化
-	RangeExpansion   float64     // B2: 穿越时 BTC 振幅（历史振幅单位）
-	HistReady        bool        // 历史振幅是否就绪（未就绪时 B2/F0 不参与）
-	OrderBookLatency int64       // 订单簿最大延迟（毫秒），用于延迟风控
-	Cfg              FlipConfig  // 评分参数
+	OtherDelta       float64    // B3: 确认期对侧 bid 变化
+	RangeExpansion   float64    // B2: 穿越时 TWAP 振幅（历史振幅单位）
+	HistReady        bool       // 历史振幅是否就绪（未就绪时 B2/F0 不参与）
+	OrderBookLatency int64      // 订单簿最大延迟（毫秒），用于延迟风控
+	TwapAgeMs        int64      // TWAP 距上次推送毫秒数（穿越/确认取大），用于新鲜度风控
+	Cfg              FlipConfig // 评分参数
 }
