@@ -150,7 +150,7 @@ func (t *Trader) NewCycle(conditionID string, _ /*yesTokenID*/, _ /*noTokenID*/ 
 	t.exec.PendingOrder = nil
 }
 
-// OnSignal 在信号发射点调用，执行风控→GTC 下单→记录。
+// OnSignal 在信号发射点调用，执行风控→按策略下单（GTC/FAK）→记录。
 //
 // 返回 ExecInfo 供调用方回填 FlipRecorder（纸面/实盘路径统一）。
 // 锁仅在状态读写时持有，SDK 网络调用在锁外执行。
@@ -306,7 +306,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 		return ExecInfo{Status: "failed"}, nil
 	}
 
-	// ── 阶段 3：锁内状态更新 — GTC 订单已提交，TradeMonitor 事件驱动成交追踪 ──
+	// ── 阶段 3：锁内状态更新 — 订单已提交，TradeMonitor 事件驱动成交追踪 ──
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -321,6 +321,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 		TokenID:     tokenID,
 		TokenSide:   tokenSide,
 		ConditionID: sig.ConditionID,
+		Strategy:    cfg.OrderStrategy,
 		MaxPrice:    maxPrice,
 		StakeUSDC:   cfg.StakePerSignal,
 		Rec:         rec,
@@ -335,7 +336,7 @@ func (t *Trader) OnSignal(sig *flip.FlipSignal, yesTokenID, noTokenID string, ye
 
 // OnCycleEnd 市场结束时调用。
 //
-//   - 对账 GTC 挂单：TradeMonitor 已实时追踪成交，此处仅做最终处理
+//   - 对账挂单：TradeMonitor 已实时追踪成交，此处仅做最终处理
 //   - 有成交且无持仓 → 创建 Position；有成交已有持仓（processTrade 已建）→ 仅清理 PendingOrder
 //   - 无成交 → 取消挂单（除非已 MATCHED）
 //   - 兜底：若 PendingOrder 存在但 TradeMonitor 未收到事件，用 GetOpenOrders 查询
@@ -349,7 +350,7 @@ func (t *Trader) OnCycleEnd(conditionID string) ExecInfo {
 	client := t.client
 	t.mu.RUnlock()
 
-	// 对账未成交的 GTC 订单
+	// 对账未成交的挂单（GTC 取消剩余 / FAK 对账成交）
 	if pending != nil && client != nil {
 		filledShares := pending.FilledShares
 		totalCost := pending.TotalCost
@@ -358,7 +359,7 @@ func (t *Trader) OnCycleEnd(conditionID string) ExecInfo {
 		if filledShares == 0 && pending.TradeCount == 0 && pending.Status == "" {
 			openOrders, oErr := client.GetOpenOrders(&orders.OpenOrderParams{Id: &pending.OrderID}, true, nil)
 			if oErr != nil {
-				log.Printf("[Trading] ⚠️ 查询 GTC 订单状态失败: %v", oErr)
+				log.Printf("[Trading] ⚠️ 查询挂单状态失败: %v", oErr)
 			}
 			if len(openOrders) > 0 {
 				oo := openOrders[0]
@@ -376,9 +377,9 @@ func (t *Trader) OnCycleEnd(conditionID string) ExecInfo {
 		if needCancel {
 			_, cErr := client.CancelOrder(&orders.OrderPayload{OrderID: pending.OrderID})
 			if cErr != nil {
-				log.Printf("[Trading] ⚠️ 取消 GTC 订单失败: %v (orderID=%s)", cErr, pending.OrderID)
+				log.Printf("[Trading] ⚠️ 取消 %s 订单失败: %v (orderID=%s)", pending.Strategy, cErr, pending.OrderID)
 			} else {
-				log.Printf("[Trading] 🧹 已取消未成交 GTC 订单: %s", pending.OrderID)
+				log.Printf("[Trading] 🧹 已取消未成交 %s 订单: %s", pending.Strategy, pending.OrderID)
 			}
 		}
 
@@ -414,8 +415,8 @@ func (t *Trader) OnCycleEnd(conditionID string) ExecInfo {
 					OpenedAt:    t.timeNow(),
 				}
 				t.exec.Position = newPos
-				log.Printf("[Trading] 🎯 GTC 周期末建仓: side=%s shares=%.1f avgPrice=%.4f trades=%d orderID=%s",
-					pending.TokenSide, filledShares, avgFillPrice, pending.TradeCount, pending.OrderID)
+				log.Printf("[Trading] 🎯 %s 周期末建仓: side=%s shares=%.1f avgPrice=%.4f trades=%d orderID=%s",
+					pending.Strategy, pending.TokenSide, filledShares, avgFillPrice, pending.TradeCount, pending.OrderID)
 			} else {
 				// Position 已由 processTrade / processOrder 创建，同步更新以对齐兜底数据
 				t.exec.Position.Shares = filledShares
@@ -426,14 +427,14 @@ func (t *Trader) OnCycleEnd(conditionID string) ExecInfo {
 				pending.Rec.AvgFillPrice = avgFillPrice
 				pending.Rec.UpdatedAt = t.timeNow()
 				t.recorder.AppendOrder(pending.Rec)
-				log.Printf("[Trading] ✅ GTC 周期末确认: side=%s shares=%.1f avgPrice=%.4f（TradeMonitor 已建仓）",
-					pending.TokenSide, filledShares, avgFillPrice)
+				log.Printf("[Trading] ✅ %s 周期末确认: side=%s shares=%.1f avgPrice=%.4f（TradeMonitor 已建仓）",
+					pending.Strategy, pending.TokenSide, filledShares, avgFillPrice)
 			}
 			t.exec.LastSkipReason = ""
 			result = ExecInfo{Status: "filled", FilledShares: filledShares, AvgFillPrice: avgFillPrice}
 		} else {
 			// 未成交：仅清理 PendingOrder
-			t.exec.LastSkipReason = fmt.Sprintf("GTC 订单窗口内未成交，已取消: %s", pending.OrderID)
+			t.exec.LastSkipReason = fmt.Sprintf("%s 订单窗口内未成交，已取消: %s", pending.Strategy, pending.OrderID)
 			result = ExecInfo{Status: "failed"}
 		}
 
@@ -516,7 +517,7 @@ func (t *Trader) ClosePosition() (*Position, error) {
 
 // ── TradeMonitor 事件循环 ──
 
-// tradeEventLoop 监听 TradeMonitor 的实时成交/订单事件，驱动 GTC 订单的成交追踪。
+// tradeEventLoop 监听 TradeMonitor 的实时成交/订单事件，驱动订单的成交追踪。
 func (t *Trader) tradeEventLoop(ctx context.Context, eventCh <-chan sdk.TradeEvent) {
 	for {
 		select {
@@ -585,17 +586,21 @@ func (t *Trader) processTrade(trade *sdkModel.WSTrade) {
 			OpenedAt:    t.timeNow(),
 		}
 		t.exec.Position = pos
-		log.Printf("[Trading] 🎯 GTC 逐笔成交: side=%s shares=%.1f price=%.4f cost=%.4f total=%.1f orderID=%s",
-			pending.TokenSide, trade.Size, trade.Price, trade.Size*trade.Price, pending.FilledShares, pending.OrderID)
+		log.Printf("[Trading] 🎯 %s 逐笔成交: side=%s shares=%.1f price=%.4f cost=%.4f total=%.1f orderID=%s",
+			pending.Strategy, pending.TokenSide, trade.Size, trade.Price, trade.Size*trade.Price, pending.FilledShares, pending.OrderID)
 	} else {
 		// 更新已有持仓（渐进式部分成交）
 		t.exec.Position.Shares = pending.FilledShares
 		t.exec.Position.AvgPrice = avgPrice
 		t.exec.Position.CostUSDC = pending.TotalCost
-		// 实时回填 FlipRecorder → Dashboard（无需等待周期结束）
-		if t.onExecUpdate != nil {
-			t.onExecUpdate(pending.ConditionID, "filled", pending.FilledShares, avgPrice)
-		}
+	}
+
+	// 实时回填 FlipRecorder → Dashboard（无需等待周期结束）。
+	// 首笔与后续部分成交都要触发：FAK 市价单通常单笔全成交（首笔即最后一笔），
+	// 且 FAK 不经过挂单生命周期，user channel 不推 order 状态事件，
+	// 若只依赖 processOrder 的 MATCHED 分支会漏掉实时同步。
+	if t.onExecUpdate != nil {
+		t.onExecUpdate(pending.ConditionID, "filled", pending.FilledShares, avgPrice)
 	}
 }
 
@@ -660,11 +665,11 @@ func (t *Trader) processOrder(order *sdkModel.WSOrder) {
 
 		// 区分部分成交与完全成交
 		if order.SizeMatched < order.OriginalSize {
-			log.Printf("[Trading] 📊 GTC 订单部分成交: orderID=%s matched=%.1f/%.0f avgPrice=%.4f",
-				order.Id, order.SizeMatched, order.OriginalSize, pending.Rec.AvgFillPrice)
+			log.Printf("[Trading] 📊 %s 订单部分成交: orderID=%s matched=%.1f/%.0f avgPrice=%.4f",
+				pending.Strategy, order.Id, order.SizeMatched, order.OriginalSize, pending.Rec.AvgFillPrice)
 		} else {
-			log.Printf("[Trading] ✅ GTC 订单已完全成交: orderID=%s matched=%.1f avgPrice=%.4f",
-				order.Id, order.SizeMatched, pending.Rec.AvgFillPrice)
+			log.Printf("[Trading] ✅ %s 订单已完全成交: orderID=%s matched=%.1f avgPrice=%.4f",
+				pending.Strategy, order.Id, order.SizeMatched, pending.Rec.AvgFillPrice)
 		}
 	// 实时回填 FlipRecorder → Dashboard（无需等待周期结束）
 		if t.onExecUpdate != nil && pending.FilledShares > 0 {
@@ -672,11 +677,19 @@ func (t *Trader) processOrder(order *sdkModel.WSOrder) {
 			t.onExecUpdate(pending.ConditionID, "filled", pending.FilledShares, avgPrice)
 		}
 	case "CANCELED":
+		if pending.FilledShares > 0 {
+			// 部分成交后剩余被取消（GTC 周期末取消 / FAK 剩余自动取消）：
+			// 保留已成交数据与 PendingOrder，等 OnCycleEnd 对账回填，
+			// 若在此清空 PendingOrder 会丢失对账，Dashboard 永不同步。
+			log.Printf("[Trading] ⚠️ %s 订单剩余未成交部分已取消: orderID=%s filled=%.1f",
+				pending.Strategy, order.Id, pending.FilledShares)
+			return
+		}
 		pending.Rec.State = OrderFailed
 		pending.Rec.UpdatedAt = t.timeNow()
 		t.recorder.AppendOrder(pending.Rec)
 		t.exec.PendingOrder = nil
-		log.Printf("[Trading] ❌ GTC 订单已被取消: orderID=%s", order.Id)
+		log.Printf("[Trading] ❌ %s 订单已被取消: orderID=%s", pending.Strategy, order.Id)
 	}
 }
 

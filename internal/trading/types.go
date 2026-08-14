@@ -108,14 +108,15 @@ type ExecInfo struct {
 	AvgFillPrice float64 // 实际成交均价
 }
 
-// pendingGtcOrder 记录已提交但尚未完全成交的 GTC 限价单上下文，
+// pendingGtcOrder 记录已提交但尚未完全成交的订单上下文（GTC 限价单 / FAK 市价单），
 // 供 TradeMonitor 事件循环和周期末对账使用（仅内存，不持久化）。
 type pendingGtcOrder struct {
 	OrderID     string       // CLOB order ID
 	TokenID     string       // 买入的 token ID
 	TokenSide   string       // "yes"/"no"
 	ConditionID string       // 所属市场
-	MaxPrice    float64      // 限价
+	Strategy    string       // 下单策略（StrategyGTC / StrategyFAK），用于日志与对账
+	MaxPrice    float64      // 限价（GTC 挂单价 / FAK 滑点上限）
 	StakeUSDC   float64      // 投入预算
 	Rec         *OrderRecord // 关联订单记录
 
