@@ -298,8 +298,8 @@ github.com/tyler-smith/go-bip39 v1.1.0 h1:5eUemwrMargf3BSLRRCalXT93Ns6pQJIjYQN2n
 github.com/tyler-smith/go-bip39 v1.1.0/go.mod h1:gUYDtqQw1JS3ZJ8UWVcGTGqqr6YIN3CWg+kkNaLt55U=
 github.com/urfave/cli/v2 v2.27.5 h1:WoHEJLdsXr6dDWoJgMq/CboDmyY/8HMMH1fTECbih+w=
 github.com/urfave/cli/v2 v2.27.5/go.mod h1:3Sevf16NykTbInEnD0yKkjDAeZDS0A6bzhBH5hrMvTQ=
-github.com/xiangxn/go-polymarket-sdk v0.6.25 h1:ys6pQK7x1CVBtYYkpwFv+HVYjyRU1yhuTCQoJL9I5iY=
-github.com/xiangxn/go-polymarket-sdk v0.6.25/go.mod h1:vwtCWdgwGNs984geZRrGpp3/DgNE+s6+0F6M+Qtoqf4=
+github.com/xiangxn/go-polymarket-sdk v0.6.26 h1:+hpuUEbroxblnCskQFyGNkl6b/nT5sNvVg2gXWQW1mc=
+github.com/xiangxn/go-polymarket-sdk v0.6.26/go.mod h1:vwtCWdgwGNs984geZRrGpp3/DgNE+s6+0F6M+Qtoqf4=
 github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1 h1:gEOO8jv9F4OT7lGCjxCBTO/36wtF6j2nSip77qHd4x4=
 github.com/xrash/smetrics v0.0.0-20240521201337-686a1a2994c1/go.mod h1:Ohn+xnUBiLI6FVj/9LpzZWtj1/D6lUovWYBkxHVV3aM=
 github.com/yuin/goldmark v1.4.13/go.mod h1:6yULJ656Px+3vBD8DxQVa3kxgyrAnzto9xy5taEt/CY=

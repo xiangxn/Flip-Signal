@@ -89,7 +89,7 @@ func main() {
 	bookAdapter.Start(ctx)
 
 	// ── Chainlink TWAP-60 适配器（btc-updown-5m 结算口径基准价格）──
-	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC")
+	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC_60")
 	twapAdapter := feed.NewTwapAdapter(twapMonitor, "BTC", sdk.ChainlinkTwapWindowSixty)
 	twapAdapter.Start(ctx)
 	go func() {
@@ -409,6 +409,7 @@ func loadConfig() *appConfig {
 				ClobWSBaseURL:  "wss://ws-subscriptions-clob.polymarket.com",
 				GammaBaseURL:   "https://gamma-api.polymarket.com",
 				DataAPIBaseURL: "https://data-api.polymarket.com",
+				LiveWSBaseURL:  "wss://ws-live-data.polymarket.com",
 			},
 		},
 	}

@@ -7,7 +7,7 @@ require (
 	github.com/gorilla/websocket v1.5.3
 	github.com/spf13/viper v1.21.0
 	github.com/tidwall/gjson v1.18.0
-	github.com/xiangxn/go-polymarket-sdk v0.6.25
+	github.com/xiangxn/go-polymarket-sdk v0.6.26
 	golang.org/x/term v0.38.0
 )
 
