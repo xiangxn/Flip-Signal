@@ -354,7 +354,8 @@ go run ./cmd/flip -dashboard :8090     # 运行 Flip 检测 + Dashboard
    判定胜负，B1/B2/F0 与历史振幅全部基于 TWAP（SDK `CryptoPriceMonitor` 订阅
    `crypto_prices_twap_sixty`）。Binance 数据保留仅作基差研究对照，禁止双口径特征叠加
    （Formula B 减法哲学）。官方开/收盘价经 `FetchOpenPrice`（crypto-price 接口）获取：
-   开盘价从窗口边界起轮询（接口有数据延迟，最长 15s，超时回退流采样），收盘价窗口
+   开盘价从窗口边界起后台轮询、不阻塞采集（接口有数据延迟，10s 间隔最长 30s 即最多 3 次失败，
+   官方到达后修正后续 snapshot，超时回退流采样），收盘价窗口
    结束后轮询修正（最长 9s）。历史振幅基准默认**冷启动**（`hist_warmup_enabled=false`，
    主循环积累 ≥3 个窗口后 B1/B2 可用）—— 标定期保证基准口径来自单一采集管线；
    预热开关（拉官方历史振幅）在口径验证稳定后启用。

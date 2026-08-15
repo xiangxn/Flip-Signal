@@ -4,8 +4,8 @@
 // WebSocket (aggTrade + depth20，研究对照) 和 Polymarket CLOB
 // WebSocket (order books)，以可配置的采样间隔生成 ResearchSnapshot，
 // 按 Polymarket conditionId 归类为 5 分钟 Event，并以 JSONL 格式写入磁盘。
-// 官方 TWAP 开/收盘价经 crypto-price 接口获取（开盘价从窗口边界起轮询，
-// 收盘价窗口结束后轮询修正）。
+// 官方 TWAP 开/收盘价经 crypto-price 接口获取（开盘价从窗口边界起后台
+// 轮询、官方到达后修正 snapshot，不阻塞采集；收盘价窗口结束后轮询修正）。
 //
 // Usage:
 //
@@ -191,18 +191,24 @@ func main() {
 			}
 		}
 
-		// 边界起轮询官方 TWAP 开盘价（2s 间隔，最长 15s），流采样兜底
+		// 后台轮询官方 TWAP 开盘价（10s 间隔，最长 30s，即最多 3 次失败），
+		// 不阻塞主循环 —— 先以流采样为初值继续采集，官方值到达后经
+		// officialOpenCh 在采集循环内修正；超时未就绪则本周期沿用流采样。
 		twapOpen, _ := twapAdapter.Latest()
-		if officialOpen, ok := feed.PollOfficialOpenPrice(ctx, client, nextStart,
-			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 15*time.Second); ok {
-			twapOpen = officialOpen
-			log.Printf("[Cycle] ✅ 官方 TWAP 开盘价 %.2f（边界后 %.1fs）",
-				twapOpen, time.Since(nextStart).Seconds())
-		} else if twapOpen == 0 {
-			log.Printf("[Cycle] ⚠️ TWAP 开盘价不可用（官方超时且流无数据）")
-		} else {
-			log.Printf("[Cycle] ⚠️ 官方 TWAP 开盘价超时未就绪，使用流采样 %.2f", twapOpen)
-		}
+		officialOpenCh := make(chan float64, 1)
+		go func() {
+			officialOpen, ok := feed.PollOfficialOpenPrice(ctx, client, nextStart,
+				int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 30*time.Second)
+			if ok {
+				officialOpenCh <- officialOpen
+				return
+			}
+			if twapOpen > 0 {
+				log.Printf("[Cycle] ⚠️ 官方 TWAP 开盘价超时未就绪，本周期沿用流采样 %.2f", twapOpen)
+			} else {
+				log.Printf("[Cycle] ⚠️ TWAP 开盘价不可用（官方超时且流无数据）")
+			}
+		}()
 
 		// 确保 Binance 5m K 线已生成（窗口起点 + 2 秒）
 		if wait := time.Until(nextStart.Add(2 * time.Second)); wait > 0 {
@@ -302,6 +308,12 @@ func main() {
 			case <-ctx.Done():
 				ticker.Stop()
 				return
+
+			case officialOpen := <-officialOpenCh:
+				// 官方开盘价后台轮询到达，修正后续 snapshot 的 TwapOpen
+				collector.SetTwapOpen(officialOpen)
+				log.Printf("[Cycle] ✅ 官方 TWAP 开盘价 %.2f 已修正（边界后 %.1fs）",
+					officialOpen, time.Since(nextStart).Seconds())
 
 			case tickTime := <-ticker.C:
 				// 读取最新的 Polymarket 订单簿价格

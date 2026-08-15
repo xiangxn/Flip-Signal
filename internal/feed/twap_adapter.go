@@ -108,26 +108,36 @@ func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapL
 	return ranges
 }
 
-// pollOfficialPrice 以 2s 间隔轮询官方 crypto-price 接口，直至取得有效价格或超时。
+// pollOfficialInterval 为官方 crypto-price 接口的轮询间隔，
+// 避免对 REST 接口高频请求（10s 一次）。
+const pollOfficialInterval = 10 * time.Second
+
+// pollOfficialPrice 以 10s 间隔轮询官方 crypto-price 接口，直至取得有效价格或超时。
 // needClose=true 时要求 close 也有效（窗口结束后接口才产出官方收盘价）。
-// ctx 取消时提前返回 ok=false。返回该窗口的官方 open/close。
+// ctx 取消或超时时提前返回 ok=false。返回该窗口的官方 open/close。
 func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
 	windowSec, twapLookbackSeconds int64, timeout time.Duration, needClose bool) (open, close float64, ok bool) {
 	deadline := time.Now().Add(timeout)
 	for {
+		// 先检查 deadline 再发起请求，避免超时后的多余调用
+		wait := time.Until(deadline)
+		if wait <= 0 {
+			return 0, 0, false
+		}
 		open, close = client.FetchOpenPrice(sdk.BTC, start,
 			start.Add(time.Duration(windowSec)*time.Second),
 			sdk.Fiveminute, true, int(twapLookbackSeconds))
 		if open > 0 && (!needClose || close > 0) {
 			return open, close, true
 		}
-		if time.Now().After(deadline) {
-			return 0, 0, false
+		// 距 deadline 不足一个轮询间隔时只等到 deadline，避免延迟返回
+		if wait > pollOfficialInterval {
+			wait = pollOfficialInterval
 		}
 		select {
 		case <-ctx.Done():
 			return 0, 0, false
-		case <-time.After(2 * time.Second):
+		case <-time.After(wait):
 		}
 	}
 }
