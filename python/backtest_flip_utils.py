@@ -30,18 +30,35 @@ from backtest_flip_config import FlipBacktestConfig, DEFAULT_CONFIG
 # 事件级预处理
 # ═══════════════════════════════════════════════════════════════
 
-def compute_hist_avg_range(events: list[dict], window_N: int = 18) -> None:
-    """对每个事件计算前 N 根 K 线的平均振幅，原地注入 hist_avg_range。
+def _hist_open_close(event: dict) -> tuple[float, float]:
+    """返回历史振幅口径的开/收盘价 (open, close)。
+
+    TWAP 官方字段存在时优先 TWAP（btc-updown-5m 结算基准）；
+    否则回退 Binance 字段（旧 data_0 兼容）。
+    """
+    if event.get("twap_open_price") and event.get("twap_close_price"):
+        return event["twap_open_price"], event["twap_close_price"]
+    return event["open_price"], event["close_price"]
+
+
+def compute_hist_avg_range(events: list[dict], window_N: int = 18,
+                           source: str = "twap") -> None:
+    """对每个事件计算前 N 个窗口的平均振幅，原地注入 hist_avg_range。
 
     events 需按 start_time 升序排列。
-    振幅 = close_price - open_price 的绝对值。
+    振幅 = close - open 的绝对值。
+    source="twap" 时用官方 TWAP 开/收盘（缺失回退 Binance），
+    source="binance" 时强制 Binance 口径（研究对照）。
     不足 3 个历史事件时设为 None。
     """
     for i, event in enumerate(events):
         prev_ranges = []
         for j in range(max(0, i - window_N), i):
-            r = abs(events[j]["close_price"] - events[j]["open_price"])
-            prev_ranges.append(r)
+            if source == "binance":
+                o, c = events[j]["open_price"], events[j]["close_price"]
+            else:
+                o, c = _hist_open_close(events[j])
+            prev_ranges.append(abs(c - o))
         if len(prev_ranges) >= 3:
             event["hist_avg_range"] = sum(prev_ranges) / len(prev_ranges)
         else:
@@ -157,7 +174,17 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     other_key = "no_price" if side == "yes" else "yes_price"
     snaps = event["snapshots"]
     cross_snap = snaps[cross_idx]
-    open_price = event["open_price"]
+
+    # ── BTC 侧价格口径（2026-08-14: TWAP-60 为市场结算基准）──
+    if cfg.price_source == "twap":
+        # 快照 TWAP 值缺失 → 否决（与 Go 引擎一致，不回退 Binance）
+        price_at_cross = cross_snap.get("twap_price")
+        open_price = cross_snap.get("twap_open") or event.get("twap_open_price")
+        if not price_at_cross or not open_price:
+            return None
+    else:
+        price_at_cross = cross_snap["price"]
+        open_price = event["open_price"]
 
     hist_avg_range = event.get("hist_avg_range")
 
@@ -167,19 +194,19 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     if cfg.min_divergence > 0 or cfg.divergence_floor > -999:
         if hist_avg_range is None:
             return None
-        btc_position = compute_btc_position(cross_snap["price"], open_price, hist_avg_range)
+        btc_position = compute_btc_position(price_at_cross, open_price, hist_avg_range)
         btc_divergence = compute_btc_divergence(side, btc_position)
         if btc_divergence < cfg.divergence_floor:
             return None
         if cfg.min_divergence > 0 and btc_divergence < cfg.min_divergence:
             return None
     else:
-        btc_position = compute_btc_position(cross_snap["price"], open_price,
+        btc_position = compute_btc_position(price_at_cross, open_price,
                                             hist_avg_range or 0)
         btc_divergence = compute_btc_divergence(side, btc_position)
 
     # ── B2 振幅扩张 ──
-    range_expansion = compute_range_expansion(cross_snap["price"], open_price,
+    range_expansion = compute_range_expansion(price_at_cross, open_price,
                                               hist_avg_range)
 
     # F0: 振幅过大 — 一票否决 (BTC 大幅移动 = PM 是对的)
@@ -229,13 +256,19 @@ def _score_crossing(event: dict, side: str, cross_idx: int,
     shares = 2 if score >= cfg.score_add else 1
 
     # ── 判定输赢 ──
+    # outcome_source="binance" 时用 binance_outcome（研究对照）；
+    # 默认 "twap" 用 event.outcome（新数据为 TWAP 口径 = 市场真实结算）。
     # outcome=0 → UP 赢, outcome=1 → DOWN 赢
+    if cfg.outcome_source == "binance" and "binance_outcome" in event:
+        outcome = event["binance_outcome"]
+    else:
+        outcome = event["outcome"]
     if side == "yes":
         # YES>0.7, 我们买 NO (赌 DOWN)
-        won = (event["outcome"] == 1)
+        won = (outcome == 1)
     else:
         # NO>0.7, 我们买 YES (赌 UP)
-        won = (event["outcome"] == 0)
+        won = (outcome == 0)
 
     # 实盘对齐: 按确认时刻对侧 ASK 成交。
     # yes_price/no_price 存的是各订单簿 best bid，买对侧必须跨 spread 到
@@ -302,8 +335,9 @@ def run_backtest(events: list[dict],
     signals: list[FlipSignal] = []
     total = len(events)
 
-    # Ensure hist_avg_range uses the configured window size
-    compute_hist_avg_range(events, window_N=cfg.hist_window_N)
+    # Ensure hist_avg_range uses the configured window size & price source
+    compute_hist_avg_range(events, window_N=cfg.hist_window_N,
+                           source=cfg.price_source)
     active = sum(1 for e in events if e.get("hist_avg_range") is not None)
 
     for event in events:

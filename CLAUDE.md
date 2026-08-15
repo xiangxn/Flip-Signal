@@ -21,6 +21,13 @@
 - **结算口径（2026-08-14）**：btc-updown-5m 以 **Chainlink TWAP-60** 判定胜负，B1/B2/F0 的
   BTC 侧输入已切换为 TWAP（Binance 仅研究对照）。⚠️ 现有阈值（range 1.0/1.5、gate 0.45 等）
   基于 Binance 口径标定，待 TWAP lab 数据积累后需重标定
+- **🔴 TWAP 首轮回测结论（2026-08-15，264 事件/22h）**：同批 58 个信号在 Binance 结算下
+  WR 43.1%/PF 3.26，切换 TWAP 结算后 WR 17.2%/PF 0.87（p≈1e-5）；TWAP 特征口径下 n=115、
+  WR 20.0%。**Formula B 的边缘是 Binance 结算口径的 artifact，TWAP 真相下不成立** ——
+  阈值重标定救不回现公式，需重新推导信号。基差分歧率 12.5% 且集中在小振幅窗口
+  （Q1 28.8%），信号恰好集中在该区域。**实盘禁止启用**，引擎仅纸面运行供数据采集。
+  分析脚本 `python/analyze_twap_calibration.py`，回测已支持 `--price-source` /
+  `--outcome-source` 口径开关。
 
 ---
 

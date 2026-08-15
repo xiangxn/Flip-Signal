@@ -63,6 +63,14 @@ def main():
         "--profile", choices=["btc", "eth"], default="btc",
         help="参数预设 (默认: btc)"
     )
+    parser.add_argument(
+        "--price-source", choices=["twap", "binance"], default="twap",
+        help="BTC 侧特征价格口径 (默认: twap, 2026-08-14 起为结算基准)"
+    )
+    parser.add_argument(
+        "--outcome-source", choices=["twap", "binance"], default="twap",
+        help="结算胜负口径 (默认: twap = 市场真实结算)"
+    )
     args = parser.parse_args()
 
     # ── 加载数据 ──
@@ -82,8 +90,11 @@ def main():
 
     # ── 运行回测 ──
     cfg = DEFAULT_CONFIG if args.profile == "btc" else ETH_CONFIG
-    print(f"\n运行回测 [{args.profile.upper()}] (trigger>{cfg.trigger_threshold}, "
-          f"confirm_delay={cfg.confirm_delay_ticks}tick, "
+    cfg.price_source = args.price_source
+    cfg.outcome_source = args.outcome_source
+    print(f"\n运行回测 [{args.profile.upper()}] "
+          f"(价格口径={cfg.price_source}, 结算口径={cfg.outcome_source}, "
+          f"trigger>{cfg.trigger_threshold}, confirm_delay={cfg.confirm_delay_ticks}tick, "
           f"min_div≥{cfg.min_divergence}, score_entry≥{cfg.score_entry})...")
     signals, total_events, active_events = run_backtest(events, cfg)
 

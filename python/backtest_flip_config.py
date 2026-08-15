@@ -81,6 +81,15 @@ class FlipBacktestConfig:
     score_entry: int = 2                 # ≥ 此值 → 开仓（od>0.02 或 range<0.5 即触发）
     score_add: int = 99                  # ≥ 此值 → 加仓（disabled）
 
+    # ── 价格口径（2026-08-14 起 TWAP 为唯一 BTC 特征口径）──
+    # price_source: "twap" = B1/B2/F0 特征与历史振幅基于 Chainlink TWAP-60
+    #   （btc-updown-5m 结算基准）；"binance" = 旧口径（仅研究对照）。
+    #   TWAP 快照缺失的穿越直接否决（与 Go 引擎一致，不回退 Binance）。
+    price_source: str = "twap"
+    # outcome_source: "twap" = event.outcome（新数据为 TWAP 口径 = 市场真实结算）；
+    #   "binance" = event.binance_outcome（研究对照，旧数据缺字段时回退 outcome）
+    outcome_source: str = "twap"
+
 
 # 默认配置实例
 DEFAULT_CONFIG = FlipBacktestConfig()  # BTC 参数 (2026-08-13 Formula B: n=126, WR 46.0%, P&L +26.91, PF 2.60)
