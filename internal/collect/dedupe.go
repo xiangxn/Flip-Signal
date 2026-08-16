@@ -1,42 +1,65 @@
 package collect
 
 import (
+	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
+	"syscall"
+	"time"
 )
 
-// LoadWrittenStartTimes 扫描目录下 events_*.jsonl 已记录的窗口起点集合，
-// 供写入前去重：程序在窗口中途重启会再次采集同一窗口（append 模式不覆盖），
-// 重复事件会污染分析数据。
+// WriteUniqueEvent 将事件以 start_time 去重后追加到当日文件（跨进程安全）。
 //
-// 每日文件仅 ~288 行，启动时全量扫描开销可忽略。
-func LoadWrittenStartTimes(dir string) map[int64]bool {
-	seen := make(map[int64]bool)
-	paths, err := filepath.Glob(filepath.Join(dir, "events_*.jsonl"))
-	if err != nil {
-		return seen
+// 在 flock 独占锁内「扫描文件已有 start_time → 不存在才追加」，防止
+// 程序重启（sequential）或多实例并发（concurrent）对同一窗口重复写入——
+// append 模式不会覆盖，重复事件会污染分析数据。
+//
+// 返回 written=true 表示已写入；false 表示该窗口已存在被跳过。
+func WriteUniqueEvent(dir string, ev *Event) (written bool, err error) {
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return false, fmt.Errorf("create output dir: %w", err)
 	}
-	sort.Strings(paths)
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
+	day := time.Now().UTC().Format("2006-01-02")
+	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|os.O_APPEND, 0o644)
+	if err != nil {
+		return false, fmt.Errorf("open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return false, fmt.Errorf("flock: %w", err)
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	// 锁内扫描查重（文件仅 ~288 行/天，开销可忽略）
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
 			continue
 		}
-		dec := json.NewDecoder(f)
-		for dec.More() {
-			var rec struct {
-				StartTime int64 `json:"start_time"`
-			}
-			if err := dec.Decode(&rec); err != nil {
-				break
-			}
-			if rec.StartTime > 0 {
-				seen[rec.StartTime] = true
-			}
+		var rec struct {
+			StartTime int64 `json:"start_time"`
 		}
-		f.Close()
+		if json.Unmarshal(line, &rec) == nil && rec.StartTime == ev.StartTime {
+			return false, nil // 已存在，跳过
+		}
 	}
-	return seen
+	if err := scanner.Err(); err != nil {
+		return false, fmt.Errorf("scan %s: %w", path, err)
+	}
+
+	data, err := json.Marshal(ev)
+	if err != nil {
+		return false, fmt.Errorf("marshal event: %w", err)
+	}
+	data = append(data, '\n')
+	if _, err := f.Write(data); err != nil {
+		return false, fmt.Errorf("append: %w", err)
+	}
+	return true, nil
 }

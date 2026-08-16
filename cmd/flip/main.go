@@ -636,12 +636,13 @@ func main() {
 		// 官方收盘价到达后（或超时回退流采样）在后台完成历史振幅积累与
 		// Lab 快照持久化；histTracker 自带锁，跨 goroutine 安全。
 		go func(ev *lab.Event, start time.Time) {
+			// 收盘轮询 5s 间隔 × 最长 60s（异步执行，不阻塞主循环）
 			if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, start,
-				int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 12*time.Second); ok {
+				int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 60*time.Second); ok {
 				ev.TwapOpenPrice = officialOpen
 				ev.TwapClosePrice = officialClose
 				ev.Outcome = 1 // Down
-				if officialClose > officialOpen {
+				if officialClose >= officialOpen {
 					ev.Outcome = 0 // Up
 				}
 			} else if ctx.Err() == nil {

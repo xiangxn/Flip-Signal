@@ -1,7 +1,7 @@
 // Package collect 实现高频数据采集（1s 分辨率 + PM 逐笔成交聚合）的
 // 结构与工具，服务 cmd/collect。
 //
-// 数据格式 v2 见 docs/data_recollection_plan_2026-08-16.md：
+// 数据格式 v2 见 docs/recollection_plan_2026-08-16.md：
 // 每个 5 分钟窗口一行 JSON（事件元数据 + ticks 1s 数组 + trades 聚合数组），
 // 写入 data/btc/（启动前须把旧 5s 快照目录移走，见文档 §3.1 警告）。
 package collect
@@ -74,7 +74,11 @@ type Event struct {
 	StartTime      int64      `json:"start_time"` // unix 秒（窗口起点）
 	TwapOpenPrice  float64    `json:"twap_open_price"`
 	TwapClosePrice float64    `json:"twap_close_price"`
-	Outcome        int        `json:"outcome"` // 0=Up 1=Down（TWAP 官方口径）
+	// CloseSource 标记收盘价来源: "official"=官方 crypto-price 接口
+	// （60s 内到达）；"stream"=窗口末 TWAP-60 流采样定稿（官方延迟可达
+	// 数十分钟，60s 未产出即不再等）
+	CloseSource    string     `json:"close_source"`
+	Outcome        int        `json:"outcome"` // 0=Up 1=Down（close >= open → Up）
 	BinanceOpen    float64    `json:"binance_open"`
 	Ticks          []HFTick   `json:"ticks"`
 	Trades         []TradeAgg `json:"trades"`

@@ -211,7 +211,7 @@ func (c *Collector) FinalizeEvent() *Event {
 
 	// Binance 口径 outcome（研究对照）
 	binanceOutcome := 1 // Down
-	if closePrice > c.openPrice {
+	if closePrice >= c.openPrice {
 		binanceOutcome = 0 // Up
 	}
 
@@ -221,7 +221,7 @@ func (c *Collector) FinalizeEvent() *Event {
 	outcome := binanceOutcome
 	if c.twapOpen > 0 && c.twapPrice > 0 {
 		outcome = 1 // Down
-		if c.twapPrice > c.twapOpen {
+		if c.twapPrice >= c.twapOpen {
 			outcome = 0 // Up
 		}
 	}

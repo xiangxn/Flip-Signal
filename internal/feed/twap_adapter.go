@@ -111,15 +111,20 @@ func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapL
 	return ranges
 }
 
-// pollOfficialInterval 为官方 crypto-price 接口的轮询间隔，
-// 避免对 REST 接口高频请求（10s 一次）。
-const pollOfficialInterval = 10 * time.Second
+// pollOfficialOpenInterval 为开盘价轮询间隔（10s）；
+// pollOfficialCloseInterval 为收盘价轮询间隔（5s，收盘产出延迟波动大，
+// 更频繁轮询提高命中率）。crypto-price 接口限速低，SDK 已内部处理 429。
+const (
+	pollOfficialOpenInterval  = 10 * time.Second
+	pollOfficialCloseInterval = 5 * time.Second
+)
 
-// pollOfficialPrice 以 10s 间隔轮询官方 crypto-price 接口，直至取得有效价格或超时。
+// pollOfficialPrice 以 interval 间隔轮询官方 crypto-price 接口，直至取得有效价格或超时。
 // needClose=true 时要求 close 也有效（窗口结束后接口才产出官方收盘价）。
 // ctx 取消或超时时提前返回 ok=false。返回该窗口的官方 open/close。
 func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
-	windowSec, twapLookbackSeconds int64, timeout time.Duration, needClose bool) (open, close float64, ok bool) {
+	windowSec, twapLookbackSeconds int64, timeout time.Duration, needClose bool,
+	interval time.Duration) (open, close float64, ok bool) {
 	deadline := time.Now().Add(timeout)
 	for {
 		// 先检查 deadline 再发起请求，避免超时后的多余调用
@@ -133,11 +138,11 @@ func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start 
 		if open > 0 && (!needClose || close > 0) {
 			return open, close, true
 		}
-		// 10s 固定间隔 + 0-2s 抖动：collect/lab/引擎都在 5 分边界对齐发起
+		// 固定间隔 + 0-2s 抖动：collect/lab/引擎都在 5 分边界对齐发起
 		// 轮询，抖动避免多进程同拍并发打低限速的 crypto-price 接口触发 429
 		jitter := time.Duration(rand.Int63n(int64(2 * time.Second)))
-		if wait > pollOfficialInterval+jitter {
-			wait = pollOfficialInterval + jitter
+		if wait > interval+jitter {
+			wait = interval + jitter
 		}
 		select {
 		case <-ctx.Done():
@@ -152,13 +157,17 @@ func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start 
 // ok=false（调用方回退流采样）。
 func PollOfficialOpenPrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
 	windowSec, twapLookbackSeconds int64, timeout time.Duration) (open float64, ok bool) {
-	open, _, ok = pollOfficialPrice(ctx, client, start, windowSec, twapLookbackSeconds, timeout, false)
+	open, _, ok = pollOfficialPrice(ctx, client, start, windowSec, twapLookbackSeconds,
+		timeout, false, pollOfficialOpenInterval)
 	return open, ok
 }
 
-// PollOfficialClosePrice 窗口结束后轮询官方 TWAP 收盘价（close 有数据延迟），
-// 同时返回官方 open 供事件记录修正。超时或 ctx 取消时返回 ok=false。
+// PollOfficialClosePrice 窗口结束后轮询官方 TWAP 收盘价（close 有数据延迟，
+// 产出延迟波动大：5s 间隔 + 最长 60s），同时返回官方 open 供事件记录修正。
+// 超时或 ctx 取消时返回 ok=false。
+// ⚠️ 调用方必须以异步方式调用（本函数最长阻塞 60s）。
 func PollOfficialClosePrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
 	windowSec, twapLookbackSeconds int64, timeout time.Duration) (open, close float64, ok bool) {
-	return pollOfficialPrice(ctx, client, start, windowSec, twapLookbackSeconds, timeout, true)
+	return pollOfficialPrice(ctx, client, start, windowSec, twapLookbackSeconds,
+		timeout, true, pollOfficialCloseInterval)
 }

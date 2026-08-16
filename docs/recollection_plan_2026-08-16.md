@@ -60,8 +60,10 @@ data/btc/                          # 新格式 v2 输出目录
   "slug": "btc-updown-5m-1785957300",
   "start_time": 1785957300,
   "twap_open_price": 62834.65,        // 官方开（窗口边界起后台轮询修正，同旧 lab）
-  "twap_close_price": 62738.22,       // 官方收（窗口结束后轮询修正）
-  "outcome": 1,                       // 0=Up 1=Down（TWAP 官方口径）
+  "twap_close_price": 62738.22,       // 先用窗口末 TWAP 流采样填充；官方收盘 5s×60s 轮询到达则覆盖，
+                                      // 60s 未产出则流值定稿（官方接口分钟级延迟，有时数十分钟）
+  "close_source": "official",         // "official"=官方接口值；"stream"=流采样定稿
+  "outcome": 1,                       // 0=Up 1=Down（close >= open → Up，平局算 Up）
   "binance_open": 62896.01,           // Binance 5m K 线开盘（研究对照）
   "ticks": [                          // 1s 行 × ~300
     {

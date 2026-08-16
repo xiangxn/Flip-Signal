@@ -2,7 +2,7 @@
 
 PM BTC 5 分钟市场的策略研究与回测工具。
 背景与结论见 `docs/twap_flip_rederivation_2026-08-15.md`，
-新数据采集计划见 `docs/data_recollection_plan_2026-08-16.md`（格式 v2，1s 分辨率）。
+新数据采集计划见 `docs/recollection_plan_2026-08-16.md`（格式 v2，1s 分辨率）。
 
 ## 目录结构
 

@@ -363,7 +363,7 @@ func main() {
 			event.TwapOpenPrice = officialOpen
 			event.TwapClosePrice = officialClose
 			event.Outcome = 1 // Down
-			if officialClose > officialOpen {
+			if officialClose >= officialOpen {
 				event.Outcome = 0 // Up
 			}
 		} else {

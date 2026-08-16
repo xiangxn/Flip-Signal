@@ -1,6 +1,6 @@
 // collect 是数据格式 v2 的高频数据采集器（全新程序，与旧 lab 完全独立）。
 //
-// 采集内容（见 docs/data_recollection_plan_2026-08-16.md）:
+// 采集内容（见 docs/recollection_plan_2026-08-16.md）:
 //   P0-1 Binance 1s 聚合（价格/主动买卖量/成交笔数/深度和）
 //   P0-2 PM 盘口 1s 快照（yes/no bid+ask、top5 数量、盘口时戳）
 //   P0-3 PM price_change 聚合（每 token 每秒: 主动买卖笔数量/max单/vwap）
@@ -29,6 +29,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/tidwall/gjson"
 	"github.com/xiangxn/go-polymarket-sdk/model"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
@@ -95,6 +96,12 @@ func main() {
 		noTok    string
 		// 当前窗口成交聚合器（price_change goroutine 并发写）
 		currentBucketer atomic.Pointer[collect.TradeBucketer]
+		// 下一窗口市场预取缓存：窗口尾部异步预取的结果跨窗口迭代传递
+		// （连续运行时等待期预取没有空窗，平滑过渡靠这里）
+		nextMarketMu    sync.Mutex
+		nextMarketCache *gjson.Result
+		nextMarketErr   error
+		nextMarketSlug  string
 	)
 
 	// 盘口追踪：book 通道持续消费，保存最新 YES/NO 簿（1s 采样读取）
@@ -211,23 +218,6 @@ func main() {
 		}
 	}()
 
-	// ── 写入器（抽出后的通用按日 JSONL Writer）──
-	writer, err := collect.NewJSONLWriter(*outputDir, "events")
-	if err != nil {
-		log.Fatalf("[Collect] writer 创建失败: %v", err)
-	}
-	defer func() {
-		if err := writer.Close(); err != nil {
-			log.Printf("[Collect] writer 关闭失败: %v", err)
-		}
-	}()
-
-	// 已写入窗口去重集合：启动时扫描已有事件，防止重启/多进程对同一窗口
-	// 重复写入（append 不覆盖，重复事件会污染数据）。
-	written := collect.LoadWrittenStartTimes(*outputDir)
-	var writtenMu sync.Mutex
-	log.Printf("[Collect] 已加载 %d 个已写入窗口（去重集合）", len(written))
-
 	log.Println("========================================")
 	log.Printf(" 高频数据采集 v2 — %s | 输出: %s（全新目录）", *slugPrefix, *outputDir)
 	log.Println(" 数据源: [Binance aggTrade+depth20 1s聚合] + [PM CLOB books 1s快照] + [PM price_change 秒聚合] + [Chainlink TWAP-60]")
@@ -251,21 +241,59 @@ func main() {
 		alignedTs := now.Unix() / collect.WindowSec * collect.WindowSec
 		nextStart := time.Unix(alignedTs, 0)
 
-		// 已错过窗口起点（>2s 宽限，与下方 K 线等待对齐）：跳过当前窗口，
+		// 已错过窗口起点（>2s 宽限，启动容差）：跳过当前窗口，
 		// 等待下一个完整窗口。中途重启不再产生半窗口事件，也避免与
-		// 重启前已写入的事件重复（见 LoadWrittenStartTimes 去重）。
+		// 重启前已写入的事件重复（写入侧有 flock 去重兜底）。
 		if time.Until(nextStart.Add(2*time.Second)) <= 0 {
-			nextStart = nextStart.Add(collect.WindowSec * time.Second)
-			log.Printf("[Cycle] 已错过窗口起点，跳到 %s（等待完整窗口）",
+			log.Printf("[Cycle] 窗口 %s 已开始，等待下一个完整窗口",
 				nextStart.UTC().Format(time.RFC3339))
+			nextStart = nextStart.Add(collect.WindowSec * time.Second)
 		}
 		slug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
 
-		// 步骤 2: 等待至窗口起点（5 分整）。官方 TWAP 开盘价接口有数据
-		// 延迟，需从边界起轮询才能及时拿到 openPrice。
+		// 步骤 2: 等待窗口起点，同时提前预取下一窗口市场信息（缓存）。
+		// FetchMarketBySlug 是同步 HTTP（~1s），若等到边界才调用，订阅
+		// 会延迟 1-3s、窗口头部 tick 丢失；市场在窗口开始前已上架 gamma，
+		// 提前取到并缓存，边界一到立即订阅（首 tick ≈ 边界后 1s）。
+		var (
+			cachedMarket *gjson.Result
+			cachedErr    error
+		)
+		if wait := time.Until(nextStart.Add(-prefetchLead)); wait > 0 {
+			log.Printf("[Cycle] 下一个窗口 %s, 等待 %v（边界前 %ds 预取市场）",
+				nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second),
+				int(prefetchLead/time.Second))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+		// 边界前 20s 内预取，失败每 5s 重试直至边界前 2s
+		for time.Until(nextStart) > 2*time.Second {
+			log.Printf("[Cycle] 预取市场: %s", slug)
+			cachedMarket, cachedErr = client.FetchMarketBySlug(slug)
+			if cachedErr == nil {
+				log.Printf("[Cycle] ✅ 市场预取成功（边界前 %.1fs）",
+					time.Until(nextStart).Seconds())
+				break
+			}
+			log.Printf("[Cycle] 预取市场失败: %v —— 5s 后重试", cachedErr)
+			wait := 5 * time.Second
+			if rem := time.Until(nextStart.Add(-2 * time.Second)); rem < wait {
+				wait = rem
+			}
+			if wait <= 0 {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(wait):
+			}
+		}
+		// 等待至窗口起点
 		if wait := time.Until(nextStart); wait > 0 {
-			log.Printf("[Cycle] 下一个窗口 %s, 等待 %v (slug=%s)",
-				nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second), slug)
 			select {
 			case <-ctx.Done():
 				return
@@ -288,34 +316,46 @@ func main() {
 			}
 		}()
 
-		// 确保 Binance 5m K 线已生成（窗口起点 + 2 秒）
-		if wait := time.Until(nextStart.Add(2 * time.Second)); wait > 0 {
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
-			}
-		}
-
 		// 步骤 3: Binance K 线开盘价 —— 异步获取，不阻塞采集启动。
+		// 新 K 线在边界后 1-2s 才稳定生成，goroutine 内稍等再取；
 		// 初值用当前价，K 线到达后经 klineCh 在采集循环内修正事件元数据。
 		btc := binance.LatestData()
 		binanceOpen := btc.Price
 		klineCh := make(chan float64, 1)
 		go func() {
+			time.Sleep(2 * time.Second)
 			binance.FetchKlineOpenPrice()
 			klineCh <- binance.LatestData().OpenPrice
 		}()
 
-		// 步骤 4: 获取市场 → conditionID + YES/NO token
-		log.Printf("[Cycle] 获取市场: %s", slug)
-		marketData, err := client.FetchMarketBySlug(slug)
+		// 步骤 4: 使用预取的市场信息。
+		// 优先级: 窗口内预取（连续运行的主路径，slug 校验防陈旧值串窗）
+		// → 等待期预取（启动/跳窗后）→ 边界后同步兜底。
+		nextMarketMu.Lock()
+		nm, nme, nslug := nextMarketCache, nextMarketErr, nextMarketSlug
+		nextMarketCache, nextMarketErr, nextMarketSlug = nil, nil, "" // 用后即清
+		nextMarketMu.Unlock()
+		var marketData *gjson.Result
+		var err error
+		switch {
+		case nm != nil && nslug == slug:
+			marketData, err = nm, nme
+		case cachedMarket != nil:
+			marketData, err = cachedMarket, cachedErr
+		default:
+			log.Printf("[Cycle] 预取未就绪，边界后兜底获取市场: %s", slug)
+			marketData, err = client.FetchMarketBySlug(slug)
+		}
 		if err != nil {
-			log.Printf("[Cycle] 获取市场失败: %v —— 5s 后重试", err)
+			// 获取失败：跳过本窗口，直接等待下一个完整窗口边界。
+			// 不再走 5s 重试——窗口已开始，重试只会产生半窗口数据，
+			// 且重试路径会反复触发"窗口已开始"跳过日志（日志噪音）。
+			log.Printf("[Cycle] 获取市场失败: %v —— 跳过本窗口，等待下一窗口", err)
+			waitTo := nextStart.Add(collect.WindowSec * time.Second)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(time.Until(waitTo)):
 			}
 			continue
 		}
@@ -353,6 +393,10 @@ func main() {
 		// 市场切换期间的 Binance 成交不属于本窗口首秒，否则首 tick 会出现
 		// 周期性量尖峰（数据质量 bug，实测发现）。
 		binance.ConsumeVolume()
+
+		// 下一窗口市场预取：采集最后 20s 内异步启动（结果写入主作用域
+		// nextMarketCache，跨迭代传递），窗口结束即可无缝订阅下一窗口。
+		nextPrefetched := false
 
 		ticker := time.NewTicker(time.Second)
 
@@ -413,6 +457,25 @@ func main() {
 					PM: collect.MakePMTick(yb, nb),
 					Twap: collect.TwapTick{Price: twPrice, AgeMs: twAge},
 				})
+
+					// 窗口尾部：异步预取下一窗口市场（只触发一次），
+					// 窗口结束即可无缝订阅下一窗口
+					if !nextPrefetched && rem <= int(prefetchLead/time.Second) {
+						nextPrefetched = true
+						nextSlug := fmt.Sprintf("%s-%d", *slugPrefix,
+							nextStart.Add(collect.WindowSec*time.Second).Unix())
+						go func() {
+							m, e := client.FetchMarketBySlug(nextSlug)
+							nextMarketMu.Lock()
+							nextMarketCache, nextMarketErr, nextMarketSlug = m, e, nextSlug
+							nextMarketMu.Unlock()
+							if e != nil {
+								log.Printf("[Cycle] 下一窗口预取失败: %v（边界后兜底）", e)
+							} else {
+								log.Printf("[Cycle] ✅ 下一窗口市场预取成功 %s", nextSlug)
+							}
+						}()
+					}
 			}
 		}
 
@@ -425,35 +488,35 @@ func main() {
 		snapTrades := currentBucketer.Load().Snapshot()
 		currentBucketer.Store(nil)
 		finalTwapOpen := twapOpen
+		// 流采样收盘价作为 close 初值（窗口结束时刻的 TWAP-60 流值，与官方
+		// 结算同源）：官方接口有分钟级延迟（有时数十分钟不产出），先填流值，
+		// 60s 内官方到达则覆盖，否则以流值定稿不再管。
+		twapCloseStream, _ := twapAdapter.Latest()
+		if twapCloseStream == 0 {
+			twapCloseStream = finalTwapOpen
+		}
 
 		go func() {
-			// 异步后可放宽轮询窗口（12s ≈ 2 次请求），提高官方收盘命中率
-			twapClose := finalTwapOpen
+			// 官方收盘 5s 间隔 × 60s 上限（异步执行，不阻塞主循环）
+			twapClose := twapCloseStream
 			outcome := 1 // Down
+			closeSource := "stream"
+			if twapCloseStream >= finalTwapOpen {
+				outcome = 0 // Up
+			}
 			if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
-				collect.WindowSec, sdk.ChainlinkTwapWindowSixty, 12*time.Second); ok {
+				collect.WindowSec, sdk.ChainlinkTwapWindowSixty, 60*time.Second); ok {
 				finalTwapOpen = officialOpen
 				twapClose = officialClose
-				if officialClose > officialOpen {
+				closeSource = "official"
+				if officialClose >= officialOpen {
 					outcome = 0 // Up
 				}
 			} else if ctx.Err() == nil {
-				log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样", conditionID)
+				log.Printf("[Event] ⚠️ %s 官方结算价 60s 内未产出，沿用流采样（官方延迟可达数十分钟）", conditionID)
 			}
 			if ctx.Err() != nil {
 				log.Printf("[Event] %s 正在关闭，丢弃未写入窗口", conditionID)
-				return
-			}
-
-			// 写入前去重：该窗口已存在于输出目录（重启前已写入）则跳过
-			writtenMu.Lock()
-			dup := written[nextStart.Unix()]
-			if !dup {
-				written[nextStart.Unix()] = true
-			}
-			writtenMu.Unlock()
-			if dup {
-				log.Printf("[Event] ⚠️ %s 重复窗口，跳过写入", conditionID)
 				return
 			}
 
@@ -463,6 +526,7 @@ func main() {
 				StartTime:      nextStart.Unix(),
 				TwapOpenPrice:  finalTwapOpen,
 				TwapClosePrice: twapClose,
+				CloseSource:    closeSource,
 				Outcome:        outcome,
 				BinanceOpen:    binanceOpen,
 				Ticks:          snapTicks,
@@ -476,8 +540,12 @@ func main() {
 			log.Printf("[Event] %s 完成 — twap open=%.2f close=%.2f outcome=%s | ticks=%d trades_agg=%d",
 				conditionID, finalTwapOpen, twapClose, outcomeLabel, len(snapTicks), len(snapTrades))
 
-			if err := writer.Write(event); err != nil {
+			// 去重写入（flock 跨进程安全，防重启/多实例重复写同一窗口）
+			written, err := collect.WriteUniqueEvent(*outputDir, &event)
+			if err != nil {
 				log.Printf("[Writer] 写入失败: %v", err)
+			} else if !written {
+				log.Printf("[Event] ⚠️ %s 重复窗口，跳过写入", conditionID)
 			}
 		}()
 	}
@@ -539,3 +607,8 @@ func parseFloat(s string) float64 {
 	fmt.Sscanf(s, "%f", &f)
 	return f
 }
+
+// prefetchLead 是市场信息预取提前量：窗口边界前多少秒开始调
+// FetchMarketBySlug 并缓存结果（市场在窗口开始前已上架 gamma）。
+// 边界一到用缓存立即订阅新市场，平滑过渡到下一个窗口的采集。
+const prefetchLead = 20 * time.Second
