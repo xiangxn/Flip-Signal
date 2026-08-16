@@ -22,6 +22,8 @@ type BinanceMarketData struct {
 	// Volume accumulated since last ConsumeVolume call.
 	BuyVolume  float64 `json:"buy_vol"`
 	SellVolume float64 `json:"sell_vol"`
+	// 成交笔数（自上次 ConsumeVolume 起累计，collect 用于每秒 tick 计数）
+	TradeCount uint64
 
 	// Order book depth
 	BidDepth5  float64
@@ -76,6 +78,7 @@ type BinanceAdapter struct {
 	volMu       sync.Mutex
 	buyVol5s    float64
 	sellVol5s   float64
+	tradeCount5s uint64
 
 	started atomic.Bool
 
@@ -192,6 +195,7 @@ func (b *BinanceAdapter) LatestData() BinanceMarketData {
 	b.volMu.Lock()
 	d.BuyVolume = b.buyVol5s
 	d.SellVolume = b.sellVol5s
+	d.TradeCount = b.tradeCount5s
 	b.volMu.Unlock()
 
 	return d
@@ -203,6 +207,7 @@ func (b *BinanceAdapter) ConsumeVolume() (buyAcc, sellAcc float64) {
 	buyAcc, sellAcc = b.buyVol5s, b.sellVol5s
 	b.buyVol5s = 0
 	b.sellVol5s = 0
+	b.tradeCount5s = 0
 	return
 }
 
@@ -386,6 +391,7 @@ func (b *BinanceAdapter) handleTrade(data json.RawMessage) {
 	} else {
 		b.buyVol5s += qty
 	}
+	b.tradeCount5s++
 	b.volMu.Unlock()
 }
 
