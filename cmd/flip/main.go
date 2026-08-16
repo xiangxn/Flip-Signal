@@ -631,47 +631,46 @@ func main() {
 		// 步骤 7：结束事件、持久化 Lab 数据、更新历史振幅、结算信号
 		event := collector.FinalizeEvent()
 
-		// 官方 TWAP 结算价修正：窗口结束后 crypto-price 接口才产出
-		// closePrice（与开盘价同源的数据延迟）。轮询至 endTime+9s
-		// （不超过 10s，避免主循环跳窗），未就绪则沿用流采样值。
-		closeTimeout := time.Until(time.Unix(nextStart.Unix()+lab.WindowSec, 0).Add(9 * time.Second))
-		if closeTimeout < 0 {
-			closeTimeout = 0
-		}
-		if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
-			int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, closeTimeout); ok {
-			event.TwapOpenPrice = officialOpen
-			event.TwapClosePrice = officialClose
-			event.Outcome = 1 // Down
-			if officialClose > officialOpen {
-				event.Outcome = 0 // Up
+		// 官方 TWAP 结算价修正 —— 异步获取，不阻塞主循环进入下一窗口
+		// （同步轮询会延迟下一窗口的穿越检测 ~10s，错过窗口前段信号）。
+		// 官方收盘价到达后（或超时回退流采样）在后台完成历史振幅积累与
+		// Lab 快照持久化；histTracker 自带锁，跨 goroutine 安全。
+		go func(ev *lab.Event, start time.Time) {
+			if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, start,
+				int64(lab.WindowSec), sdk.ChainlinkTwapWindowSixty, 12*time.Second); ok {
+				ev.TwapOpenPrice = officialOpen
+				ev.TwapClosePrice = officialClose
+				ev.Outcome = 1 // Down
+				if officialClose > officialOpen {
+					ev.Outcome = 0 // Up
+				}
+			} else if ctx.Err() == nil {
+				log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样 close", conditionID)
 			}
-		} else {
-			log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样 close", conditionID)
-		}
 
-		// 历史振幅按 TWAP 结算口径积累；TWAP 缺失的周期跳过，
-		// 避免 0 振幅污染均值（冷启动窗口不参与基准）
-		if event.TwapOpenPrice > 0 && event.TwapClosePrice > 0 {
-			histTracker.AddRange(event.TwapOpenPrice, event.TwapClosePrice)
-		} else {
-			log.Printf("[Event] ⚠️ %s TWAP 数据缺失，跳过历史振幅积累", conditionID)
-		}
-
-		// 若启用 Lab 输出，持久化完整事件快照
-		if labWriter != nil {
-			if err := labWriter.Write(event); err != nil {
-				log.Printf("[Flip] Lab 写入失败: %v", err)
+			// 历史振幅按 TWAP 结算口径积累；TWAP 缺失的周期跳过，
+			// 避免 0 振幅污染均值（冷启动窗口不参与基准）
+			if ev.TwapOpenPrice > 0 && ev.TwapClosePrice > 0 {
+				histTracker.AddRange(ev.TwapOpenPrice, ev.TwapClosePrice)
+			} else {
+				log.Printf("[Event] ⚠️ %s TWAP 数据缺失，跳过历史振幅积累", conditionID)
 			}
-		}
 
-		outcomeLabel := "DOWN/FLAT"
-		if event.Outcome == 0 {
-			outcomeLabel = "UP"
-		}
-		log.Printf("[Event] %s 完成 —— twap open=%.2f close=%.2f outcome=%s | binance open=%.2f close=%.2f snapshots=%d",
-			conditionID, event.TwapOpenPrice, event.TwapClosePrice, outcomeLabel,
-			event.OpenPrice, event.ClosePrice, len(event.Snapshots))
+			// 若启用 Lab 输出，持久化完整事件快照
+			if labWriter != nil {
+				if err := labWriter.Write(ev); err != nil {
+					log.Printf("[Flip] Lab 写入失败: %v", err)
+				}
+			}
+
+			outcomeLabel := "DOWN/FLAT"
+			if ev.Outcome == 0 {
+				outcomeLabel = "UP"
+			}
+			log.Printf("[Event] %s 完成 —— twap open=%.2f close=%.2f outcome=%s | binance open=%.2f close=%.2f snapshots=%d",
+				conditionID, ev.TwapOpenPrice, ev.TwapClosePrice, outcomeLabel,
+				ev.OpenPrice, ev.ClosePrice, len(ev.Snapshots))
+		}(event, nextStart)
 
 		// 实盘交易对账（顺序关键：先对账 GTC 挂单，确保成交数据已回填至 FlipRecorder）
 		if trader != nil {

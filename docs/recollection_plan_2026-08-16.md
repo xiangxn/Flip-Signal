@@ -30,7 +30,7 @@ od>0.05 统计力最强（翻转率 +13.8pp）却被 10 秒内的盘口 reprice 
 
 | 旧数据（data/btc_5s, 5s 快照，已移走） | 丢失的信息 → 新格式补齐 |
 |---------|-----------|
-| Binance 5s 点价 + 5s 聚合 flow/vol | 5 秒内微观路径 → **1s OHLC + 主动买卖量 + tick 数** |
+| Binance 5s 点价 + 5s 聚合 flow/vol | 5 秒内微观路径 → **1s 点价 + 主动买卖量 + tick 数** |
 | PM 只存 yes/no **best bid** | 无 ask、无深度结构 → **1s bid/ask + top5 数量** |
 | PM 成交 tape | 从未采集 → **price_change 逐笔（side/size/price/best）** |
 | 盘口 reprice 速度 | 无时戳 → **book_ts + latency** |

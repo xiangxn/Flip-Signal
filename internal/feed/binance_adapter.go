@@ -152,11 +152,15 @@ func (b *BinanceAdapter) dialAndSet() error {
 // FetchKlineOpenPrice fetches the current 5-minute kline open price from Binance REST.
 // Called at the start of each market cycle (with 1-2s delay after window start).
 // This replaces the previous value so each new 5-minute window gets its own open price.
+// klineClient 是 K 线接口专用 client：5s 超时防止网络异常时
+// FetchKlineOpenPrice 无限期阻塞调用方（采集/引擎主循环）。
+var klineClient = &http.Client{Timeout: 5 * time.Second}
+
 func (b *BinanceAdapter) FetchKlineOpenPrice() {
 	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=5m&limit=1",
 		b.cfg.RestBaseURL, b.cfg.Symbol)
 
-	resp, err := http.Get(url)
+	resp, err := klineClient.Get(url)
 	if err != nil {
 		log.Printf("[BinanceAdapter] fetch kline error: %v", err)
 		return

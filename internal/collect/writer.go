@@ -16,6 +16,7 @@ import (
 // 按 UTC 日期自动切分；O_APPEND 追加模式，重启不丢数据。
 //
 // 线程安全：Write 可被多个 goroutine 并发调用。
+// Close 后 Write 返回错误（幂等关闭，不会重新打开文件）。
 type JSONLWriter struct {
 	mu         sync.Mutex
 	dir        string
@@ -23,6 +24,7 @@ type JSONLWriter struct {
 	file       *os.File
 	buf        *bufio.Writer
 	currentDay string
+	closed     bool
 }
 
 // NewJSONLWriter 创建写入器。dir 不存在时自动创建。
@@ -34,9 +36,14 @@ func NewJSONLWriter(dir, prefix string) (*JSONLWriter, error) {
 }
 
 // Write 将 v 序列化为一行 JSON 追加到当日文件。
+// 已 Close 的写入器返回错误（后台异步写入与 Close 竞争时的安全兜底）。
 func (w *JSONLWriter) Write(v any) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	if w.closed {
+		return fmt.Errorf("writer closed")
+	}
 
 	day := time.Now().UTC().Format("2006-01-02")
 	if day != w.currentDay {
@@ -76,10 +83,14 @@ func (w *JSONLWriter) rotate(day string) error {
 	return nil
 }
 
-// Close 落盘并关闭当前文件。
+// Close 落盘并关闭当前文件（幂等）。
 func (w *JSONLWriter) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+	if w.closed {
+		return nil
+	}
+	w.closed = true
 	if w.buf != nil {
 		if err := w.buf.Flush(); err != nil {
 			return err

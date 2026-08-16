@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"math"
+	"math/rand"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +105,8 @@ func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapL
 			continue
 		}
 		ranges = append(ranges, math.Abs(closePrice-openPrice))
+		// crypto-price 接口限速低，逐窗口间隔 1s 防止启动时连发触发 429
+		time.Sleep(time.Second)
 	}
 	return ranges
 }
@@ -130,9 +133,11 @@ func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start 
 		if open > 0 && (!needClose || close > 0) {
 			return open, close, true
 		}
-		// 距 deadline 不足一个轮询间隔时只等到 deadline，避免延迟返回
-		if wait > pollOfficialInterval {
-			wait = pollOfficialInterval
+		// 10s 固定间隔 + 0-2s 抖动：collect/lab/引擎都在 5 分边界对齐发起
+		// 轮询，抖动避免多进程同拍并发打低限速的 crypto-price 接口触发 429
+		jitter := time.Duration(rand.Int63n(int64(2 * time.Second)))
+		if wait > pollOfficialInterval+jitter {
+			wait = pollOfficialInterval + jitter
 		}
 		select {
 		case <-ctx.Done():

@@ -141,7 +141,8 @@ func main() {
 					continue
 				}
 				eventCount++
-				if eventCount%100 == 0 {
+				if eventCount%5000 == 0 {
+					// 活跃期约 200-500 事件/秒，5000 一报 ≈ 每 10-25s 一条
 					log.Printf("[Trade] price_change 事件累计 %d（最近 ts=%d）", eventCount, info.Timestamp)
 				}
 				tokMu.RLock()
@@ -281,14 +282,15 @@ func main() {
 			}
 		}
 
-		// 步骤 3: Binance K 线开盘价
-		binance.FetchKlineOpenPrice()
+		// 步骤 3: Binance K 线开盘价 —— 异步获取，不阻塞采集启动。
+		// 初值用当前价，K 线到达后经 klineCh 在采集循环内修正事件元数据。
 		btc := binance.LatestData()
-		binanceOpen := btc.OpenPrice
-		if binanceOpen == 0 {
-			binanceOpen = btc.Price
-			log.Printf("[Cycle] ⚠️  K 线开盘价不可用，使用当前价 %.2f", binanceOpen)
-		}
+		binanceOpen := btc.Price
+		klineCh := make(chan float64, 1)
+		go func() {
+			binance.FetchKlineOpenPrice()
+			klineCh <- binance.LatestData().OpenPrice
+		}()
 
 		// 步骤 4: 获取市场 → conditionID + YES/NO token
 		log.Printf("[Cycle] 获取市场: %s", slug)
@@ -332,8 +334,12 @@ func main() {
 		log.Printf("[Cycle] event=%s binance_open=%.2f twap_open=%.2f 开始采集...",
 			conditionID, binanceOpen, twapOpen)
 
+		// 丢弃窗口间隙累计的成交量：上一窗口 finalize + 官方收盘轮询 +
+		// 市场切换期间的 Binance 成交不属于本窗口首秒，否则首 tick 会出现
+		// 周期性量尖峰（数据质量 bug，实测发现）。
+		binance.ConsumeVolume()
+
 		ticker := time.NewTicker(time.Second)
-		snapCount := 0
 
 	collectLoop:
 		for {
@@ -346,6 +352,14 @@ func main() {
 				twapOpen = officialOpen
 				log.Printf("[Cycle] ✅ 官方 TWAP 开盘价 %.2f 已修正（边界后 %.1fs）",
 					officialOpen, time.Since(nextStart).Seconds())
+
+			case klineOpen := <-klineCh:
+				if klineOpen > 0 {
+					binanceOpen = klineOpen
+					log.Printf("[Cycle] ✅ Binance K 线开盘价 %.2f 已修正", klineOpen)
+				} else {
+					log.Printf("[Cycle] ⚠️  K 线开盘价不可用，沿用当前价 %.2f", binanceOpen)
+				}
 
 			case tickTime := <-ticker.C:
 				rem := int(endTime.Sub(tickTime).Seconds())
@@ -384,51 +398,61 @@ func main() {
 					PM: collect.MakePMTick(yb, nb),
 					Twap: collect.TwapTick{Price: twPrice, AgeMs: twAge},
 				})
-				snapCount++
 			}
 		}
 
-		// 步骤 7: 官方 TWAP 结算价修正（窗口结束后 crypto-price 接口才产出）
-		closeTimeout := time.Until(endTime.Add(9 * time.Second))
-		if closeTimeout < 0 {
-			closeTimeout = 0
-		}
-		twapClose := twapOpen
-		outcome := 1 // Down
-		if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
-			collect.WindowSec, sdk.ChainlinkTwapWindowSixty, closeTimeout); ok {
-			twapOpen = officialOpen
-			twapClose = officialClose
-			if officialClose > officialOpen {
-				outcome = 0 // Up
-			}
-		} else {
-			log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样", conditionID)
-		}
-
-		event := collect.Event{
-			ConditionID:    conditionID,
-			Slug:           slug,
-			StartTime:      nextStart.Unix(),
-			TwapOpenPrice:  twapOpen,
-			TwapClosePrice: twapClose,
-			Outcome:        outcome,
-			BinanceOpen:    binanceOpen,
-			Ticks:          ticks,
-			Trades:         currentBucketer.Load().Snapshot(),
-		}
+		// 步骤 7: 官方 TWAP 结算价修正 —— 异步获取，不阻塞主循环进入下一窗口。
+		// 同步轮询 ~9-12s 会让下一窗口的订阅与首 tick 延迟，每窗口损失
+		// 前 ~10 秒数据。窗口数据先快照，官方收盘价到达后（或超时回退
+		// 流采样）在后台写入事件；下一窗口事件至少 300s 后才写入，
+		// 写入顺序天然保持。
+		snapTicks := ticks
+		snapTrades := currentBucketer.Load().Snapshot()
 		currentBucketer.Store(nil)
+		finalTwapOpen := twapOpen
 
-		outcomeLabel := "DOWN/Flat"
-		if outcome == 0 {
-			outcomeLabel = "UP"
-		}
-		log.Printf("[Event] %s 完成 — twap open=%.2f close=%.2f outcome=%s | ticks=%d trades_agg=%d",
-			conditionID, twapOpen, twapClose, outcomeLabel, len(ticks), len(event.Trades))
+		go func() {
+			// 异步后可放宽轮询窗口（12s ≈ 2 次请求），提高官方收盘命中率
+			twapClose := finalTwapOpen
+			outcome := 1 // Down
+			if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
+				collect.WindowSec, sdk.ChainlinkTwapWindowSixty, 12*time.Second); ok {
+				finalTwapOpen = officialOpen
+				twapClose = officialClose
+				if officialClose > officialOpen {
+					outcome = 0 // Up
+				}
+			} else if ctx.Err() == nil {
+				log.Printf("[Event] ⚠️ %s 官方结算价未就绪，沿用流采样", conditionID)
+			}
+			if ctx.Err() != nil {
+				log.Printf("[Event] %s 正在关闭，丢弃未写入窗口", conditionID)
+				return
+			}
 
-		if err := writer.Write(event); err != nil {
-			log.Printf("[Writer] 写入失败: %v", err)
-		}
+			event := collect.Event{
+				ConditionID:    conditionID,
+				Slug:           slug,
+				StartTime:      nextStart.Unix(),
+				TwapOpenPrice:  finalTwapOpen,
+				TwapClosePrice: twapClose,
+				Outcome:        outcome,
+				BinanceOpen:    binanceOpen,
+				Ticks:          snapTicks,
+				Trades:         snapTrades,
+			}
+
+			outcomeLabel := "DOWN/Flat"
+			if outcome == 0 {
+				outcomeLabel = "UP"
+			}
+			log.Printf("[Event] %s 完成 — twap open=%.2f close=%.2f outcome=%s | ticks=%d trades_agg=%d",
+				conditionID, finalTwapOpen, twapClose, outcomeLabel, len(snapTicks), len(snapTrades))
+
+			if err := writer.Write(event); err != nil {
+				log.Printf("[Writer] 写入失败: %v", err)
+			}
+		}()
 	}
 }
 
@@ -441,6 +465,7 @@ type appConfig struct {
 func loadConfig() *appConfig {
 	cfg := &appConfig{
 		SDK: sdk.Config{
+			HttpTimeout: 10 * time.Second, // 所有 REST（市场/crypto-price）兜底超时
 			Polymarket: sdk.PolymarketConfig{
 				ChainID:        137,
 				ClobBaseURL:    "https://clob.polymarket.com",
