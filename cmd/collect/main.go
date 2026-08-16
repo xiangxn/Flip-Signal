@@ -222,6 +222,12 @@ func main() {
 		}
 	}()
 
+	// 已写入窗口去重集合：启动时扫描已有事件，防止重启/多进程对同一窗口
+	// 重复写入（append 不覆盖，重复事件会污染数据）。
+	written := collect.LoadWrittenStartTimes(*outputDir)
+	var writtenMu sync.Mutex
+	log.Printf("[Collect] 已加载 %d 个已写入窗口（去重集合）", len(written))
+
 	log.Println("========================================")
 	log.Printf(" 高频数据采集 v2 — %s | 输出: %s（全新目录）", *slugPrefix, *outputDir)
 	log.Println(" 数据源: [Binance aggTrade+depth20 1s聚合] + [PM CLOB books 1s快照] + [PM price_change 秒聚合] + [Chainlink TWAP-60]")
@@ -244,6 +250,15 @@ func main() {
 		now := time.Now()
 		alignedTs := now.Unix() / collect.WindowSec * collect.WindowSec
 		nextStart := time.Unix(alignedTs, 0)
+
+		// 已错过窗口起点（>2s 宽限，与下方 K 线等待对齐）：跳过当前窗口，
+		// 等待下一个完整窗口。中途重启不再产生半窗口事件，也避免与
+		// 重启前已写入的事件重复（见 LoadWrittenStartTimes 去重）。
+		if time.Until(nextStart.Add(2*time.Second)) <= 0 {
+			nextStart = nextStart.Add(collect.WindowSec * time.Second)
+			log.Printf("[Cycle] 已错过窗口起点，跳到 %s（等待完整窗口）",
+				nextStart.UTC().Format(time.RFC3339))
+		}
 		slug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
 
 		// 步骤 2: 等待至窗口起点（5 分整）。官方 TWAP 开盘价接口有数据
@@ -427,6 +442,18 @@ func main() {
 			}
 			if ctx.Err() != nil {
 				log.Printf("[Event] %s 正在关闭，丢弃未写入窗口", conditionID)
+				return
+			}
+
+			// 写入前去重：该窗口已存在于输出目录（重启前已写入）则跳过
+			writtenMu.Lock()
+			dup := written[nextStart.Unix()]
+			if !dup {
+				written[nextStart.Unix()] = true
+			}
+			writtenMu.Unlock()
+			if dup {
+				log.Printf("[Event] ⚠️ %s 重复窗口，跳过写入", conditionID)
 				return
 			}
 
