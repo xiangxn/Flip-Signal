@@ -14,18 +14,24 @@ func BestBid(book *sdk.OrderBook) float64 {
 	return book.Bids[len(book.Bids)-1].Price
 }
 
-// BestAsk 返回订单簿最优卖价（asks 升序，最优在最前）。空盘口返回 0。
+// BestAsk 返回订单簿最优卖价。CLOB WS 的 asks 是降序（0.99 填充单在前，
+// 真实最优卖价在最后），与 bids 升序对称，最优都在末尾 —— 与 SDK 自身
+// GetTokenOrderBook 取 Asks[len-1] 的约定一致。空盘口返回 0。
+// ⚠️ 曾误取 Asks[0]（恒为 0.99/1.0 填充价），2026-08-18 数据审计修正。
 func BestAsk(book *sdk.OrderBook) float64 {
 	if book == nil || len(book.Asks) == 0 {
 		return 0
 	}
-	return book.Asks[0].Price
+	return book.Asks[len(book.Asks)-1].Price
 }
 
-// topNQuantity 返回前 n 档数量之和。不足 n 档时返回现有档位之和。
+// topNQuantity 返回靠市场最优侧的 n 档数量之和（承接结构指标）。
+// CLOB WS 的 bids 升序（0.01 在前）、asks 降序（0.99 在前），最优价
+// 都在切片末尾 —— 因此取末尾 n 档而非开头（开头是远离市场的填充档）。
+// 不足 n 档时返回现有档位之和。
 func topNQuantity(levels []orders.Book, n int) float64 {
 	if len(levels) > n {
-		levels = levels[:n]
+		levels = levels[len(levels)-n:]
 	}
 	var sum float64
 	for _, l := range levels {

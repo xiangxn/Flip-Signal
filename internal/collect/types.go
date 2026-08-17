@@ -47,11 +47,12 @@ type HFTick struct {
 	Twap TwapTick `json:"twap"`
 }
 
-// TradeAgg 是 PM price_change 按 token × 秒聚合行（P0-3）。
+// TradeAgg 是 PM last_trade_price 按 token × 秒聚合行（P0-3）。
 //
 // 原始逐笔数据量过大不落盘（见数据重采计划 §3.2），在内存中聚合：
 // 每 token 每秒一行，保留主动买卖笔数/量（OFI）、最大单笔（大单检测）、
-// vwap 与末笔 best bid/ask；hash / event_ts 等逐笔字段不保留。
+// vwap 与末笔 best bid/ask；transaction_hash 等逐笔字段不保留
+// （hash 仅用于窗口内去重，防 WS 重连重放）。
 type TradeAgg struct {
 	Ts        int64   `json:"ts"`        // 本秒桶起始（unix 毫秒，与 ticks 对齐）
 	Rem       int     `json:"rem"`       // 窗口剩余秒数

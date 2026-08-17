@@ -3,7 +3,9 @@
 // 采集内容（见 docs/recollection_plan_2026-08-16.md）:
 //   P0-1 Binance 1s 聚合（价格/主动买卖量/成交笔数/深度和）
 //   P0-2 PM 盘口 1s 快照（yes/no bid+ask、top5 数量、盘口时戳）
-//   P0-3 PM price_change 聚合（每 token 每秒: 主动买卖笔数量/max单/vwap）
+//   P0-3 PM last_trade_price 聚合（每 token 每秒: 主动买卖笔数量/max单/vwap）
+//        ⚠️ 成交流必须用 last_trade_price；price_change 实测是挂单流
+//        （镜像对 buy≡sell 恒等，方向信息被抹平），见 2026-08-18 数据审计
 //   每 tick 附 TWAP-60 采样; 窗口结束后补官方 TWAP 开/收盘与 outcome。
 //
 // 输出: data/btc/events_YYYY-MM-DD.jsonl —— 每窗口一行 JSON（ticks+trades）。
@@ -46,7 +48,7 @@ func main() {
 	symbol := flag.String("symbol", "BTCUSDT", "Binance 交易对")
 	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug 前缀")
 	customFeature := flag.Bool("custom-feature", false,
-		"CLOB 订阅自定义特性标志。A/B 实测（2026-08-16）: price_change 上行与该标志无关，"+
+		"CLOB 订阅自定义特性标志。A/B 实测（2026-08-16）: 订阅上行与该标志无关，"+
 			"默认 false 与 OrderBookAdapter 一致")
 	flag.Parse()
 
@@ -82,19 +84,19 @@ func main() {
 		}
 	}()
 
-	// ── PM MarketMonitor（直接使用 SDK，需 book + price_change 双通道）──
-	// customFeatureEnabled: A/B 实测 price_change 上行与该标志无关（false 时
-	// 150s 仍收到 5.2 万事件），默认 false 与 OrderBookAdapter 一致。
+	// ── PM MarketMonitor（直接使用 SDK，需 book + last_trade_price 双通道）──
+	// customFeatureEnabled: A/B 实测（2026-08-16）订阅上行与该标志无关，
+	// 默认 false 与 OrderBookAdapter 一致。
 	monitor := sdk.NewMarketMonitor(cfg.SDK.Polymarket.ClobWSBaseURL, false, client, *customFeature)
 
-	// 订阅状态（重启恢复用）与当前 token 映射（price_change → YES/NO）
+	// 订阅状态（重启恢复用）与当前 token 映射（last_trade_price → YES/NO）
 	var (
 		subMu    sync.RWMutex
 		subTokens []string
 		tokMu    sync.RWMutex
 		yesTok   string
 		noTok    string
-		// 当前窗口成交聚合器（price_change goroutine 并发写）
+		// 当前窗口成交聚合器（last_trade_price goroutine 并发写）
 		currentBucketer atomic.Pointer[collect.TradeBucketer]
 		// 下一窗口市场预取缓存：窗口尾部异步预取的结果跨窗口迭代传递
 		// （连续运行时等待期预取没有空窗，平滑过渡靠这里）
@@ -135,22 +137,25 @@ func main() {
 		}
 	}()
 
-	// price_change 消费：按 token 映射聚合进当前窗口 bucketer
+	// last_trade_price 消费：按 token 映射聚合进当前窗口 bucketer。
+	// 用成交自身时戳归桶（消息内服务端时间）；成交时刻的盘口上下文
+	// 取本簿当前最优 bid/ask（成交后簿可能已被后续更新覆盖，此处为
+	// 本地到达时刻的近似上下文，book_ts 可辅助判定陈旧度）。
 	go func() {
-		ch := monitor.SubscribePriceChange()
+		ch := monitor.SubscribeLastTradePrice()
 		eventCount := 0
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case info := <-ch:
-				if info == nil {
+			case trade := <-ch:
+				if trade == nil {
 					continue
 				}
 				eventCount++
-				if eventCount%5000 == 0 {
-					// 活跃期约 200-500 事件/秒，5000 一报 ≈ 每 10-25s 一条
-					log.Printf("[Trade] price_change 事件累计 %d（最近 ts=%d）", eventCount, info.Timestamp)
+				if eventCount%500 == 0 {
+					// 实盘成交率约 5-10 笔/秒，500 一报 ≈ 每 1-2 分钟一条
+					log.Printf("[Trade] last_trade_price 累计 %d（最近 ts=%d）", eventCount, trade.Timestamp)
 				}
 				tokMu.RLock()
 				yt, nt := yesTok, noTok
@@ -159,21 +164,31 @@ func main() {
 				if b == nil {
 					continue
 				}
-				nowMs := time.Now().UnixMilli()
-				for _, pc := range info.PriceChanges {
-					token := ""
-					switch pc.AssetID {
-					case yt:
-						token = "YES"
-					case nt:
-						token = "NO"
-					default:
-						continue // 旧窗口迟到的笔
-					}
-					b.Add(token, nowMs, pc.Side,
-						parseFloat(pc.Price), parseFloat(pc.Size),
-						parseFloat(pc.BestBid), parseFloat(pc.BestAsk))
+				token := ""
+				switch trade.AssetID {
+				case yt:
+					token = "YES"
+				case nt:
+					token = "NO"
+				default:
+					continue // 旧窗口迟到的笔
 				}
+				bookMu.RLock()
+				var bb, ba float64
+				switch token {
+				case "YES":
+					bb, ba = collect.BestBid(yesBook), collect.BestAsk(yesBook)
+				case "NO":
+					bb, ba = collect.BestBid(noBook), collect.BestAsk(noBook)
+				}
+				bookMu.RUnlock()
+				tsMs := trade.Timestamp
+				if tsMs == 0 {
+					tsMs = time.Now().UnixMilli() // 消息缺时戳时回退本地到达时刻
+				}
+				b.Add(token, tsMs, trade.Side,
+					parseFloat(trade.Price), parseFloat(trade.Size),
+					bb, ba, trade.TransactionHash)
 			}
 		}
 	}()
@@ -220,7 +235,7 @@ func main() {
 
 	log.Println("========================================")
 	log.Printf(" 高频数据采集 v2 — %s | 输出: %s（全新目录）", *slugPrefix, *outputDir)
-	log.Println(" 数据源: [Binance aggTrade+depth20 1s聚合] + [PM CLOB books 1s快照] + [PM price_change 秒聚合] + [Chainlink TWAP-60]")
+	log.Println(" 数据源: [Binance aggTrade+depth20 1s聚合] + [PM CLOB books 1s快照] + [PM last_trade_price 秒聚合] + [Chainlink TWAP-60]")
 	log.Println("========================================")
 
 	// 等待初始数据就绪
@@ -601,7 +616,7 @@ func loadConfig() *appConfig {
 	return cfg
 }
 
-// parseFloat 解析价格/数量字符串，失败返回 0（SDK price_change 字段为字符串）。
+// parseFloat 解析价格/数量字符串，失败返回 0（SDK last_trade_price 字段为字符串）。
 func parseFloat(s string) float64 {
 	var f float64
 	fmt.Sscanf(s, "%f", &f)
