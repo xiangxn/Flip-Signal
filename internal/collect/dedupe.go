@@ -35,8 +35,11 @@ func WriteUniqueEvent(dir string, ev *Event) (written bool, err error) {
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 
-	// 锁内扫描查重（文件仅 ~288 行/天，开销可忽略）
+	// 锁内扫描查重。⚠️ v2 高频格式每窗口一行（ticks+trades 全量内联），
+	// 单行实测 ~300KB，远超 bufio.Scanner 默认上限 64KB（token too long），
+	// 必须显式调大 buffer —— 否则首个窗口后所有写入失败。
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16<<20)
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		if len(line) == 0 {
