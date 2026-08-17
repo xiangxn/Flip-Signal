@@ -122,9 +122,16 @@ const (
 // pollOfficialPrice 以 interval 间隔轮询官方 crypto-price 接口，直至取得有效价格或超时。
 // needClose=true 时要求 close 也有效（窗口结束后接口才产出官方收盘价）。
 // ctx 取消或超时时提前返回 ok=false。返回该窗口的官方 open/close。
+//
+// 超时为硬约束：timeout 同时作为轮询总预算与单次请求的 context deadline
+// （FetchOpenPriceContext 的请求与 429 重试等待均感知 ctx）。旧实现只在
+// 两次调用之间检查 deadline，SDK 内 429 Retry-After 睡眠可让单次调用阻塞
+// 数分钟，实测事件写盘被拖 ~5 分钟（见 2026-08-17 排障记录）。
 func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start time.Time,
 	windowSec, twapLookbackSeconds int64, timeout time.Duration, needClose bool,
 	interval time.Duration) (open, close float64, ok bool) {
+	pollCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
 	deadline := time.Now().Add(timeout)
 	for {
 		// 先检查 deadline 再发起请求，避免超时后的多余调用
@@ -132,7 +139,7 @@ func pollOfficialPrice(ctx context.Context, client *sdk.PolymarketClient, start 
 		if wait <= 0 {
 			return 0, 0, false
 		}
-		open, close = client.FetchOpenPrice(sdk.BTC, start,
+		open, close = client.FetchOpenPriceContext(pollCtx, sdk.BTC, start,
 			start.Add(time.Duration(windowSec)*time.Second),
 			sdk.Fiveminute, true, int(twapLookbackSeconds))
 		if open > 0 && (!needClose || close > 0) {
