@@ -13,13 +13,20 @@ import (
 // 字段保留、修正行消失；孤立修正行保留在末尾；幂等（二次 compact 无变化）。
 func TestCompactDay_Merge(t *testing.T) {
 	dir := t.TempDir()
-	day := time.Now().UTC().Format("2006-01-02")
+	now := time.Now().UTC()
+	day := now.Format("2006-01-02")
+	// start_time 用今天真实窗口起点：事件/修正行按 start_time 日归文件，
+	// 用 1970 年代的伪造时间会落进别的日期文件
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	st1 := midnight.Add(30 * time.Minute).Unix()
+	st2 := midnight.Add(35 * time.Minute).Unix()
+	stOrphan := midnight.Add(40 * time.Minute).Unix()
 
 	// 两个事件 + 窗口 1 的修正 + 一个孤立修正（无对应事件）
-	ev1 := &Event{ConditionID: "c1", Slug: "s1", StartTime: 1000,
+	ev1 := &Event{ConditionID: "c1", Slug: "s1", StartTime: st1,
 		TwapOpenPrice: 64000, TwapClosePrice: 64030, CloseSource: "stream", Outcome: 0,
-		Ticks: []HFTick{{Ts: 1001000, Rem: 299}}}
-	ev2 := &Event{ConditionID: "c2", Slug: "s2", StartTime: 1300,
+		Ticks: []HFTick{{Ts: st1*1000 + 1000, Rem: 299}}}
+	ev2 := &Event{ConditionID: "c2", Slug: "s2", StartTime: st2,
 		TwapOpenPrice: 64030, TwapClosePrice: 64010, CloseSource: "stream", Outcome: 1}
 	if _, err := WriteUniqueEvent(dir, ev1); err != nil {
 		t.Fatalf("写事件1: %v", err)
@@ -28,14 +35,14 @@ func TestCompactDay_Merge(t *testing.T) {
 		t.Fatalf("写事件2: %v", err)
 	}
 	if _, err := WriteCorrection(dir, &SettlementCorrection{
-		EventType: "settlement_correction", StartTime: 1000,
+		EventType: "settlement_correction", StartTime: st1,
 		TwapOpenPrice: 64001, TwapClosePrice: 64041,
 		CloseSource: "official", Outcome: 0,
 	}); err != nil {
 		t.Fatalf("写修正: %v", err)
 	}
 	if _, err := WriteCorrection(dir, &SettlementCorrection{
-		EventType: "settlement_correction", StartTime: 1600, // 孤立
+		EventType: "settlement_correction", StartTime: stOrphan, // 孤立
 		TwapOpenPrice: 1, TwapClosePrice: 2, CloseSource: "official", Outcome: 1,
 	}); err != nil {
 		t.Fatalf("写孤立修正: %v", err)
@@ -60,11 +67,11 @@ func TestCompactDay_Merge(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[0]), &e1); err != nil {
 		t.Fatalf("事件1 解析失败: %v", err)
 	}
-	if e1.StartTime != 1000 || e1.TwapOpenPrice != 64001 || e1.TwapClosePrice != 64041 ||
+	if e1.StartTime != st1 || e1.TwapOpenPrice != 64001 || e1.TwapClosePrice != 64041 ||
 		e1.CloseSource != "official" || e1.Outcome != 0 {
 		t.Fatalf("事件1 修正未合并: %+v", e1)
 	}
-	if len(e1.Ticks) != 1 || e1.Ticks[0].Ts != 1001000 {
+	if len(e1.Ticks) != 1 || e1.Ticks[0].Ts != st1*1000+1000 {
 		t.Fatalf("事件1 原有字段应保留: %+v", e1)
 	}
 
@@ -72,7 +79,7 @@ func TestCompactDay_Merge(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &e2); err != nil {
 		t.Fatalf("事件2 解析失败: %v", err)
 	}
-	if e2.StartTime != 1300 || e2.CloseSource != "stream" {
+	if e2.StartTime != st2 || e2.CloseSource != "stream" {
 		t.Fatalf("事件2 不应被修改: %+v", e2)
 	}
 
@@ -80,7 +87,7 @@ func TestCompactDay_Merge(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[2]), &orphanLine); err != nil {
 		t.Fatalf("孤立修正解析失败: %v", err)
 	}
-	if orphanLine.StartTime != 1600 {
+	if orphanLine.StartTime != stOrphan {
 		t.Fatalf("孤立修正应保留: %+v", orphanLine)
 	}
 
@@ -91,11 +98,18 @@ func TestCompactDay_Merge(t *testing.T) {
 	}
 }
 
-// TestCompactDay_Empty 当日无数据文件时返回零值不报错。
+// TestCompactDay_Empty 当日无数据文件时返回零值不报错，且不留下 .lock 垃圾文件。
 func TestCompactDay_Empty(t *testing.T) {
 	dir := t.TempDir()
 	merged, orphan, err := CompactDay(dir, "2020-01-01")
 	if err != nil || merged != 0 || orphan != 0 {
 		t.Fatalf("空目录应返回零值: merged=%d orphan=%d err=%v", merged, orphan, err)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("无数据文件的 compact 不应留下任何文件: %v", entries)
 	}
 }

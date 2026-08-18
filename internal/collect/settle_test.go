@@ -31,10 +31,14 @@ func TestSettlementWorker_Flow(t *testing.T) {
 	defer cancel()
 	w.Start(ctx)
 
+	// start_time 用今天真实窗口起点：事件/修正行按 start_time 日归文件
+	now := time.Now().UTC()
+	st := time.Date(now.Year(), now.Month(), now.Day(), 0, 30, 0, 0, time.UTC).Unix()
+
 	ev := &Event{
 		ConditionID:    "cond1",
 		Slug:           "btc-updown-5m-1",
-		StartTime:      1000,
+		StartTime:      st,
 		TwapOpenPrice:  63900,
 		TwapClosePrice: 63950,
 		CloseSource:    "stream",
@@ -84,14 +88,14 @@ func TestSettlementWorker_Flow(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &corr); err != nil {
 		t.Fatalf("修正行解析失败: %v", err)
 	}
-	if corr.EventType != "settlement_correction" || corr.StartTime != 1000 ||
+	if corr.EventType != "settlement_correction" || corr.StartTime != st ||
 		corr.TwapOpenPrice != 64000 || corr.TwapClosePrice != 64100 ||
 		corr.Outcome != 0 || corr.CloseSource != "official" {
 		t.Fatalf("修正行内容不符: %+v", corr)
 	}
 
 	// 3. 同一窗口重复投递事件 → 被去重跳过（文件仍 2 行）
-	w.Submit(&Event{ConditionID: "cond1", Slug: "btc-updown-5m-1", StartTime: 1000}, true)
+	w.Submit(&Event{ConditionID: "cond1", Slug: "btc-updown-5m-1", StartTime: st}, true)
 	time.Sleep(50 * time.Millisecond)
 	data, _ = os.ReadFile(path)
 	if got := strings.Count(string(data), "\n"); got != 2 {
@@ -140,7 +144,11 @@ func TestSettlementWorker_SkipCorrection(t *testing.T) {
 	defer cancel()
 	w.Start(ctx)
 
-	w.Submit(&Event{ConditionID: "cond1", Slug: "s", StartTime: 1000,
+	// start_time 用今天真实窗口起点：事件按 start_time 日归文件
+	now := time.Now().UTC()
+	st := time.Date(now.Year(), now.Month(), now.Day(), 0, 30, 0, 0, time.UTC).Unix()
+
+	w.Submit(&Event{ConditionID: "cond1", Slug: "s", StartTime: st,
 		TwapOpenPrice: 64000, TwapClosePrice: 64030, CloseSource: "stream"}, false)
 
 	path := filepath.Join(dir, "events_"+time.Now().UTC().Format("2006-01-02")+".jsonl")

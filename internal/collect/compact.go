@@ -22,6 +22,16 @@ import (
 func CompactDay(dir, day string) (merged, orphan int, err error) {
 	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
 
+	// 数据文件不存在时直接返回，不创建 .lock（避免留下垃圾锁文件）。
+	// 先 stat 后加锁存在 TOCTOU 窗口：期间采集进程若新建了文件，本次
+	// compact 会跳过——可接受，compact 幂等可随时重跑。
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return 0, 0, nil // 当日无数据文件，无事可做
+		}
+		return 0, 0, fmt.Errorf("stat %s: %w", path, err)
+	}
+
 	lock, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return 0, 0, fmt.Errorf("open lock: %w", err)

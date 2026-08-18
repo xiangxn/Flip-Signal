@@ -83,6 +83,17 @@ func appendLine(f *os.File, v any) error {
 	return nil
 }
 
+// dayForStart 返回窗口起点所属 UTC 日。事件与修正行按窗口起点日归文件：
+// 跨午夜窗口（23:55 事件在窗口末落盘，官方修正分钟级延迟到达）若按写入
+// 时刻归日，事件与修正行会落进不同文件，compact 永远合并不上。start_time
+// 未设置时回退当前日（仅测试/异常构造场景，无窗口归属可依）。
+func dayForStart(startTime int64) string {
+	if startTime <= 0 {
+		return time.Now().UTC().Format("2006-01-02")
+	}
+	return time.Unix(startTime, 0).UTC().Format("2006-01-02")
+}
+
 // WriteUniqueEvent 将事件以 start_time 去重后追加到当日文件（跨进程安全）。
 //
 // 在 flock 独占锁内「扫描文件已有 start_time → 不存在才追加」，防止
@@ -94,7 +105,7 @@ func WriteUniqueEvent(dir string, ev *Event) (written bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create output dir: %w", err)
 	}
-	day := time.Now().UTC().Format("2006-01-02")
+	day := dayForStart(ev.StartTime)
 	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
 
 	f, release, err := openLocked(path)
@@ -124,11 +135,13 @@ func WriteUniqueEvent(dir string, ev *Event) (written bool, err error) {
 //
 // 同一窗口已存在修正行时跳过（written=false）。修正行与事件行同文件，
 // 分析侧按 start_time 合并覆盖事件行的流值口径字段。
+// 归日按修正行自身的 start_time（与 WriteUniqueEvent 一致），保证
+// 跨午夜窗口的事件与修正行落在同一文件。
 func WriteCorrection(dir string, corr *SettlementCorrection) (written bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create output dir: %w", err)
 	}
-	day := time.Now().UTC().Format("2006-01-02")
+	day := dayForStart(corr.StartTime)
 	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
 
 	f, release, err := openLocked(path)

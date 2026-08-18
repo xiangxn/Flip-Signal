@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,6 +16,13 @@ import (
 // 验证大行存在时查重扫描与追加仍正常。
 func TestWriteUniqueEvent_OversizedLine(t *testing.T) {
 	dir := t.TempDir()
+
+	// start_time 用今天真实窗口起点：事件按 start_time 日归文件，
+	// 伪造的 1970 时间会落进别的日期文件
+	now := time.Now().UTC()
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+	st1 := midnight.Add(30 * time.Minute).Unix()
+	st2 := midnight.Add(35 * time.Minute).Unix()
 
 	makeEvent := func(startTime int64) *Event {
 		ev := &Event{
@@ -46,15 +54,15 @@ func TestWriteUniqueEvent_OversizedLine(t *testing.T) {
 	}
 
 	// 第一个事件写入
-	if written, err := WriteUniqueEvent(dir, makeEvent(1)); err != nil || !written {
+	if written, err := WriteUniqueEvent(dir, makeEvent(st1)); err != nil || !written {
 		t.Fatalf("首个事件写入失败: written=%v err=%v", written, err)
 	}
 	// 第二个事件写入 —— 需扫描已有的大行，旧代码在此报 token too long
-	if written, err := WriteUniqueEvent(dir, makeEvent(2)); err != nil || !written {
+	if written, err := WriteUniqueEvent(dir, makeEvent(st2)); err != nil || !written {
 		t.Fatalf("第二个事件写入失败: written=%v err=%v", written, err)
 	}
 	// 重复事件被去重跳过
-	if written, err := WriteUniqueEvent(dir, makeEvent(1)); err != nil || written {
+	if written, err := WriteUniqueEvent(dir, makeEvent(st1)); err != nil || written {
 		t.Fatalf("重复事件应跳过: written=%v err=%v", written, err)
 	}
 
@@ -82,5 +90,41 @@ func TestWriteUniqueEvent_OversizedLine(t *testing.T) {
 	}
 	if lines != 2 {
 		t.Fatalf("期望 2 行，实际 %d", lines)
+	}
+}
+
+// TestWriteDayAttribution_CrossMidnight 回归测试：事件与修正行按窗口起点
+// 日归文件。跨午夜窗口（23:55 的事件在窗口末落盘、官方修正分钟级延迟
+// 到达）若按写入时刻归日，事件与修正行会落进不同文件，compact 永远
+// 合并不上——两者必须同归窗口起点日的文件。
+func TestWriteDayAttribution_CrossMidnight(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	yday := now.Add(-24 * time.Hour)
+	yMidnight := time.Date(yday.Year(), yday.Month(), yday.Day(), 0, 0, 0, 0, time.UTC)
+	st := yMidnight.Add(23*time.Hour + 55*time.Minute).Unix()
+
+	if _, err := WriteUniqueEvent(dir, &Event{ConditionID: "c", Slug: "s", StartTime: st}); err != nil {
+		t.Fatalf("写事件: %v", err)
+	}
+	if _, err := WriteCorrection(dir, &SettlementCorrection{
+		EventType: "settlement_correction", StartTime: st,
+		TwapOpenPrice: 1, TwapClosePrice: 2, CloseSource: "official",
+	}); err != nil {
+		t.Fatalf("写修正: %v", err)
+	}
+
+	path := filepath.Join(dir, "events_"+yday.Format("2006-01-02")+".jsonl")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("事件与修正应写入窗口起点日文件 %s: %v", path, err)
+	}
+	if got := strings.Count(string(data), "\n"); got != 2 {
+		t.Fatalf("期望 2 行（事件+修正同文件），实际 %d", got)
+	}
+	// 修正行不得写进今天的文件
+	todayPath := filepath.Join(dir, "events_"+now.Format("2006-01-02")+".jsonl")
+	if _, err := os.Stat(todayPath); !os.IsNotExist(err) {
+		t.Fatalf("跨午夜修正行不应写入今天文件 %s", todayPath)
 	}
 }
