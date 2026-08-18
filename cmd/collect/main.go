@@ -26,6 +26,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -89,13 +90,18 @@ func main() {
 	// 默认 false 与 OrderBookAdapter 一致。
 	monitor := sdk.NewMarketMonitor(cfg.SDK.Polymarket.ClobWSBaseURL, false, client, *customFeature)
 
-	// 订阅状态（重启恢复用）与当前 token 映射（last_trade_price → YES/NO）
+	// 订阅状态（重启恢复用）与当前 token 映射（last_trade_price → YES/NO）。
+	// prevYesTok/prevNoTok 保留上一窗口 token：窗口过渡期（步骤 5 换映射后）
+	// 上一窗口尾盘迟到的成交仍可路由进旧 bucketer（server 时戳越界会自动
+	// 丢弃），否则这些笔在 consumer 层就被当作陌生 token 丢掉。
 	var (
-		subMu    sync.RWMutex
-		subTokens []string
-		tokMu    sync.RWMutex
-		yesTok   string
-		noTok    string
+		subMu       sync.RWMutex
+		subTokens   []string
+		tokMu       sync.RWMutex
+		yesTok      string
+		noTok       string
+		prevYesTok  string
+		prevNoTok   string
 		// 当前窗口成交聚合器（last_trade_price goroutine 并发写）
 		currentBucketer atomic.Pointer[collect.TradeBucketer]
 		// 下一窗口市场预取缓存：窗口尾部异步预取的结果跨窗口迭代传递
@@ -158,7 +164,7 @@ func main() {
 					log.Printf("[Trade] last_trade_price 累计 %d（最近 ts=%d）", eventCount, trade.Timestamp)
 				}
 				tokMu.RLock()
-				yt, nt := yesTok, noTok
+				yt, nt, pyt, pnt := yesTok, noTok, prevYesTok, prevNoTok
 				tokMu.RUnlock()
 				b := currentBucketer.Load()
 				if b == nil {
@@ -170,8 +176,12 @@ func main() {
 					token = "YES"
 				case nt:
 					token = "NO"
+				case pyt:
+					token = "YES" // 上一窗口尾盘迟到笔（过渡期路由，桶边界校验兜底）
+				case pnt:
+					token = "NO"
 				default:
-					continue // 旧窗口迟到的笔
+					continue // 陌生 token（更早窗口的迟到笔）
 				}
 				bookMu.RLock()
 				var bb, ba float64
@@ -195,13 +205,19 @@ func main() {
 
 	// monitor Run 重启（复用 OrderBookAdapter 的重启模式）:
 	// Run 退出后 SDK 会清空内部订阅，需恢复本地订阅副本再重启。
+	// ⚠️ ctx 未取消时无条件重启（含 Run 干净退出 err==nil 的场景，
+	// 否则数据流会永久死亡——2026-08-18 review 修复）。
 	go func() {
 		for {
 			err := monitor.Run(ctx)
-			if err == nil || ctx.Err() != nil {
+			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("[Collect] ⚠️ MarketMonitor 异常退出: %v —— 5 秒后重启", err)
+			if err != nil {
+				log.Printf("[Collect] ⚠️ MarketMonitor 异常退出: %v —— 5 秒后重启", err)
+			} else {
+				log.Printf("[Collect] ⚠️ MarketMonitor 干净退出 —— 5 秒后重启")
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -215,21 +231,86 @@ func main() {
 	}()
 
 	// ── Chainlink TWAP-60（每 tick 采样）──
-	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC_60")
-	twapAdapter := feed.NewTwapAdapter(twapMonitor, "BTC", sdk.ChainlinkTwapWindowSixty)
-	twapAdapter.Start(ctx)
-	go func() {
-		for {
-			err := twapMonitor.Run(ctx)
-			if err == nil || ctx.Err() != nil {
-				return
+	// 适配器经 atomic 指针访问：新鲜度守护会在推送停滞时整体重建
+	// monitor+adapter（半开连接场景 SDK 内部重连探测不到——2026-08-18
+	// 实测 TWAP 流曾冻结近 2 小时，age 线性涨到 114 分钟）。
+	var twapAdapterPtr atomic.Pointer[feed.TwapAdapter]
+	startTwap := func() (stop func()) {
+		mctx, mcancel := context.WithCancel(ctx)
+		mon := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC_60")
+		ad := feed.NewTwapAdapter(mon, "BTC", sdk.ChainlinkTwapWindowSixty)
+		ad.Start(mctx)
+		twapAdapterPtr.Store(ad)
+		go func() {
+			for {
+				err := mon.Run(mctx)
+				if mctx.Err() != nil {
+					return
+				}
+				if err != nil {
+					log.Printf("[Collect] ⚠️ TWAP monitor 异常退出: %v —— 5 秒后重启", err)
+				} else {
+					log.Printf("[Collect] ⚠️ TWAP monitor 干净退出 —— 5 秒后重启")
+				}
+				select {
+				case <-mctx.Done():
+					return
+				case <-time.After(5 * time.Second):
+				}
 			}
-			log.Printf("[Collect] ⚠️ TWAP monitor 异常退出: %v —— 5 秒后重启", err)
+		}()
+		return mcancel
+	}
+	stopTwap := startTwap()
+
+	// TWAP 新鲜度守护：30s 检查一次，推送停滞超 60s 时强制重建连接
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-ticker.C:
+				if ad := twapAdapterPtr.Load(); ad != nil {
+					if _, age := ad.Latest(); age > twapStaleThreshold.Milliseconds() {
+						log.Printf("[Collect] ⚠️ TWAP 推送停滞 %ds（阈值 %ds），强制重建连接",
+							age/1000, twapStaleThreshold.Milliseconds()/1000)
+						stopTwap()
+						stopTwap = startTwap()
+					}
+				}
 			}
+		}
+	}()
+
+	// ── 结算修正队列：写盘立即、官方价后台修正（见 internal/collect/settle.go）──
+	settleCfg := collect.DefaultSettlementConfig()
+	settlementWorker := collect.NewSettlementWorker(*outputDir,
+		func(ctx context.Context, start time.Time) (float64, float64, bool) {
+			open, close := client.FetchOpenPriceContext(ctx, sdk.BTC, start,
+				start.Add(collect.WindowSec*time.Second), sdk.Fiveminute, true,
+				int(sdk.ChainlinkTwapWindowSixty))
+			return open, close, open > 0 && close > 0
+		}, settleCfg)
+	settlementWorker.Start(ctx)
+
+	// 待定稿事件：步骤 7 只封存 ticks，下一轮步骤 6 安装新 bucketer 前
+	// 补拍 trades 再提交 —— 捕获窗口边界迟到的成交（旧实现步骤 7 到下一轮
+	// 步骤 6 之间 ~1s 的尾盘成交被丢弃，且快照截断在窗口结束前 1s）。
+	var (
+		pendingEvent      *collect.Event
+		pendingCorrection bool
+	)
+	defer func() {
+		// 关闭时补交未定稿窗口（部分窗口数据，尽力而为）
+		if pendingEvent != nil {
+			if b := currentBucketer.Load(); b != nil {
+				pendingEvent.Trades = b.Snapshot()
+			}
+			settlementWorker.Submit(pendingEvent, pendingCorrection)
+			log.Printf("[Collect] 关闭前补交未定稿窗口 %d（trades=%d）",
+				pendingEvent.StartTime, len(pendingEvent.Trades))
 		}
 	}()
 
@@ -317,7 +398,7 @@ func main() {
 		}
 
 		// 后台轮询官方 TWAP 开盘价（10s 间隔，最长 30s），不阻塞主循环
-		twapOpen, _ := twapAdapter.Latest()
+		twapOpen, _ := twapAdapterPtr.Load().Latest()
 		officialOpenCh := make(chan float64, 1)
 		go func() {
 			officialOpen, ok := feed.PollOfficialOpenPrice(ctx, client, nextStart,
@@ -376,6 +457,18 @@ func main() {
 		}
 		conditionID := marketData.Get("conditionId").String()
 		yesTokenID, noTokenID := collect.ParseMarketTokens(marketData)
+		if yesTokenID == "" || noTokenID == "" {
+			// gamma 结构异常或市场未上架 token：订阅空 token 会静默采一整窗空数据
+			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空（YES=%q NO=%q），跳过本窗口",
+				slug, yesTokenID, noTokenID)
+			waitTo := nextStart.Add(collect.WindowSec * time.Second)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Until(waitTo)):
+			}
+			continue
+		}
 		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s", conditionID, yesTokenID, noTokenID)
 
 		// 步骤 5: 订阅切换（先退订旧 token，保留副本供 monitor 重启恢复）
@@ -388,6 +481,7 @@ func main() {
 		monitor.SubscribeTokens(yesTokenID, noTokenID)
 
 		tokMu.Lock()
+		prevYesTok, prevNoTok = yesTok, noTok
 		yesTok = yesTokenID
 		noTok = noTokenID
 		tokMu.Unlock()
@@ -397,6 +491,12 @@ func main() {
 		bookMu.Unlock()
 
 		// 步骤 6: 窗口状态
+		// 先定稿上一窗口（补拍边界迟到的尾盘成交）再安装新 bucketer。
+		if pendingEvent != nil {
+			pendingEvent.Trades = currentBucketer.Load().Snapshot()
+			settlementWorker.Submit(pendingEvent, pendingCorrection)
+			pendingEvent, pendingCorrection = nil, false
+		}
 		currentBucketer.Store(collect.NewTradeBucketer(nextStart.UnixMilli()))
 		endTime := nextStart.Add(collect.WindowSec * time.Second)
 		var ticks []collect.HFTick
@@ -414,6 +514,40 @@ func main() {
 		nextPrefetched := false
 
 		ticker := time.NewTicker(time.Second)
+
+		// sampleTick 采集一个 1s 快照行（tick 定时器与窗口终点补采共用）。
+		// P0-1: 先读累计（价格/深度快照 + 自上次 ConsumeVolume 以来的
+		// 买卖量与成交笔数），再重置 —— bd 中即本秒增量。
+		sampleTick := func(tickTime time.Time) {
+			rem := max(int(endTime.Sub(tickTime).Seconds()), 0)
+			bd := binance.LatestData()
+			binance.ConsumeVolume()
+
+			// P0-2: PM 盘口 1s 快照
+			bookMu.RLock()
+			yb, nb := yesBook, noBook
+			bookMu.RUnlock()
+
+			// TWAP 采样
+			twPrice, twAge := twapAdapterPtr.Load().Latest()
+
+			ticks = append(ticks, collect.HFTick{
+				Ts:  tickTime.UnixMilli(),
+				Rem: rem,
+				Bin: collect.BinTick{
+					Price:   bd.Price,
+					BuyVol:  bd.BuyVolume,
+					SellVol: bd.SellVolume,
+					Ticks:   int(bd.TradeCount),
+					Bid5:    bd.BidDepth5,
+					Ask5:    bd.AskDepth5,
+					Bid10:   bd.BidDepth10,
+					Ask10:   bd.AskDepth10,
+				},
+				PM:   collect.MakePMTick(yb, nb),
+				Twap: collect.TwapTick{Price: twPrice, AgeMs: twAge},
+			})
+		}
 
 	collectLoop:
 		for {
@@ -436,133 +570,74 @@ func main() {
 				}
 
 			case tickTime := <-ticker.C:
-				rem := int(endTime.Sub(tickTime).Seconds())
-				if rem <= 0 {
+				if !tickTime.Before(endTime) {
 					ticker.Stop()
 					break collectLoop
 				}
+				sampleTick(tickTime)
 
-				// P0-1: Binance 1s 聚合
-				// 先读累计（价格/深度快照 + 自上次 ConsumeVolume 以来的
-				// 买卖量与成交笔数），再重置 —— bd 中即本秒增量。
-				bd := binance.LatestData()
-				binance.ConsumeVolume()
-
-				// P0-2: PM 盘口 1s 快照
-				bookMu.RLock()
-				yb, nb := yesBook, noBook
-				bookMu.RUnlock()
-
-				// TWAP 采样
-				twPrice, twAge := twapAdapter.Latest()
-
-				ticks = append(ticks, collect.HFTick{
-					Ts:  tickTime.UnixMilli(),
-					Rem: rem,
-					Bin: collect.BinTick{
-						Price:   bd.Price,
-						BuyVol:  bd.BuyVolume,
-						SellVol: bd.SellVolume,
-						Ticks:   int(bd.TradeCount),
-						Bid5:    bd.BidDepth5,
-						Ask5:    bd.AskDepth5,
-						Bid10:   bd.BidDepth10,
-						Ask10:   bd.AskDepth10,
-					},
-					PM: collect.MakePMTick(yb, nb),
-					Twap: collect.TwapTick{Price: twPrice, AgeMs: twAge},
-				})
-
-					// 窗口尾部：异步预取下一窗口市场（只触发一次），
-					// 窗口结束即可无缝订阅下一窗口
-					if !nextPrefetched && rem <= int(prefetchLead/time.Second) {
-						nextPrefetched = true
-						nextSlug := fmt.Sprintf("%s-%d", *slugPrefix,
-							nextStart.Add(collect.WindowSec*time.Second).Unix())
-						go func() {
-							m, e := client.FetchMarketBySlug(nextSlug)
-							nextMarketMu.Lock()
-							nextMarketCache, nextMarketErr, nextMarketSlug = m, e, nextSlug
-							nextMarketMu.Unlock()
-							if e != nil {
-								log.Printf("[Cycle] 下一窗口预取失败: %v（边界后兜底）", e)
-							} else {
-								log.Printf("[Cycle] ✅ 下一窗口市场预取成功 %s", nextSlug)
-							}
-						}()
-					}
-			}
-		}
-
-		// 步骤 7: 官方 TWAP 结算价修正 —— 异步获取，不阻塞主循环进入下一窗口。
-		// 同步轮询 ~9-12s 会让下一窗口的订阅与首 tick 延迟，每窗口损失
-		// 前 ~10 秒数据。窗口数据先快照，官方收盘价到达后（或超时回退
-		// 流采样）在后台写入事件；下一窗口事件至少 300s 后才写入，
-		// 写入顺序天然保持。
-		snapTicks := ticks
-		snapTrades := currentBucketer.Load().Snapshot()
-		currentBucketer.Store(nil)
-		finalTwapOpen := twapOpen
-		// 流采样收盘价作为 close 初值（窗口结束时刻的 TWAP-60 流值，与官方
-		// 结算同源）：官方接口有分钟级延迟（有时数十分钟不产出），先填流值，
-		// 60s 内官方到达则覆盖，否则以流值定稿不再管。
-		twapCloseStream, _ := twapAdapter.Latest()
-		if twapCloseStream == 0 {
-			twapCloseStream = finalTwapOpen
-		}
-
-		go func() {
-			// 官方收盘 5s 间隔 × 60s 上限（异步执行，不阻塞主循环）
-			twapClose := twapCloseStream
-			outcome := 1 // Down
-			closeSource := "stream"
-			if twapCloseStream >= finalTwapOpen {
-				outcome = 0 // Up
-			}
-			if officialOpen, officialClose, ok := feed.PollOfficialClosePrice(ctx, client, nextStart,
-				collect.WindowSec, sdk.ChainlinkTwapWindowSixty, 60*time.Second); ok {
-				finalTwapOpen = officialOpen
-				twapClose = officialClose
-				closeSource = "official"
-				if officialClose >= officialOpen {
-					outcome = 0 // Up
+				// 窗口尾部：异步预取下一窗口市场（只触发一次），
+				// 窗口结束即可无缝订阅下一窗口
+				if !nextPrefetched && time.Until(endTime) <= prefetchLead {
+					nextPrefetched = true
+					nextSlug := fmt.Sprintf("%s-%d", *slugPrefix,
+						nextStart.Add(collect.WindowSec*time.Second).Unix())
+					go func() {
+						m, e := client.FetchMarketBySlug(nextSlug)
+						nextMarketMu.Lock()
+						nextMarketCache, nextMarketErr, nextMarketSlug = m, e, nextSlug
+						nextMarketMu.Unlock()
+						if e != nil {
+							log.Printf("[Cycle] 下一窗口预取失败: %v（边界后兜底）", e)
+						} else {
+							log.Printf("[Cycle] ✅ 下一窗口市场预取成功 %s", nextSlug)
+						}
+					}()
 				}
-			} else if ctx.Err() == nil {
-				log.Printf("[Event] ⚠️ %s 官方结算价 60s 内未产出，沿用流采样（官方延迟可达数十分钟）", conditionID)
 			}
-			if ctx.Err() != nil {
-				log.Printf("[Event] %s 正在关闭，丢弃未写入窗口", conditionID)
-				return
-			}
+		}
+		// 补采窗口终点快照（rem=0）：覆盖最后一秒的成交量增量。
+		// 旧实现 rem 截断在窗口结束前 1s 提前 break，最后一秒数据缺失
+		// （实测每窗口 298 ticks 而非 300）。
+		sampleTick(endTime)
 
-			event := collect.Event{
-				ConditionID:    conditionID,
-				Slug:           slug,
-				StartTime:      nextStart.Unix(),
-				TwapOpenPrice:  finalTwapOpen,
-				TwapClosePrice: twapClose,
-				CloseSource:    closeSource,
-				Outcome:        outcome,
-				BinanceOpen:    binanceOpen,
-				Ticks:          snapTicks,
-				Trades:         snapTrades,
-			}
+		// 步骤 7: 窗口封存（ticks 部分）→ 待下一轮步骤 6 补拍 trades 后
+		// 提交 SettlementWorker。是否走官方修正由阈值判定
+		// （NeedsOfficialCorrection）：推送新鲜度不足或幅度太小
+		// （outcome 由噪声决定）时才后台轮询官方开/收盘，
+		// 否则流采样直接定稿（误差不足以翻转 outcome，见 settle.go）。
+		// ⚠️ 不在此处 Store(nil) bucketer：旧 bucketer 保留到下一轮步骤 6，
+		// 边界迟到的尾盘成交仍可入桶并被 snapshot 捕获。
+		// 流采样收盘价作为 close 初值（窗口结束时刻的 TWAP-60 流值，与官方
+		// 结算同源）
+		twapCloseStream, twapCloseAgeMs := twapAdapterPtr.Load().Latest()
+		if twapCloseStream == 0 {
+			twapCloseStream = twapOpen
+		}
+		outcome := 1 // Down
+		if twapCloseStream >= twapOpen {
+			outcome = 0 // Up
+		}
 
-			outcomeLabel := "DOWN/Flat"
-			if outcome == 0 {
-				outcomeLabel = "UP"
-			}
-			log.Printf("[Event] %s 完成 — twap open=%.2f close=%.2f outcome=%s | ticks=%d trades_agg=%d",
-				conditionID, finalTwapOpen, twapClose, outcomeLabel, len(snapTicks), len(snapTrades))
-
-			// 去重写入（flock 跨进程安全，防重启/多实例重复写同一窗口）
-			written, err := collect.WriteUniqueEvent(*outputDir, &event)
-			if err != nil {
-				log.Printf("[Writer] 写入失败: %v", err)
-			} else if !written {
-				log.Printf("[Event] ⚠️ %s 重复窗口，跳过写入", conditionID)
-			}
-		}()
+		pendingEvent = &collect.Event{
+			ConditionID:    conditionID,
+			Slug:           slug,
+			StartTime:      nextStart.Unix(),
+			TwapOpenPrice:  twapOpen,
+			TwapClosePrice: twapCloseStream,
+			CloseSource:    "stream",
+			Outcome:        outcome,
+			BinanceOpen:    binanceOpen,
+			Ticks:          ticks,
+		}
+		pendingCorrection = collect.NeedsOfficialCorrection(
+			twapCloseAgeMs, twapOpen, twapCloseStream,
+			settleCfg.MinRange, settleCfg.MaxStreamAgeMs)
+		if !pendingCorrection {
+			log.Printf("[Settle] %s 流值定稿 |close-open|=$%.2f age=%dms（阈值 $%.0f/%dms）",
+				conditionID, twapCloseStream-twapOpen, twapCloseAgeMs,
+				settleCfg.MinRange, settleCfg.MaxStreamAgeMs)
+		}
 	}
 }
 
@@ -618,8 +693,7 @@ func loadConfig() *appConfig {
 
 // parseFloat 解析价格/数量字符串，失败返回 0（SDK last_trade_price 字段为字符串）。
 func parseFloat(s string) float64 {
-	var f float64
-	fmt.Sscanf(s, "%f", &f)
+	f, _ := strconv.ParseFloat(s, 64)
 	return f
 }
 
@@ -627,3 +701,7 @@ func parseFloat(s string) float64 {
 // FetchMarketBySlug 并缓存结果（市场在窗口开始前已上架 gamma）。
 // 边界一到用缓存立即订阅新市场，平滑过渡到下一个窗口的采集。
 const prefetchLead = 20 * time.Second
+
+// twapStaleThreshold 是 TWAP 推送停滞阈值：age 超过该值（60s）触发
+// 新鲜度守护强制重建连接（正常推送间隔 ~2s，冻结场景 age 无限增长）。
+const twapStaleThreshold = 60 * time.Second

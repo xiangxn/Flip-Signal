@@ -6,6 +6,8 @@
 // 写入 data/btc/（启动前须把旧 5s 快照目录移走，见文档 §3.1 警告）。
 package collect
 
+import "time"
+
 // BinTick 是 1 秒 Binance 聚合行（P0-1）。
 type BinTick struct {
 	Price    float64 `json:"price"`     // 本秒最新价
@@ -66,6 +68,54 @@ type TradeAgg struct {
 	LastPrice float64 `json:"last_price"`
 	BestBid   float64 `json:"best_bid"`
 	BestAsk   float64 `json:"best_ask"`
+}
+
+// SettlementCorrection 是官方结算价产出后对已落盘事件的修正行。
+//
+// 事件在窗口结束时立即以流采样口径落盘（close_source=stream），官方
+// open/close 的产出延迟为分钟级（60s 轮询实测 142/142 未命中），由
+// SettlementWorker 后台轮询，到达后追加修正行（与事件行同文件）。
+// 分析侧按 start_time 合并覆盖；EventType 区分行类型。
+type SettlementCorrection struct {
+	EventType      string  `json:"event_type"` // 恒为 "settlement_correction"
+	StartTime      int64   `json:"start_time"`
+	TwapOpenPrice  float64 `json:"twap_open_price"`
+	TwapClosePrice float64 `json:"twap_close_price"`
+	CloseSource    string  `json:"close_source"` // "official"
+	Outcome        int     `json:"outcome"`      // 0=Up 1=Down（官方口径）
+}
+
+// SettlementConfig 是结算修正队列的参数。
+type SettlementConfig struct {
+	// PollInterval 官方价轮询间隔（默认 20s，附 0-2s 抖动避免多窗同拍）
+	PollInterval time.Duration
+	// MaxWait 单窗修正的最长等待（默认 55 分钟；官方收盘实测延迟为分钟级，
+	// 偶尔数十分钟。到期放弃，事件保留流值口径）
+	MaxWait time.Duration
+	// MaxConcurrent 并发修正轮询上限（默认 8；窗口 5 分钟一个，MaxWait 55 分钟
+	// 时最多 11 窗在途，8 并发 + FIFO 足够）
+	MaxConcurrent int
+	// MaxStreamAgeMs 流采样新鲜度上限（默认 5000ms）：窗口结束时 TWAP 推送
+	// age 超过该值（覆盖流冻结/WS 中断场景）事件必须走官方修正
+	MaxStreamAgeMs int64
+	// MinRange 官方修正的幅度阈值（默认 15 美元）：|close-open| 低于该值时
+	// outcome 由噪声决定，必须走官方修正；高于该值时流采样相对官方边界值的
+	// 量化误差（TWAP-60 推送 ~2s 间隔，142 窗实测 2s 移动 p99=$1.82）不足以
+	// 翻转 outcome，直接以流值定稿省去官方轮询。
+	// 标定：MinRange=$15 → 约 66% 窗口跳过修正（7σ outcome 安全边际），
+	// 被修正窗口的幅度特征误差 <13%。
+	MinRange float64
+}
+
+// DefaultSettlementConfig 返回结算修正队列的默认参数。
+func DefaultSettlementConfig() SettlementConfig {
+	return SettlementConfig{
+		PollInterval:   20 * time.Second,
+		MaxWait:        55 * time.Minute,
+		MaxConcurrent:  8,
+		MaxStreamAgeMs: 5000,
+		MinRange:       15,
+	}
 }
 
 // Event 是每个 5 分钟窗口的完整记录（数据格式 v2 顶层结构）。

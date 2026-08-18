@@ -104,9 +104,44 @@ data/btc/                          # 新格式 v2 输出目录
 }
 ```
 
-⚠️ **trades 不落原始逐笔数据**（数据量过大）：price_change 在内存中按
+⚠️ **trades 不落原始逐笔数据**（数据量过大）：last_trade_price 在内存中按
 token × 秒 聚合，只落聚合行。分析所需的主动买卖不平衡（OFI）、大单占比、
-vwap 均可从聚合行恢复；hash/event_ts 等逐笔字段不保留。
+vwap 均可从聚合行恢复；transaction_hash 仅用于窗口内去重（WS 重连重放防护），
+不保留。
+
+⚠️ **成交流用 last_trade_price，不是 price_change**（2026-08-18 数据审计）：
+price_change 通道实测是挂单流（每条消息 = 一对镜像挂单，YES buy + NO sell
+同 size、价格互补），聚合后 n_buy≡n_sell 恒等、方向信息被抹平。
+
+### 3.2.1 结算修正行（2026-08-18 新增）
+
+事件在窗口结束时**立即以流采样口径落盘**（`close_source: "stream"`），
+官方 open/close 的产出延迟为分钟级（60s 轮询实测 142/142 未命中），由
+SettlementWorker（`internal/collect/settle.go`）后台轮询，到达后**追加**
+修正行（与事件行同文件，按 `start_time` 覆盖合并，`event_type` 区分行类型）：
+
+```json
+{"event_type":"settlement_correction","start_time":1785957300,
+ "twap_open_price":62834.65,"twap_close_price":62738.22,
+ "close_source":"official","outcome":1}
+```
+
+- 事件行照常按 `start_time` 去重；修正行按 `event_type + start_time` 去重
+- 分析侧（python `load_events`）先按行读取：`event_type == "settlement_correction"`
+  的行合并覆盖到同 `start_time` 的事件行，不产生新事件
+- 单窗修正轮询：20s 间隔（+0-2s 抖动）× 最长 55 分钟，并发上限 8
+- 写盘延迟归零：窗口结束 → 队列 → 立即落盘（进程重启不丢已采集窗口）
+
+**修正判定阈值（流值定稿优化，2026-08-18）**：并非所有窗口都需要官方修正。
+窗口结束时按 `NeedsOfficialCorrection` 判定：① 收盘时刻 TWAP 推送 age >
+5s（含流冻结）→ 必须修正；② `|close-open| < $15`（outcome 由噪声决定）→
+必须修正。否则流采样直接定稿（流值相对官方边界值的量化误差 = TWAP-60 在
+~2s 推送间隔内的移动，142 窗实测 p99=$1.82，不足以翻转 outcome）。实测
+约 66% 窗口跳过修正（官方收盘延迟探针实测 +68s，恰好超出旧 60s 预算）。
+
+**日终 compact**：`go run ./cmd/compact`（默认昨天，`-all` 全部）把修正行
+合并进事件行（官方口径覆盖流值口径），temp+rename 原子重写，与采集进程
+经 `.lock` 锁文件互斥，可随时重跑（幂等）。compact 后文件恢复"一行一事件"。
 
 ### 3.3 数据量估算
 

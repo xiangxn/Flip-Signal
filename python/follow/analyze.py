@@ -29,12 +29,25 @@ from scipy.stats import chi2_contingency
 
 def load_events(data_dir: str) -> list[dict]:
     events = []
+    corrections = {}
     for path in sorted(Path(data_dir).glob("events_*.jsonl")):
         with open(path) as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    events.append(json.loads(line))
+                if not line:
+                    continue
+                rec = json.loads(line)
+                if rec.get("event_type") == "settlement_correction":
+                    corrections[rec["start_time"]] = rec
+                else:
+                    events.append(rec)
+    # 结算修正行按 start_time 覆盖合并（官方 open/close/outcome 延迟到达后追加，
+    # 见 internal/collect/settle.go；文件内行序与事件序无关，按 start_time 对齐）
+    if corrections:
+        for e in events:
+            corr = corrections.get(e["start_time"])
+            if corr:
+                e.update({k: v for k, v in corr.items() if k != "event_type"})
     events.sort(key=lambda e: e["start_time"])
     for i, e in enumerate(events):
         prev = []
