@@ -33,7 +33,7 @@ type Record struct {
 	Fill         float64 `json:"fill"`                    // 对侧真实 ask@+10s（纸面/实盘口径）
 	FillComp     float64 `json:"fill_comp"`               // 互补价 1 - 触发侧bid@+10s（回测口径）
 	Shares       float64 `json:"shares"`                  // stake/fill（仅 ok=true）
-	Stake        float64 `json:"stake,omitempty"`         // 每笔投入 USDC（仅 ok=true，结算 P&L 基准）
+	Stake        float64 `json:"stake,omitempty"`         // 每笔投入 USDC（结算 P&L 基准；全部行记录，失败行无 P&L）
 	OK           bool    `json:"ok"`                      // 是否通过 C1/C2
 	RejectReason string  `json:"reject_reason,omitempty"` // 未通过原因
 	BookLatMs    int64   `json:"book_latency_ms,omitempty"`
