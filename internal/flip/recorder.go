@@ -228,13 +228,14 @@ func (r *Recorder) Crosses(limit int) []*Record {
 	return all
 }
 
-// Signals 返回全部信号（ok=true，含已结算与待结算）。
+// Signals 返回全部信号（ok=true，含已结算与待结算），按时间倒序。
 func (r *Recorder) Signals() []*Record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	out := make([]*Record, 0, len(r.resolved)+len(r.pending))
 	out = append(out, r.resolved...)
 	out = append(out, r.pending...)
+	sort.Slice(out, func(i, j int) bool { return out[i].Ts > out[j].Ts })
 	return out
 }
 

@@ -1,5 +1,7 @@
 package flip
 
+import "sync"
+
 // Engine 是「自信崩溃」策略状态机（1s tick 粒度）。
 //
 // 状态流转（与回测 extract_cross 口径 1:1，见 docs/paper_plan_2026-08-31.md §3）:
@@ -12,6 +14,9 @@ package flip
 //   - 盘口缺失（bid/ask=0）时跳过信号检查（数据质量问题，非规则否决）
 //   - 整窗持续跟踪两侧穿越标记（cls 类别诊断用，不影响信号判定）
 type Engine struct {
+	// mu 保护引擎状态: 主循环写（ProcessTick/Reset/Finalize），Dashboard 读
+	// （State/Config 轮询）。1s tick 粒度下锁开销可忽略。
+	mu    sync.RWMutex
 	cfg   Config
 	state engineState
 
@@ -42,13 +47,23 @@ func NewEngine(cfg Config) *Engine {
 }
 
 // Config 返回引擎配置副本。
-func (e *Engine) Config() Config { return e.cfg }
+func (e *Engine) Config() Config {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.cfg
+}
 
 // State 返回当前状态机标签（Dashboard 用）。
-func (e *Engine) State() string { return e.state.String() }
+func (e *Engine) State() string {
+	e.mu.RLock()
+	defer e.mu.RUnlock()
+	return e.state.String()
+}
 
 // Reset 开始新事件（新 5 分钟窗口）。
 func (e *Engine) Reset() {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	e.state = stateWatching
 	e.upAbove, e.downAbove = false, false
 	e.upCrossed, e.downCrossed = false, false
@@ -60,6 +75,8 @@ func (e *Engine) Reset() {
 // ProcessTick 处理一条 1s tick。返回本次 tick 产出的穿越观测（判定完成的成功
 // 或失败观测），无产出返回 nil。窗口结束后（Finalize 前）仍可调用补判定。
 func (e *Engine) ProcessTick(t Tick) *Cross {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	// Done 状态: 只更新整窗穿越标记，不再检测（回测每事件仅首个观测）
 	if e.state == stateDone {
 		e.trackCrossed(t)
@@ -109,6 +126,8 @@ func (e *Engine) ProcessTick(t Tick) *Cross {
 // Finalize 结束当前事件，返回类别信息（cls/穿越观测）。
 // 若仍处于 Confirming（数据断流导致确认 tick 缺失），用 lastTick 补判定。
 func (e *Engine) Finalize(lastTick Tick) eventResult {
+	e.mu.Lock()
+	defer e.mu.Unlock()
 	if e.state == stateConfirming {
 		// 确认 tick 未到齐即窗口结束: 用最后已知 tick 判定（与回测数组截断等价）
 		e.decide(lastTick)
@@ -132,7 +151,7 @@ func (e *Engine) decide(t Tick) *Cross {
 	otherAsk := e.sideAsk(e.other(side), t) // fill: 对侧真实 ask@+10s
 
 	c := &Cross{
-		Ts:         t.Ts,
+		Ts:         p.ts, // 穿越时刻（回测 trades 口径），非确认时刻
 		Side:       side,
 		Rem:        p.rem,
 		TriggerBid: p.triggerBid,

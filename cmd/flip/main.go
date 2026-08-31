@@ -356,7 +356,7 @@ func main() {
 
 				// 引擎驱动（穿越/确认/判定）
 				if c := engine.ProcessTick(lastTick); c != nil {
-					handleCross(c, runtime)
+					handleCross(c, runtime, cfg.TriggerThreshold)
 				}
 				if rem == 0 {
 					ticker.Stop()
@@ -449,7 +449,7 @@ func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 }
 
 // handleCross 处理引擎产出的穿越判定（成功或失败）。
-func handleCross(c *flip.Cross, rt *runtimeState) {
+func handleCross(c *flip.Cross, rt *runtimeState, triggerThreshold float64) {
 	if !c.OK {
 		log.Printf("[Flip] 穿越否决: side=%s trigger=%.3f post_end=%.3f reason=%s",
 			c.Side, c.TriggerBid, c.PostEnd, c.RejectReason)
@@ -462,7 +462,7 @@ func handleCross(c *flip.Cross, rt *runtimeState) {
 		return
 	}
 	log.Printf("[Flip] 🎯 SIGNAL: %s>%.2f C1(%.3f) C2(%.3f) fill=%.3f shares=%.1f | status=%s avg_fill=%.3f",
-		c.Side, c.TriggerBid, c.TriggerBid, c.PostEnd, c.Fill, c.Shares,
+		c.Side, triggerThreshold, c.TriggerBid, c.PostEnd, c.Fill, c.Shares,
 		res.Status, res.AvgFillPrice)
 }
 

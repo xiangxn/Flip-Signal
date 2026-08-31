@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"sort"
 	"time"
 
 	"github.com/necklace/flip-signal/internal/flip"
@@ -103,11 +102,9 @@ func (s *State) handleCrosses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, mapRecords(records))
 }
 
-// handleSignals 返回信号列表（ok=true，含 P&L，时间倒序）。
+// handleSignals 返回信号列表（ok=true，含 P&L，recorder 已按时间倒序）。
 func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
-	records := s.recorder.Signals()
-	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
-	writeJSON(w, mapRecords(records))
+	writeJSON(w, mapRecords(s.recorder.Signals()))
 }
 
 // handleConfig 返回当前策略配置（前端展示标定参数）。

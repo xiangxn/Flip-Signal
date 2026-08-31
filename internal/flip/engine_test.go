@@ -105,6 +105,7 @@ func TestEngine_ConfirmAndSignal(t *testing.T) {
 	cfg := e.Config()
 	// 穿越 0.75 > 0.73 (C1✓)，确认 tick post_end 0.62 ≤ 0.66 (C2✓)
 	seq := crossingSeq(0.62, cfg.ConfirmSec)
+	seq[0].Ts = 1788183600000 // 固定穿越时刻（其余 tick Ts 由 mkTick 实时生成）
 	outs := run(e, seq)
 	if len(outs) != 1 {
 		t.Fatalf("应产出 1 个观测, got %d", len(outs))
@@ -115,6 +116,10 @@ func TestEngine_ConfirmAndSignal(t *testing.T) {
 	}
 	if c.Side != "up" || c.TriggerBid != 0.75 || c.PostEnd != 0.62 {
 		t.Fatalf("字段错误: %+v", c)
+	}
+	// Ts 必须是穿越时刻（非确认 tick 时刻），与回测 trades 口径一致
+	if c.Ts != seq[0].Ts {
+		t.Fatalf("Ts 应为穿越时刻 %d, got %d", seq[0].Ts, c.Ts)
 	}
 	// fill = 对侧 ask@+10s = 1 - 0.10 = 0.90; fill_comp = 1 - 0.62 = 0.38
 	if c.Fill != 0.90 || c.FillComp != 0.38 {
