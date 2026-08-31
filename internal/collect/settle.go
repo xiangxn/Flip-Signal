@@ -107,8 +107,16 @@ type queueItem struct {
 // Submit 投递一个已定稿（流值口径）的事件。窗口结束顺序即投递顺序。
 // needsCorrection=true 时后台轮询官方开/收盘并追加修正行；
 // false 时流采样值直接定稿（幅度/新鲜度满足阈值，见 NeedsOfficialCorrection）。
+//
+// worker 已退出（ctx 取消后排空队列即退出）时不再入队：此时队列无消费者，
+// 阻塞发送会让调用方（如关闭路径）永久挂起，事件记录日志后丢弃。
 func (w *SettlementWorker) Submit(ev *Event, needsCorrection bool) {
-	w.queue <- queueItem{ev: ev, needsCorrection: needsCorrection}
+	item := queueItem{ev: ev, needsCorrection: needsCorrection}
+	select {
+	case w.queue <- item:
+	case <-w.done:
+		log.Printf("[Settle] ⚠️ worker 已退出，丢弃待写事件 %s", ev.ConditionID)
+	}
 }
 
 // Done 返回 worker 退出信号（测试/优雅关闭用）。

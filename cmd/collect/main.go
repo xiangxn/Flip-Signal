@@ -81,8 +81,20 @@ func main() {
 	}
 	binance := feed.NewBinanceAdapterWithConfig(binanceCfg)
 	go func() {
-		if err := binance.Start(ctx); err != nil {
-			log.Printf("[Collect] Binance 启动失败: %v", err)
+		// 初始拨号失败需重试：Start 仅在首拨失败时返回错误（成功后的断线
+		// 由 runReadLoop 自愈重连），不重试的话整个进程生命周期内
+		// Binance 数据流都是死的（仅启动时网络抖动即全损）。
+		for {
+			err := binance.Start(ctx)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			log.Printf("[Collect] Binance 启动失败: %v —— 5 秒后重试", err)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(5 * time.Second):
+			}
 		}
 	}()
 
@@ -304,14 +316,21 @@ func main() {
 		pendingCorrection bool
 	)
 	defer func() {
-		// 关闭时补交未定稿窗口（部分窗口数据，尽力而为）
+		// 关闭时补交未定稿窗口（部分窗口数据，尽力而为）。
+		// 不走 Submit：ctx 取消后 worker 随时可能已排空队列退出，阻塞入队
+		// 会让关闭流程永久挂起；直接落盘（WriteUniqueEvent 自带 flock 去重，
+		// 与 worker 并发写安全）。
 		if pendingEvent != nil {
 			if b := currentBucketer.Load(); b != nil {
 				pendingEvent.Trades = b.Snapshot()
 			}
-			settlementWorker.Submit(pendingEvent, pendingCorrection)
-			log.Printf("[Collect] 关闭前补交未定稿窗口 %d（trades=%d）",
-				pendingEvent.StartTime, len(pendingEvent.Trades))
+			if _, err := collect.WriteUniqueEvent(*outputDir, pendingEvent); err != nil {
+				log.Printf("[Collect] ⚠️ 关闭前补交未定稿窗口 %d 失败: %v",
+					pendingEvent.StartTime, err)
+			} else {
+				log.Printf("[Collect] 关闭前补交未定稿窗口 %d（trades=%d）",
+					pendingEvent.StartTime, len(pendingEvent.Trades))
+			}
 		}
 	}()
 

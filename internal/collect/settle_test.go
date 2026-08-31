@@ -200,6 +200,33 @@ func TestWriteCorrection_Dedupe(t *testing.T) {
 	}
 }
 
+// TestSettlementWorker_SubmitAfterExit worker 退出后 Submit 不得永久阻塞
+// （ctx 取消后排空队列即退出，关闭路径的补交调用不能挂死）。
+func TestSettlementWorker_SubmitAfterExit(t *testing.T) {
+	dir := t.TempDir()
+	w := NewSettlementWorker(dir, func(ctx context.Context, start time.Time) (float64, float64, bool) {
+		return 0, 0, false
+	}, DefaultSettlementConfig())
+	ctx, cancel := context.WithCancel(context.Background())
+	w.Start(ctx)
+	cancel()
+	select {
+	case <-w.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("worker 未在 ctx 取消后退出")
+	}
+	done := make(chan struct{})
+	go func() {
+		w.Submit(&Event{ConditionID: "c", Slug: "s", StartTime: 1000}, false)
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker 退出后 Submit 永久阻塞")
+	}
+}
+
 // TestWriteUniqueEvent_NotBlockedByCorrection 事件行去重不能被修正行误挡：
 // 文件里只有修正行（无事件行）时，事件仍应写入。
 func TestWriteUniqueEvent_NotBlockedByCorrection(t *testing.T) {

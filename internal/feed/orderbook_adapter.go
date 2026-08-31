@@ -97,13 +97,20 @@ func (o *OrderBookAdapter) Start(ctx context.Context) {
 	go func() {
 		for {
 			err := o.monitor.Run(ctx)
-			if err == nil || ctx.Err() != nil {
+			// ⚠️ ctx 未取消时无条件重启（含 Run 干净退出 err==nil 的场景），
+			// 否则数据流会永久死亡 —— 与 cmd/collect 的重启模式一致
+			// （2026-08-18 review 在 collect 修复的同款问题）。
+			if ctx.Err() != nil {
 				return
 			}
-			// Run 退出意味着 WS 连续连接失败耗尽重试次数（或内部异常）：
-			// SDK 已 Disconnect 并清空 subsTokens，不重启的话后续窗口
-			// 将永远收不到盘口数据。
-			log.Printf("[OrderBookAdapter] ⚠️ monitor 异常退出: %v —— 5 秒后重启", err)
+			if err != nil {
+				// Run 退出意味着 WS 连续连接失败耗尽重试次数（或内部异常）：
+				// SDK 已 Disconnect 并清空 subsTokens，不重启的话后续窗口
+				// 将永远收不到盘口数据。
+				log.Printf("[OrderBookAdapter] ⚠️ monitor 异常退出: %v —— 5 秒后重启", err)
+			} else {
+				log.Printf("[OrderBookAdapter] ⚠️ monitor 干净退出 —— 5 秒后重启")
+			}
 			select {
 			case <-ctx.Done():
 				return
