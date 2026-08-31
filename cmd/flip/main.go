@@ -42,6 +42,22 @@ const windowSec = 300
 // FetchMarketBySlug 并缓存结果（与 cmd/collect 同款约定）。
 const prefetchLead = 20 * time.Second
 
+// lateLimit 是订阅迟到阈值: 已落后窗口边界超过该时长则跳过本窗口。
+// 订阅迟到 ≤lateLimit 安全（检测窗 rem<260，首 40s 本就不观测，行为与
+// 准时订阅等价）；>lateLimit 时引擎首 tick 落在检测窗内，会把订阅前已
+// 存在的盘口误判为上升沿（假穿越），必须跳过。
+const lateLimit = 40 * time.Second
+
+// staleBookThresholdMs 是盘口陈旧阈值: 传输延迟超过该值按缺数据处理
+// （WS 断流/重启期防止基于过期盘口的假穿越；book_latency_ms 仍落盘供事后过滤）。
+const staleBookThresholdMs = 5000
+
+// marketCache 缓存下一窗口的市场信息（稳态预取: 本窗 tick 尾部预取，loop 顶部复用）。
+type marketCache struct {
+	slug string
+	res  *gjson.Result
+}
+
 func init() {
 	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
 }
@@ -182,12 +198,19 @@ func main() {
 	resolutionPoller := trading.NewResolutionPoller(
 		client.FetchMarketBySlug,
 		10*time.Second,
-		func(conditionID string, outcome int) {
+		func(conditionID string, outcome int) error {
 			if err := recorder.Resolve(conditionID, outcome); err != nil {
-				log.Printf("[Flip] 结算失败: %v", err)
+				log.Printf("[Flip] ⚠️ 结算回填失败: %v（保持 pending，下次轮询重试）", err)
+				return err
 			}
+			return nil
 		},
 	)
+	// 重启恢复: 磁盘上未结算信号（崩溃遗留）重新注册结算轮询
+	for _, sig := range recorder.PendingSignals() {
+		resolutionPoller.Register(sig.ConditionID, sig.Slug)
+		log.Printf("[Flip] 🔄 恢复未结算信号: %s slug=%s", sig.ConditionID, sig.Slug)
+	}
 	go resolutionPoller.Run(ctx)
 
 	// ── 运行时状态（Dashboard 数据源）──
@@ -225,6 +248,8 @@ func main() {
 	log.Println("========================================")
 
 	// ── 市场周期主循环 ──
+	// nextCache 跨窗口缓存下一窗市场信息（稳态预取，见 collectLoop 内 rem≤20 逻辑）
+	var nextCache *marketCache
 	for {
 		select {
 		case <-ctx.Done():
@@ -233,46 +258,59 @@ func main() {
 		default:
 		}
 
-		// 步骤 1: 对齐下一个 5 分钟窗口；已开始则等下一个完整窗口
+		// 步骤 1: 对齐下一个 5 分钟窗口。
+		// 已落后边界 ≤lateLimit 时直接进入本窗口（迟到订阅安全，稳态收尾
+		// 普遍晚几百毫秒）；>lateLimit 才跳过（防订阅迟到导致假穿越）。
 		now := time.Now()
 		alignedTs := now.Unix() / windowSec * windowSec
 		nextStart := time.Unix(alignedTs, 0)
-		if time.Until(nextStart.Add(2*time.Second)) <= 0 {
+		if elapsed := time.Since(nextStart); elapsed > lateLimit {
+			log.Printf("[Cycle] ⚠️ 已落后窗口边界 %v（>%v），跳过本窗口 %s",
+				elapsed.Round(time.Second), lateLimit,
+				nextStart.UTC().Format(time.RFC3339))
 			nextStart = nextStart.Add(windowSec * time.Second)
 		}
 		slug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
 
-		// 步骤 2: 边界前 20s 预取市场信息（缓存，失败 5s 重试）
+		// 步骤 2: 市场信息（优先用本窗 tick 期间预取的缓存；未命中则按
+		// 边界前 20s 预取 + 5s 重试，仅首窗/跳窗后走此路径）
 		var cachedMarket *gjson.Result
 		var cachedErr error
-		if wait := time.Until(nextStart.Add(-prefetchLead)); wait > 0 {
-			log.Printf("[Cycle] 下一窗口 %s, 等待 %v（边界前 %ds 预取）",
-				nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second),
-				int(prefetchLead/time.Second))
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
+		if nextCache != nil && nextCache.slug == slug {
+			cachedMarket = nextCache.res
+			log.Printf("[Cycle] ✅ 使用预取缓存 %s", slug)
+			nextCache = nil
+		} else {
+			nextCache = nil // 丢弃过期缓存（窗口被跳过或预取失败）
+			if wait := time.Until(nextStart.Add(-prefetchLead)); wait > 0 {
+				log.Printf("[Cycle] 下一窗口 %s, 等待 %v（边界前 %ds 预取）",
+					nextStart.UTC().Format(time.RFC3339), wait.Round(time.Second),
+					int(prefetchLead/time.Second))
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
 			}
-		}
-		for time.Until(nextStart) > 2*time.Second {
-			cachedMarket, cachedErr = client.FetchMarketBySlug(slug)
-			if cachedErr == nil {
-				log.Printf("[Cycle] ✅ 市场预取成功 %s（边界前 %.1fs）", slug, time.Until(nextStart).Seconds())
-				break
-			}
-			log.Printf("[Cycle] 预取市场失败: %v —— 5s 后重试", cachedErr)
-			wait := 5 * time.Second
-			if rem := time.Until(nextStart.Add(-2 * time.Second)); rem < wait {
-				wait = rem
-			}
-			if wait <= 0 {
-				break
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(wait):
+			for time.Until(nextStart) > 2*time.Second {
+				cachedMarket, cachedErr = client.FetchMarketBySlug(slug)
+				if cachedErr == nil {
+					log.Printf("[Cycle] ✅ 市场预取成功 %s（边界前 %.1fs）", slug, time.Until(nextStart).Seconds())
+					break
+				}
+				log.Printf("[Cycle] 预取市场失败: %v —— 5s 后重试", cachedErr)
+				wait := 5 * time.Second
+				if rem := time.Until(nextStart.Add(-2 * time.Second)); rem < wait {
+					wait = rem
+				}
+				if wait <= 0 {
+					break
+				}
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(wait):
+				}
 			}
 		}
 		if wait := time.Until(nextStart); wait > 0 {
@@ -332,10 +370,7 @@ func main() {
 		// 步骤 5: 启动事件采集与检测
 		endTime := nextStart.Add(windowSec * time.Second)
 		engine := flip.NewEngine(cfg)
-		runtime.Engine = engine
-		runtime.ConditionID = conditionID
-		runtime.Slug = slug
-		runtime.EventStart = nextStart.Unix()
+		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
 		log.Printf("[Cycle] event=%s 开始采集（窗口 %s）...", conditionID, slug)
 
 		ticker := time.NewTicker(time.Second)
@@ -362,6 +397,19 @@ func main() {
 					ticker.Stop()
 					break collectLoop
 				}
+				// 稳态预取: 本窗 rem≤20（即下一窗边界前 20s）预取下一窗市场信息，
+				// rem%5==0 提供失败重试点（20/15/10/5 共 4 次）；loop 顶部
+				// 按 slug 匹配复用，窗口被跳过时自动丢弃
+				if nextCache == nil && rem <= 20 && rem%5 == 0 {
+					nextSlug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Add(windowSec*time.Second).Unix())
+					res, err := client.FetchMarketBySlug(nextSlug)
+					if err != nil {
+						log.Printf("[Cycle] ⚠️ 下一窗预取失败 %s: %v（rem=%d 时重试）", nextSlug, err, rem)
+					} else {
+						nextCache = &marketCache{slug: nextSlug, res: res}
+						log.Printf("[Cycle] ✅ 下一窗预取成功 %s（rem=%d）", nextSlug, rem)
+					}
+				}
 				// 每 30s 打印一次窗口进度（rem 每秒递减，无重复）
 				if rem%30 == 0 {
 					log.Printf("[Event] %s rem=%ds up=%.3f/%.3f down=%.3f/%.3f state=%s",
@@ -374,7 +422,7 @@ func main() {
 		// 步骤 6: 窗口结束 → Finalize（补判定 + cls）→ 记录 → 注册结算
 		res := engine.Finalize(lastTick)
 		if res.Cross != nil {
-			if err := recorder.RecordCross(conditionID, slug, nextStart.Unix(), res.Cross, res.Cls); err != nil {
+			if err := recorder.RecordCross(conditionID, slug, nextStart.Unix(), res.Cross, res.Cls, cfg.Stake); err != nil {
 				log.Printf("[Flip] 记录失败: %v", err)
 			} else {
 				status := "失败"
@@ -395,7 +443,11 @@ func main() {
 }
 
 // runtimeState 聚合主循环需要共享的组件引用（Dashboard 数据源）。
+// mu 保护每窗口换装的字段（Engine/ConditionID/Slug/EventStart）:
+// 主循环写（窗口起点），Dashboard goroutine 经 Snapshot 读。
 type runtimeState struct {
+	mu sync.RWMutex
+
 	Engine      *flip.Engine
 	Executor    flip.Executor
 	Recorder    *flip.Recorder
@@ -403,18 +455,22 @@ type runtimeState struct {
 	ConditionID string
 	Slug        string
 	EventStart  int64
-	Mode        string    // 成交模式: paper/live
-	StartedAt   time.Time // 进程启动时刻
+	Mode        string    // 成交模式: paper/live（构造后不变）
+	StartedAt   time.Time // 进程启动时刻（构造后不变）
 	books       func() (*sdk.OrderBook, *sdk.OrderBook)
 	tokens      func() (string, string)
 }
 
-// Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照，无锁读）。
+// Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照）。
+// Engine 指针在锁内读取；指针自身稳定（主循环只换不释放），
+// Engine.State() 内部另有锁，读后调用安全。
 func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 	yb, nb := rt.books()
 	pm := collect.MakePMTick(yb, nb)
 	_, twAge := rt.TwapAdapter.Latest()
-	return dashboard.LiveSnapshot{
+
+	rt.mu.RLock()
+	snap := dashboard.LiveSnapshot{
 		Mode:        rt.Mode,
 		StartedAt:   rt.StartedAt,
 		ConditionID: rt.ConditionID,
@@ -428,12 +484,30 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 		BookLatMs:   pm.BookLatMs,
 		TwapAgeMs:   twAge,
 	}
+	rt.mu.RUnlock()
+	return snap
+}
+
+// setWindow 在窗口起点换装引擎与元字段（主循环持有）。
+func (rt *runtimeState) setWindow(engine *flip.Engine, conditionID, slug string, eventStart int64) {
+	rt.mu.Lock()
+	rt.Engine = engine
+	rt.ConditionID = conditionID
+	rt.Slug = slug
+	rt.EventStart = eventStart
+	rt.mu.Unlock()
 }
 
 // sampleTick 读取当前盘口构造一条引擎 tick（1s 粒度）。
 func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 	yb, nb := rt.books()
 	pm := collect.MakePMTick(yb, nb)
+	// 陈旧盘口保护: WS 断流/重启期间盘口传输延迟超阈值时按缺数据处理
+	// （bid/ask=0 → 引擎跳过信号检查），防止基于过期盘口的假穿越；
+	// book_latency_ms 仍落盘供事后过滤（paper_plan §11）
+	if pm.BookLatMs > staleBookThresholdMs {
+		pm.UpBid, pm.UpAsk, pm.DownBid, pm.DownAsk = 0, 0, 0, 0
+	}
 	// TWAP-60 仅作诊断（TwapAgeMs），策略本身不用任何 BTC 特征
 	_, twAge := rt.TwapAdapter.Latest()
 	return flip.Tick{
