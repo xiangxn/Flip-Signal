@@ -139,6 +139,7 @@ func (e *Engine) decide(t Tick) *Cross {
 		PostEnd:    postEnd,
 		Fill:       otherAsk,
 		BookLatMs:  t.BookLatMs,
+		TwapAgeMs:  t.TwapAgeMs,
 	}
 	if postEnd > 0 {
 		c.FillComp = 1 - postEnd // 互补价（回测口径）
