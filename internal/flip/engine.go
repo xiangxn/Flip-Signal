@@ -16,15 +16,15 @@ type Engine struct {
 	state engineState
 
 	// Watching 状态: 各侧当前"是否在阈值上方"（最后有效 tick）
-	yesAbove bool
-	noAbove  bool
+	upAbove   bool
+	downAbove bool
 	// 整窗穿越标记（cls 诊断）: 各侧是否曾在有效 tick 穿越过
-	yesCrossed bool
-	noCrossed  bool
+	upCrossed   bool
+	downCrossed bool
 
 	// Confirming 状态
-	pend       *crossAt // 首个穿越上下文
-	confirmLeft int     // 剩余确认 tick 数
+	pend        *crossAt // 首个穿越上下文
+	confirmLeft int      // 剩余确认 tick 数
 
 	// 观测输出（Finalize 时装配）
 	cross *Cross
@@ -50,8 +50,8 @@ func (e *Engine) State() string { return e.state.String() }
 // Reset 开始新事件（新 5 分钟窗口）。
 func (e *Engine) Reset() {
 	e.state = stateWatching
-	e.yesAbove, e.noAbove = false, false
-	e.yesCrossed, e.noCrossed = false, false
+	e.upAbove, e.downAbove = false, false
+	e.upCrossed, e.downCrossed = false, false
 	e.pend = nil
 	e.confirmLeft = 0
 	e.cross = nil
@@ -78,7 +78,7 @@ func (e *Engine) ProcessTick(t Tick) *Cross {
 
 	if e.state == stateWatching {
 		e.trackCrossed(t)
-		for _, side := range []string{"yes", "no"} {
+		for _, side := range []string{"up", "down"} {
 			above := e.sideBid(side, t) > e.cfg.TriggerThreshold
 			if above && !e.sideAbove(side) {
 				// 首个上升沿 → 进入确认（回测仅记录时间顺序首个）
@@ -128,7 +128,7 @@ func (e *Engine) decide(t Tick) *Cross {
 	e.state = stateDone
 	p := e.pend
 	side := p.side
-	postEnd := e.sideBid(side, t)   // C2: 穿越侧 bid@+10s
+	postEnd := e.sideBid(side, t)           // C2: 穿越侧 bid@+10s
 	otherAsk := e.sideAsk(e.other(side), t) // fill: 对侧真实 ask@+10s
 
 	c := &Cross{
@@ -181,17 +181,17 @@ func (e *Engine) trackCrossed(t Tick) {
 	if t.Rem <= e.cfg.MinRemaining || t.Rem >= e.cfg.MaxRemaining {
 		return
 	}
-	if e.sideBid("yes", t) > e.cfg.TriggerThreshold {
-		e.yesCrossed = true
+	if e.sideBid("up", t) > e.cfg.TriggerThreshold {
+		e.upCrossed = true
 	}
-	if e.sideBid("no", t) > e.cfg.TriggerThreshold {
-		e.noCrossed = true
+	if e.sideBid("down", t) > e.cfg.TriggerThreshold {
+		e.downCrossed = true
 	}
 }
 
 // cls 返回事件类别: 双侧都穿越过 → "both"，否则 "only"（整窗信息，诊断用）。
 func (e *Engine) cls() string {
-	if e.yesCrossed && e.noCrossed {
+	if e.upCrossed && e.downCrossed {
 		return "both"
 	}
 	return "only"
@@ -199,47 +199,47 @@ func (e *Engine) cls() string {
 
 func (e *Engine) crossedSides() []string {
 	var out []string
-	if e.yesCrossed {
-		out = append(out, "yes")
+	if e.upCrossed {
+		out = append(out, "up")
 	}
-	if e.noCrossed {
-		out = append(out, "no")
+	if e.downCrossed {
+		out = append(out, "down")
 	}
 	return out
 }
 
 func (e *Engine) sideBid(side string, t Tick) float64 {
-	if side == "yes" {
-		return t.YesBid
+	if side == "up" {
+		return t.UpBid
 	}
-	return t.NoBid
+	return t.DownBid
 }
 
 func (e *Engine) sideAsk(side string, t Tick) float64 {
-	if side == "yes" {
-		return t.YesAsk
+	if side == "up" {
+		return t.UpAsk
 	}
-	return t.NoAsk
+	return t.DownAsk
 }
 
 func (e *Engine) other(side string) string {
-	if side == "yes" {
-		return "no"
+	if side == "up" {
+		return "down"
 	}
-	return "yes"
+	return "up"
 }
 
 func (e *Engine) sideAbove(side string) bool {
-	if side == "yes" {
-		return e.yesAbove
+	if side == "up" {
+		return e.upAbove
 	}
-	return e.noAbove
+	return e.downAbove
 }
 
 func (e *Engine) setSideAbove(side string, above bool) {
-	if side == "yes" {
-		e.yesAbove = above
+	if side == "up" {
+		e.upAbove = above
 	} else {
-		e.noAbove = above
+		e.downAbove = above
 	}
 }

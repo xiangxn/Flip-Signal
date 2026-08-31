@@ -45,33 +45,33 @@ func top5(levels []orders.Book) float64 {
 	return topNQuantity(levels, 5)
 }
 
-// MakePMTick 从 YES/NO 订单簿构造 1s 盘口快照行。
+// MakePMTick 从 UP/DOWN 订单簿构造 1s 盘口快照行。
 // top5 数量取双方簿前 5 档之和；时戳/延迟取两簿较大者。
-func MakePMTick(yesBook, noBook *sdk.OrderBook) PMTick {
+func MakePMTick(upBook, downBook *sdk.OrderBook) PMTick {
 	t := PMTick{
-		YesBid: BestBid(yesBook),
-		YesAsk: BestAsk(yesBook),
-		NoBid:  BestBid(noBook),
-		NoAsk:  BestAsk(noBook),
+		UpBid:   BestBid(upBook),
+		UpAsk:   BestAsk(upBook),
+		DownBid: BestBid(downBook),
+		DownAsk: BestAsk(downBook),
 	}
-	if yesBook != nil {
-		t.YesBidTop5 = top5(yesBook.Bids)
-		t.YesAskTop5 = top5(yesBook.Asks)
-		if yesBook.Timestamp > t.BookTs {
-			t.BookTs = yesBook.Timestamp
+	if upBook != nil {
+		t.UpBidTop5 = top5(upBook.Bids)
+		t.UpAskTop5 = top5(upBook.Asks)
+		if upBook.Timestamp > t.BookTs {
+			t.BookTs = upBook.Timestamp
 		}
-		if yesBook.Latency > t.BookLatMs {
-			t.BookLatMs = yesBook.Latency
+		if upBook.Latency > t.BookLatMs {
+			t.BookLatMs = upBook.Latency
 		}
 	}
-	if noBook != nil {
-		t.NoBidTop5 = top5(noBook.Bids)
-		t.NoAskTop5 = top5(noBook.Asks)
-		if noBook.Timestamp > t.BookTs {
-			t.BookTs = noBook.Timestamp
+	if downBook != nil {
+		t.DownBidTop5 = top5(downBook.Bids)
+		t.DownAskTop5 = top5(downBook.Asks)
+		if downBook.Timestamp > t.BookTs {
+			t.BookTs = downBook.Timestamp
 		}
-		if noBook.Latency > t.BookLatMs {
-			t.BookLatMs = noBook.Latency
+		if downBook.Latency > t.BookLatMs {
+			t.BookLatMs = downBook.Latency
 		}
 	}
 	return t

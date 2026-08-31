@@ -75,9 +75,9 @@ type BinanceAdapter struct {
 	data   BinanceMarketData
 	dataMu sync.RWMutex
 
-	volMu       sync.Mutex
-	buyVol5s    float64
-	sellVol5s   float64
+	volMu        sync.Mutex
+	buyVol5s     float64
+	sellVol5s    float64
 	tradeCount5s uint64
 
 	started atomic.Bool

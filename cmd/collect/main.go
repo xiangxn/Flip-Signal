@@ -1,12 +1,13 @@
 // collect 是数据格式 v2 的高频数据采集器（全新程序，与旧 lab 完全独立）。
 //
-// 采集内容（见 docs/recollection_plan_2026-08-16.md）:
-//   P0-1 Binance 1s 聚合（价格/主动买卖量/成交笔数/深度和）
-//   P0-2 PM 盘口 1s 快照（yes/no bid+ask、top5 数量、盘口时戳）
-//   P0-3 PM last_trade_price 聚合（每 token 每秒: 主动买卖笔数量/max单/vwap）
-//        ⚠️ 成交流必须用 last_trade_price；price_change 实测是挂单流
-//        （镜像对 buy≡sell 恒等，方向信息被抹平），见 2026-08-18 数据审计
-//   每 tick 附 TWAP-60 采样; 窗口结束后补官方 TWAP 开/收盘与 outcome。
+// 采集内容:
+//
+//	P0-1 Binance 1s 聚合（价格/主动买卖量/成交笔数/深度和）
+//	P0-2 PM 盘口 1s 快照（up/down bid+ask、top5 数量、盘口时戳）
+//	P0-3 PM last_trade_price 聚合（每 token 每秒: 主动买卖笔数量/max单/vwap）
+//	     ⚠️ 成交流必须用 last_trade_price；price_change 实测是挂单流
+//	     （镜像对 buy≡sell 恒等，方向信息被抹平），见 2026-08-18 数据审计
+//	每 tick 附 TWAP-60 采样; 窗口结束后补官方 TWAP 开/收盘与 outcome。
 //
 // 输出: data/btc/events_YYYY-MM-DD.jsonl —— 每窗口一行 JSON（ticks+trades）。
 // ⚠️ 启动前须先把旧 5s 快照目录 data/btc 改名移走（如 data/btc_5s），
@@ -36,8 +37,8 @@ import (
 	"github.com/xiangxn/go-polymarket-sdk/model"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
-	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/collect"
+	"github.com/necklace/flip-signal/internal/feed"
 )
 
 func init() {
@@ -90,18 +91,18 @@ func main() {
 	// 默认 false 与 OrderBookAdapter 一致。
 	monitor := sdk.NewMarketMonitor(cfg.SDK.Polymarket.ClobWSBaseURL, false, client, *customFeature)
 
-	// 订阅状态（重启恢复用）与当前 token 映射（last_trade_price → YES/NO）。
-	// prevYesTok/prevNoTok 保留上一窗口 token：窗口过渡期（步骤 5 换映射后）
+	// 订阅状态（重启恢复用）与当前 token 映射（last_trade_price → UP/DOWN）。
+	// prevUpTok/prevDownTok 保留上一窗口 token：窗口过渡期（步骤 5 换映射后）
 	// 上一窗口尾盘迟到的成交仍可路由进旧 bucketer（server 时戳越界会自动
 	// 丢弃），否则这些笔在 consumer 层就被当作陌生 token 丢掉。
 	var (
 		subMu       sync.RWMutex
 		subTokens   []string
 		tokMu       sync.RWMutex
-		yesTok      string
-		noTok       string
-		prevYesTok  string
-		prevNoTok   string
+		upTok       string
+		downTok     string
+		prevUpTok   string
+		prevDownTok string
 		// 当前窗口成交聚合器（last_trade_price goroutine 并发写）
 		currentBucketer atomic.Pointer[collect.TradeBucketer]
 		// 下一窗口市场预取缓存：窗口尾部异步预取的结果跨窗口迭代传递
@@ -112,11 +113,11 @@ func main() {
 		nextMarketSlug  string
 	)
 
-	// 盘口追踪：book 通道持续消费，保存最新 YES/NO 簿（1s 采样读取）
+	// 盘口追踪：book 通道持续消费，保存最新 UP/DOWN 簿（1s 采样读取）
 	var (
-		bookMu  sync.RWMutex
-		yesBook *sdk.OrderBook
-		noBook  *sdk.OrderBook
+		bookMu   sync.RWMutex
+		upBook   *sdk.OrderBook
+		downBook *sdk.OrderBook
 	)
 	go func() {
 		ch := monitor.SubscribeOrderBook()
@@ -129,14 +130,14 @@ func main() {
 					continue
 				}
 				tokMu.RLock()
-				yt, nt := yesTok, noTok
+				yt, nt := upTok, downTok
 				tokMu.RUnlock()
 				bookMu.Lock()
 				switch book.AssetId {
 				case yt:
-					yesBook = book
+					upBook = book
 				case nt:
-					noBook = book
+					downBook = book
 				}
 				bookMu.Unlock()
 			}
@@ -164,7 +165,7 @@ func main() {
 					log.Printf("[Trade] last_trade_price 累计 %d（最近 ts=%d）", eventCount, trade.Timestamp)
 				}
 				tokMu.RLock()
-				yt, nt, pyt, pnt := yesTok, noTok, prevYesTok, prevNoTok
+				yt, nt, pyt, pnt := upTok, downTok, prevUpTok, prevDownTok
 				tokMu.RUnlock()
 				b := currentBucketer.Load()
 				if b == nil {
@@ -173,23 +174,23 @@ func main() {
 				token := ""
 				switch trade.AssetID {
 				case yt:
-					token = "YES"
+					token = "UP"
 				case nt:
-					token = "NO"
+					token = "DOWN"
 				case pyt:
-					token = "YES" // 上一窗口尾盘迟到笔（过渡期路由，桶边界校验兜底）
+					token = "UP" // 上一窗口尾盘迟到笔（过渡期路由，桶边界校验兜底）
 				case pnt:
-					token = "NO"
+					token = "DOWN"
 				default:
 					continue // 陌生 token（更早窗口的迟到笔）
 				}
 				bookMu.RLock()
 				var bb, ba float64
 				switch token {
-				case "YES":
-					bb, ba = collect.BestBid(yesBook), collect.BestAsk(yesBook)
-				case "NO":
-					bb, ba = collect.BestBid(noBook), collect.BestAsk(noBook)
+				case "UP":
+					bb, ba = collect.BestBid(upBook), collect.BestAsk(upBook)
+				case "DOWN":
+					bb, ba = collect.BestBid(downBook), collect.BestAsk(downBook)
 				}
 				bookMu.RUnlock()
 				tsMs := trade.Timestamp
@@ -456,11 +457,11 @@ func main() {
 			continue
 		}
 		conditionID := marketData.Get("conditionId").String()
-		yesTokenID, noTokenID := collect.ParseMarketTokens(marketData)
-		if yesTokenID == "" || noTokenID == "" {
+		upTokenID, downTokenID := collect.ParseMarketTokens(marketData)
+		if upTokenID == "" || downTokenID == "" {
 			// gamma 结构异常或市场未上架 token：订阅空 token 会静默采一整窗空数据
-			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空（YES=%q NO=%q），跳过本窗口",
-				slug, yesTokenID, noTokenID)
+			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空（UP=%q DOWN=%q），跳过本窗口",
+				slug, upTokenID, downTokenID)
 			waitTo := nextStart.Add(collect.WindowSec * time.Second)
 			select {
 			case <-ctx.Done():
@@ -469,25 +470,25 @@ func main() {
 			}
 			continue
 		}
-		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s", conditionID, yesTokenID, noTokenID)
+		log.Printf("[Cycle] conditionId=%s UP=%s DOWN=%s", conditionID, upTokenID, downTokenID)
 
 		// 步骤 5: 订阅切换（先退订旧 token，保留副本供 monitor 重启恢复）
 		subMu.Lock()
 		if len(subTokens) > 0 {
 			monitor.UnsubscribeTokens(subTokens...)
 		}
-		subTokens = []string{yesTokenID, noTokenID}
+		subTokens = []string{upTokenID, downTokenID}
 		subMu.Unlock()
-		monitor.SubscribeTokens(yesTokenID, noTokenID)
+		monitor.SubscribeTokens(upTokenID, downTokenID)
 
 		tokMu.Lock()
-		prevYesTok, prevNoTok = yesTok, noTok
-		yesTok = yesTokenID
-		noTok = noTokenID
+		prevUpTok, prevDownTok = upTok, downTok
+		upTok = upTokenID
+		downTok = downTokenID
 		tokMu.Unlock()
 		bookMu.Lock()
-		yesBook = nil
-		noBook = nil
+		upBook = nil
+		downBook = nil
 		bookMu.Unlock()
 
 		// 步骤 6: 窗口状态
@@ -525,7 +526,7 @@ func main() {
 
 			// P0-2: PM 盘口 1s 快照
 			bookMu.RLock()
-			yb, nb := yesBook, noBook
+			yb, nb := upBook, downBook
 			bookMu.RUnlock()
 
 			// TWAP 采样
@@ -641,7 +642,7 @@ func main() {
 	}
 }
 
-// ---- 配置（与 cmd/lab 同款环境变量约定）----
+// ---- 配置（环境变量约定，无配置即只读运行）----
 
 type appConfig struct {
 	SDK sdk.Config `mapstructure:"sdk"`

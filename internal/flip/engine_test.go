@@ -6,18 +6,18 @@ import (
 )
 
 // mkTick 构造一条 tick（缺省 ask 为 1-bid 互补，缺省 bid 为 0）。
-func mkTick(rem int, yesBid, noBid float64) Tick {
+func mkTick(rem int, upBid, downBid float64) Tick {
 	t := Tick{
 		Ts:  time.Now().UnixMilli(),
 		Rem: rem,
 	}
-	if yesBid > 0 {
-		t.YesBid = yesBid
-		t.YesAsk = 1 - yesBid
+	if upBid > 0 {
+		t.UpBid = upBid
+		t.UpAsk = 1 - upBid
 	}
-	if noBid > 0 {
-		t.NoBid = noBid
-		t.NoAsk = 1 - noBid
+	if downBid > 0 {
+		t.DownBid = downBid
+		t.DownAsk = 1 - downBid
 	}
 	return t
 }
@@ -52,7 +52,7 @@ func TestEngine_CrossingTrigger(t *testing.T) {
 	if len(c) != 0 {
 		t.Fatalf("穿越应进入确认而非立即判定, got %+v", c)
 	}
-	if e.pend == nil || e.pend.side != "yes" || e.pend.triggerBid != 0.71 {
+	if e.pend == nil || e.pend.side != "up" || e.pend.triggerBid != 0.71 {
 		t.Fatalf("首个穿越记录错误: %+v", e.pend)
 	}
 	if e.State() != "Confirming" {
@@ -90,13 +90,13 @@ func TestEngine_RemWindowExcluded(t *testing.T) {
 
 func TestEngine_FirstCrossingWins(t *testing.T) {
 	e := NewEngine(DefaultConfig())
-	// YES 先穿，NO 后穿 → 观测侧为 YES
+	// UP 先穿，DOWN 后穿 → 观测侧为 UP
 	c := run(e, []Tick{
 		mkTick(200, 0.75, 0.10),
 		mkTick(199, 0.72, 0.74),
 	})
-	if len(c) != 0 || e.pend == nil || e.pend.side != "yes" {
-		t.Fatalf("首个穿越应为 YES: %+v", e.pend)
+	if len(c) != 0 || e.pend == nil || e.pend.side != "up" {
+		t.Fatalf("首个穿越应为 UP: %+v", e.pend)
 	}
 }
 
@@ -113,7 +113,7 @@ func TestEngine_ConfirmAndSignal(t *testing.T) {
 	if !c.OK {
 		t.Fatalf("应通过判定, reject=%s", c.RejectReason)
 	}
-	if c.Side != "yes" || c.TriggerBid != 0.75 || c.PostEnd != 0.62 {
+	if c.Side != "up" || c.TriggerBid != 0.75 || c.PostEnd != 0.62 {
 		t.Fatalf("字段错误: %+v", c)
 	}
 	// fill = 对侧 ask@+10s = 1 - 0.10 = 0.90; fill_comp = 1 - 0.62 = 0.38
@@ -201,11 +201,11 @@ func TestEngine_ClsBothAndOnly(t *testing.T) {
 		t.Fatalf("单侧穿越应为 only, got %s", res.Cls)
 	}
 
-	// both: 两侧都穿越（判定后仍跟踪，Finalize 前补 NO）
+	// both: 两侧都穿越（判定后仍跟踪，Finalize 前补 DOWN）
 	e = NewEngine(DefaultConfig())
-	seq := crossingSeq(0.62, e.Config().ConfirmSec) // YES 穿越
+	seq := crossingSeq(0.62, e.Config().ConfirmSec) // UP 穿越
 	run(e, seq)
-	run(e, []Tick{mkTick(150, 0.90, 0.75)}) // NO 穿越（Done 后仍标记）
+	run(e, []Tick{mkTick(150, 0.90, 0.75)}) // DOWN 穿越（Done 后仍标记）
 	if res := e.Finalize(mkTick(0, 0.62, 0.10)); res.Cls != "both" {
 		t.Fatalf("双侧穿越应为 both, got %s", res.Cls)
 	}

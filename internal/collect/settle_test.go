@@ -107,13 +107,13 @@ func TestSettlementWorker_Flow(t *testing.T) {
 // 新鲜度不足或幅度过小 → 官方修正；幅度充足且推送新鲜 → 流值定稿。
 func TestNeedsOfficialCorrection(t *testing.T) {
 	cases := []struct {
-		name      string
-		ageMs     int64
-		open      float64
-		close     float64
-		minRange  float64
-		maxAgeMs  int64
-		want      bool
+		name     string
+		ageMs    int64
+		open     float64
+		close    float64
+		minRange float64
+		maxAgeMs int64
+		want     bool
 	}{
 		{"幅度大且新鲜 → 流值定稿", 800, 64000, 64030, 15, 5000, false},
 		{"幅度略小于阈值 → 官方修正", 800, 64000, 64014.9, 15, 5000, true},
@@ -177,9 +177,9 @@ func TestSettlementWorker_SkipCorrection(t *testing.T) {
 func TestWriteCorrection_Dedupe(t *testing.T) {
 	dir := t.TempDir()
 	corr := &SettlementCorrection{
-		EventType:      "settlement_correction",
-		StartTime:      1000,
-		TwapOpenPrice:  1, TwapClosePrice: 2,
+		EventType:     "settlement_correction",
+		StartTime:     1000,
+		TwapOpenPrice: 1, TwapClosePrice: 2,
 		CloseSource: "official", Outcome: 0,
 	}
 	written, err := WriteCorrection(dir, corr)

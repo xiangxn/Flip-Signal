@@ -1,6 +1,6 @@
 // Command flip 是「自信崩溃」翻转策略引擎入口（docs/strategy_plan_2026-08-31.md）。
 //
-// 连接 Polymarket CLOB WebSocket（YES/NO 订单簿）与 Chainlink TWAP-60（诊断），
+// 连接 Polymarket CLOB WebSocket（UP/DOWN 订单簿）与 Chainlink TWAP-60（诊断），
 // 每秒驱动 flip.Engine 状态机检测穿越信号，纸面模拟成交（PaperExecutor），
 // 官方结算后记录完整 P&L 到 JSONL（按日切分）。
 //
@@ -98,11 +98,11 @@ func main() {
 		subMu     sync.RWMutex
 		subTokens []string
 		tokMu     sync.RWMutex
-		yesTok    string
-		noTok     string
+		upTok     string
+		downTok   string
 		bookMu    sync.RWMutex
-		yesBook   *sdk.OrderBook
-		noBook    *sdk.OrderBook
+		upBook    *sdk.OrderBook
+		downBook  *sdk.OrderBook
 	)
 	go func() {
 		ch := monitor.SubscribeOrderBook()
@@ -115,14 +115,14 @@ func main() {
 					continue
 				}
 				tokMu.RLock()
-				yt, nt := yesTok, noTok
+				yt, nt := upTok, downTok
 				tokMu.RUnlock()
 				bookMu.Lock()
 				switch book.AssetId {
 				case yt:
-					yesBook = book
+					upBook = book
 				case nt:
-					noBook = book
+					downBook = book
 				}
 				bookMu.Unlock()
 			}
@@ -153,7 +153,8 @@ func main() {
 	}()
 
 	// ── Chainlink TWAP-60（诊断字段，策略本身不用 BTC 特征）──
-	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC")
+	// 注意 symbol 后缀: SDK 将 "BTC" 解析为 30s 窗口，须显式 "BTC_60" 才订阅 twap_sixty
+	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC_60")
 	twapAdapter := feed.NewTwapAdapter(twapMonitor, "BTC", sdk.ChainlinkTwapWindowSixty)
 	twapAdapter.Start(ctx)
 	go func() {
@@ -201,12 +202,12 @@ func main() {
 	runtime.books = func() (*sdk.OrderBook, *sdk.OrderBook) {
 		bookMu.RLock()
 		defer bookMu.RUnlock()
-		return yesBook, noBook
+		return upBook, downBook
 	}
 	runtime.tokens = func() (string, string) {
 		tokMu.RLock()
 		defer tokMu.RUnlock()
-		return yesTok, noTok
+		return upTok, downTok
 	}
 
 	// ── Dashboard（手机浏览器兼容的单页前端）──
@@ -300,8 +301,8 @@ func main() {
 			}
 		}
 		conditionID := marketData.Get("conditionId").String()
-		yesTokenID, noTokenID := collect.ParseMarketTokens(marketData)
-		if yesTokenID == "" || noTokenID == "" {
+		upTokenID, downTokenID := collect.ParseMarketTokens(marketData)
+		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
 			select {
 			case <-ctx.Done():
@@ -310,22 +311,22 @@ func main() {
 			}
 			continue
 		}
-		log.Printf("[Cycle] conditionId=%s YES=%s NO=%s", conditionID, yesTokenID, noTokenID)
+		log.Printf("[Cycle] conditionId=%s UP=%s DOWN=%s", conditionID, upTokenID, downTokenID)
 
 		// 步骤 4: 订阅切换（先退订旧 token，保留副本供 monitor 重启恢复）
 		subMu.Lock()
 		if len(subTokens) > 0 {
 			monitor.UnsubscribeTokens(subTokens...)
 		}
-		subTokens = []string{yesTokenID, noTokenID}
+		subTokens = []string{upTokenID, downTokenID}
 		subMu.Unlock()
-		monitor.SubscribeTokens(yesTokenID, noTokenID)
+		monitor.SubscribeTokens(upTokenID, downTokenID)
 
 		tokMu.Lock()
-		yesTok, noTok = yesTokenID, noTokenID
+		upTok, downTok = upTokenID, downTokenID
 		tokMu.Unlock()
 		bookMu.Lock()
-		yesBook, noBook = nil, nil
+		upBook, downBook = nil, nil
 		bookMu.Unlock()
 
 		// 步骤 5: 启动事件采集与检测
@@ -363,9 +364,9 @@ func main() {
 				}
 				// 每 30s 打印一次窗口进度（rem 每秒递减，无重复）
 				if rem%30 == 0 {
-					log.Printf("[Event] %s rem=%ds yes=%.3f/%.3f no=%.3f/%.3f state=%s",
-						conditionID, rem, lastTick.YesBid, lastTick.YesAsk,
-						lastTick.NoBid, lastTick.NoAsk, engine.State())
+					log.Printf("[Event] %s rem=%ds up=%.3f/%.3f down=%.3f/%.3f state=%s",
+						conditionID, rem, lastTick.UpBid, lastTick.UpAsk,
+						lastTick.DownBid, lastTick.DownAsk, engine.State())
 				}
 			}
 		}
@@ -420,10 +421,10 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 		Slug:        rt.Slug,
 		EventStart:  rt.EventStart,
 		EngineState: rt.Engine.State(),
-		YesBid:      pm.YesBid,
-		YesAsk:      pm.YesAsk,
-		NoBid:       pm.NoBid,
-		NoAsk:       pm.NoAsk,
+		UpBid:       pm.UpBid,
+		UpAsk:       pm.UpAsk,
+		DownBid:     pm.DownBid,
+		DownAsk:     pm.DownAsk,
 		BookLatMs:   pm.BookLatMs,
 		TwapAgeMs:   twAge,
 	}
@@ -438,10 +439,10 @@ func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 	return flip.Tick{
 		Ts:        t.UnixMilli(),
 		Rem:       rem,
-		YesBid:    pm.YesBid,
-		YesAsk:    pm.YesAsk,
-		NoBid:     pm.NoBid,
-		NoAsk:     pm.NoAsk,
+		UpBid:     pm.UpBid,
+		UpAsk:     pm.UpAsk,
+		DownBid:   pm.DownBid,
+		DownAsk:   pm.DownAsk,
 		BookLatMs: pm.BookLatMs,
 		TwapAgeMs: twAge,
 	}
@@ -486,4 +487,3 @@ func defaultSDKConfig() sdk.Config {
 	}
 	return cfg
 }
-

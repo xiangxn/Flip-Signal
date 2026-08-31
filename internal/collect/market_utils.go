@@ -4,11 +4,11 @@ import (
 	"github.com/tidwall/gjson"
 )
 
-// ParseMarketTokens 从 gamma 市场 JSON 解析 YES/NO token ID。
+// ParseMarketTokens 从 gamma 市场 JSON 解析 UP/DOWN token ID。
 //
 // outcomes 约定 [0]=Up [1]=Down（与 lab 一致），clobTokenIds 与之对齐；
 // 支持 "Up"/"Yes"、"Down"/"No" 两种 outcome 命名。未找到时返回空串。
-func ParseMarketTokens(data *gjson.Result) (yesTokenID, noTokenID string) {
+func ParseMarketTokens(data *gjson.Result) (upTokenID, downTokenID string) {
 	clobRaw := data.Get("clobTokenIds").String()
 	var tokenIDs []string
 	for _, v := range gjson.Parse(clobRaw).Array() {
@@ -27,10 +27,10 @@ func ParseMarketTokens(data *gjson.Result) (yesTokenID, noTokenID string) {
 		}
 		switch oc {
 		case "Up", "Yes":
-			yesTokenID = tokenIDs[i]
+			upTokenID = tokenIDs[i]
 		case "Down", "No":
-			noTokenID = tokenIDs[i]
+			downTokenID = tokenIDs[i]
 		}
 	}
-	return yesTokenID, noTokenID
+	return upTokenID, downTokenID
 }

@@ -54,14 +54,14 @@ func TestRemoveTokens(t *testing.T) {
 // TestTokenTracking_SubscribeUnsubscribe 验证 adapter 订阅副本的增删语义。
 func TestTokenTracking_SubscribeUnsubscribe(t *testing.T) {
 	o := NewOrderBookAdapter("", nil)
-	o.SubscribeTokens("yes", "no")
-	o.SubscribeTokens("yes") // 重复订阅应去重
-	if !sameSet(o.tokens, []string{"yes", "no"}) {
-		t.Fatalf("tokens after subscribe = %v, want [yes no]", o.tokens)
+	o.SubscribeTokens("up", "down")
+	o.SubscribeTokens("up") // 重复订阅应去重
+	if !sameSet(o.tokens, []string{"up", "down"}) {
+		t.Fatalf("tokens after subscribe = %v, want [up down]", o.tokens)
 	}
-	o.UnsubscribeTokens("yes")
-	if !sameSet(o.tokens, []string{"no"}) {
-		t.Fatalf("tokens after unsubscribe = %v, want [no]", o.tokens)
+	o.UnsubscribeTokens("up")
+	if !sameSet(o.tokens, []string{"down"}) {
+		t.Fatalf("tokens after unsubscribe = %v, want [down]", o.tokens)
 	}
 }
 

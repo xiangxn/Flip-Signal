@@ -34,10 +34,10 @@ func TestWriteUniqueEvent_OversizedLine(t *testing.T) {
 		// 500 ticks × ~300 字节 ≈ 150KB，确保序列化行超过 64KB
 		for i := 0; i < 500; i++ {
 			ev.Ticks = append(ev.Ticks, HFTick{
-				Ts:  int64(i * 1000),
-				Rem: 299 - i/2,
-				Bin: BinTick{Price: 1.2345, BuyVol: 6.7, SellVol: 8.9, Ticks: 12},
-				PM:  PMTick{YesBid: 0.5, YesAsk: 0.51, NoBid: 0.49, NoAsk: 0.5},
+				Ts:   int64(i * 1000),
+				Rem:  299 - i/2,
+				Bin:  BinTick{Price: 1.2345, BuyVol: 6.7, SellVol: 8.9, Ticks: 12},
+				PM:   PMTick{UpBid: 0.5, UpAsk: 0.51, DownBid: 0.49, DownAsk: 0.5},
 				Twap: TwapTick{Price: 12345.6, AgeMs: 2000},
 			})
 		}

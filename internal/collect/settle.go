@@ -32,7 +32,7 @@ func NeedsOfficialCorrection(closeAgeMs int64, open, close, minRange float64, ma
 // SettlementWorker 是队列化的写盘与结算修正器。
 //
 // 设计动机（2026-08-18）：官方收盘价产出延迟为分钟级（60s 轮询实测
-// 142/142 全部未命中，见 cmd/probe_close 实测），事件写盘不能被官方价
+// 142/142 全部未命中），事件写盘不能被官方价
 // 拖住。窗口结束时主循环把流值口径的事件交给本 worker：
 //
 //  1. 立即落盘（close_source=stream，outcome 流值口径）—— 写盘延迟归零，

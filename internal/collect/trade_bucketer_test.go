@@ -25,9 +25,9 @@ func TestTradeBucketer_HashDedupe(t *testing.T) {
 func TestTradeBucketer_WindowBounds(t *testing.T) {
 	b := NewTradeBucketer(1000)
 
-	b.Add("YES", 999, "BUY", 0.5, 1, 0, 0, "h0")            // 起点前 1ms → 丢
-	b.Add("YES", 1000, "BUY", 0.5, 1, 0, 0, "h1")            // 起点 → idx 0
-	b.Add("YES", 1999, "SELL", 0.5, 2, 0, 0, "h2")           // 同秒桶末尾 → idx 0
+	b.Add("YES", 999, "BUY", 0.5, 1, 0, 0, "h0")                  // 起点前 1ms → 丢
+	b.Add("YES", 1000, "BUY", 0.5, 1, 0, 0, "h1")                 // 起点 → idx 0
+	b.Add("YES", 1999, "SELL", 0.5, 2, 0, 0, "h2")                // 同秒桶末尾 → idx 0
 	b.Add("YES", 1000+WindowSec*1000, "SELL", 0.5, 4, 0, 0, "h3") // 终点 → 丢
 
 	aggs := b.Snapshot()

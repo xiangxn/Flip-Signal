@@ -47,13 +47,21 @@
 
     $('engineState').textContent = s.engine_state;
     $('engineState').className = 'engine-state ' + s.engine_state.toLowerCase();
-    $('winSlug').textContent = s.slug || '等待下一个窗口…';
+    // 当前窗口 slug → Polymarket 事件页（点击跳转查看实时盘口）
+    var slugLink = $('winSlugLink');
+    if (s.slug) {
+      slugLink.textContent = s.slug;
+      slugLink.href = 'https://polymarket.com/zh/event/' + s.slug;
+    } else {
+      slugLink.textContent = '等待下一个窗口…';
+      slugLink.removeAttribute('href');
+    }
     $('winCond').textContent = s.condition_id ? s.condition_id.slice(0, 8) : '';
 
-    $('yesBid').textContent = s.yes_bid > 0 ? s.yes_bid.toFixed(3) : '—';
-    $('yesAsk').textContent = s.yes_ask > 0 ? s.yes_ask.toFixed(3) : '—';
-    $('noBid').textContent = s.no_bid > 0 ? s.no_bid.toFixed(3) : '—';
-    $('noAsk').textContent = s.no_ask > 0 ? s.no_ask.toFixed(3) : '—';
+    $('upBid').textContent = s.up_bid > 0 ? s.up_bid.toFixed(3) : '—';
+    $('upAsk').textContent = s.up_ask > 0 ? s.up_ask.toFixed(3) : '—';
+    $('downBid').textContent = s.down_bid > 0 ? s.down_bid.toFixed(3) : '—';
+    $('downAsk').textContent = s.down_ask > 0 ? s.down_ask.toFixed(3) : '—';
     $('winRem').textContent = s.remaining_sec;
     $('winLat').textContent = s.book_latency_ms;
     $('winTwap').textContent = s.twap_age_ms;

@@ -25,10 +25,10 @@ type LiveSnapshot struct {
 	EngineState string    // 状态机标签: Watching/Confirming/Done
 
 	// 当前窗口最新盘口（0 = 尚无有效盘口）
-	YesBid    float64
-	YesAsk    float64
-	NoBid     float64
-	NoAsk     float64
+	UpBid     float64
+	UpAsk     float64
+	DownBid   float64
+	DownAsk   float64
 	BookLatMs int64 // 盘口传输延迟（毫秒）
 	TwapAgeMs int64 // TWAP-60 距上次推送毫秒数（诊断）
 }
@@ -41,12 +41,12 @@ type Snapshotter interface {
 // State 聚合 dashboard 的数据源引用（等价旧版 dashboard 的 State 载体）。
 // Recorder 与 Snapshotter 均为主循环已持有的组件，无独立生命周期。
 type State struct {
-	recorder   *flip.Recorder
-	snapshot   Snapshotter
-	cfg        flip.Config
-	mode       string
-	startedAt  time.Time
-	nowFn      func() time.Time // 可注入时钟（测试用），默认 time.Now
+	recorder  *flip.Recorder
+	snapshot  Snapshotter
+	cfg       flip.Config
+	mode      string
+	startedAt time.Time
+	nowFn     func() time.Time // 可注入时钟（测试用），默认 time.Now
 }
 
 // NewState 构造 dashboard 状态载体。

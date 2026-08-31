@@ -15,13 +15,13 @@ import (
 // 字段与回测 trades_v3.csv 对齐（date/event_start/side/trigger_bid/post_end/
 // fill/shares/ok/cls），09-15 可直接复用 python 分析逻辑。
 type Record struct {
-	EventType    string  `json:"event_type"`              // 恒为 "cross"
-	Ts           int64   `json:"ts"`                      // 穿越时刻（unix 毫秒）
-	Date         string  `json:"date"`                    // 本地日（按日切分文件名）
+	EventType    string  `json:"event_type"` // 恒为 "cross"
+	Ts           int64   `json:"ts"`         // 穿越时刻（unix 毫秒）
+	Date         string  `json:"date"`       // 本地日（按日切分文件名）
 	ConditionID  string  `json:"condition_id"`
 	Slug         string  `json:"slug"`
 	EventStart   int64   `json:"event_start"`             // 窗口起点（unix 秒）
-	Side         string  `json:"side"`                    // 触发侧: "yes"/"no"
+	Side         string  `json:"side"`                    // 触发侧: "up"/"down"
 	Rem          int     `json:"rem"`                     // 穿越时窗口剩余秒
 	TriggerBid   float64 `json:"trigger_bid"`             // C1
 	PostEnd      float64 `json:"post_end"`                // C2
@@ -31,11 +31,11 @@ type Record struct {
 	OK           bool    `json:"ok"`                      // 是否通过 C1/C2
 	RejectReason string  `json:"reject_reason,omitempty"` // 未通过原因
 	BookLatMs    int64   `json:"book_latency_ms,omitempty"`
-	TwapAgeMs    int64   `json:"twap_age_ms,omitempty"`   // TWAP 距上次推送毫秒数（诊断）
-	Cls          string  `json:"cls"`                     // 整窗类别: both/only（机制诊断）
-	Won          *bool   `json:"won,omitempty"`           // 结算后填充（flip 是否赢）
-	PnL          float64 `json:"pnl,omitempty"`           // 结算后填充（USDC）
-	ResolvedAt   string  `json:"resolved_at,omitempty"`   // 结算时间（RFC3339）
+	TwapAgeMs    int64   `json:"twap_age_ms,omitempty"` // TWAP 距上次推送毫秒数（诊断）
+	Cls          string  `json:"cls"`                   // 整窗类别: both/only（机制诊断）
+	Won          *bool   `json:"won,omitempty"`         // 结算后填充（flip 是否赢）
+	PnL          float64 `json:"pnl,omitempty"`         // 结算后填充（USDC）
+	ResolvedAt   string  `json:"resolved_at,omitempty"` // 结算时间（RFC3339）
 }
 
 // Recorder 将穿越观测与信号写入 JSONL（按日切分文件）。
@@ -46,11 +46,11 @@ type Record struct {
 //     一次性写完整行（每事件一行，字段完整）；崩溃时 Close 刷出部分字段行
 //   - 文件按本地日切分: data/v3/crosses_YYYY-MM-DD.jsonl，追加模式，重启不丢
 type Recorder struct {
-	mu    sync.Mutex
-	dir   string
-	file  *os.File
-	buf   *bufio.Writer
-	day   string // 当前文件对应日
+	mu   sync.Mutex
+	dir  string
+	file *os.File
+	buf  *bufio.Writer
+	day  string // 当前文件对应日
 	// 内存副本（Dashboard 查询）
 	pending  []*Record // 未结算信号（ok=true）
 	resolved []*Record // 已结算信号
@@ -112,10 +112,10 @@ func (r *Recorder) Resolve(conditionID string, outcome int) error {
 			continue
 		}
 		won := false
-		if rec.Side == "yes" {
-			won = outcome == 1 // YES 触发，DOWN 赢 = flip 赢
+		if rec.Side == "up" {
+			won = outcome == 1 // UP 触发，DOWN 赢 = flip 赢
 		} else {
-			won = outcome == 0 // NO 触发，UP 赢 = flip 赢
+			won = outcome == 0 // DOWN 触发，UP 赢 = flip 赢
 		}
 		rec.Won = &won
 		if won {
@@ -180,6 +180,10 @@ func (r *Recorder) write(rec *Record) error {
 	}
 	if _, err := r.buf.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("write record: %w", err)
+	}
+	// 每行立即刷盘: 穿越观测低频（日 ~200 条），崩溃/断电不丢已记录事件
+	if err := r.buf.Flush(); err != nil {
+		return fmt.Errorf("flush record: %w", err)
 	}
 	return nil
 }

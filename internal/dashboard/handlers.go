@@ -25,13 +25,13 @@ type stateResponse struct {
 	EngineState string `json:"engine_state"`
 
 	// 当前窗口盘口（实时诊断）
-	YesBid     float64 `json:"yes_bid"`
-	YesAsk     float64 `json:"yes_ask"`
-	NoBid      float64 `json:"no_bid"`
-	NoAsk      float64 `json:"no_ask"`
-	Remaining  int     `json:"remaining_sec"` // 窗口剩余秒（0 = 窗口间）
-	BookLatMs  int64   `json:"book_latency_ms"`
-	TwapAgeMs  int64   `json:"twap_age_ms"`
+	UpBid     float64 `json:"up_bid"`
+	UpAsk     float64 `json:"up_ask"`
+	DownBid   float64 `json:"down_bid"`
+	DownAsk   float64 `json:"down_ask"`
+	Remaining int     `json:"remaining_sec"` // 窗口剩余秒（0 = 窗口间）
+	BookLatMs int64   `json:"book_latency_ms"`
+	TwapAgeMs int64   `json:"twap_age_ms"`
 
 	// 统计汇总（已结算 + 待结算信号）
 	SignalCount  int     `json:"signal_count"`
@@ -79,10 +79,10 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		Slug:         live.Slug,
 		EventStart:   live.EventStart,
 		EngineState:  live.EngineState,
-		YesBid:       live.YesBid,
-		YesAsk:       live.YesAsk,
-		NoBid:        live.NoBid,
-		NoAsk:        live.NoAsk,
+		UpBid:        live.UpBid,
+		UpAsk:        live.UpAsk,
+		DownBid:      live.DownBid,
+		DownAsk:      live.DownAsk,
 		Remaining:    s.remaining(live),
 		BookLatMs:    live.BookLatMs,
 		TwapAgeMs:    live.TwapAgeMs,

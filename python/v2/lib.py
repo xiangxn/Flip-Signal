@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-v2 数据公共库 —— 1s 微观数据（data/btc, 格式见 docs/recollection_plan_2026-08-16.md §3.2）。
+v2 数据公共库 —— 1s 微观数据（data/btc, 格式 v2：每窗口一行 JSON）。
 
 提供:
   load_events()     加载 JSONL + settlement_correction 合并（官方口径覆盖流值口径）
