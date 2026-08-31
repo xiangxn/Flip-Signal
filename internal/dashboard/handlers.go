@@ -39,10 +39,10 @@ type stateResponse struct {
 	PendingCount int     `json:"pending_count"`
 	WinRate      float64 `json:"win_rate"`
 	CumPnl       float64 `json:"cumulative_pnl"`
-	CrossCount   int     `json:"cross_count"`   // 全部穿越观测（含失败）
-	DayPnlPos    int     `json:"day_pnl_pos"`   // 逐日盈利天数（已结算）
-	DayTotal     int     `json:"day_total"`     // 有结算信号的天数
-	MaxDrawdown  float64 `json:"max_drawdown"`  // 累计 P&L 最大回撤（USDC）
+	CrossCount   int     `json:"cross_count"`  // 全部穿越观测（含失败）
+	DayPnlPos    int     `json:"day_pnl_pos"`  // 逐日盈利天数（已结算）
+	DayTotal     int     `json:"day_total"`    // 有结算信号的天数
+	MaxDrawdown  float64 `json:"max_drawdown"` // 累计 P&L 最大回撤（USDC）
 }
 
 // crossResponse 是 /api/crosses 与 /api/signals 的元素。

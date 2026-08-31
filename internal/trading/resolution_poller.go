@@ -18,8 +18,8 @@ type ResolveHandler func(conditionID string, outcome int) error
 
 // PendingResolution 一个等待 Polymarket 结算的市场。
 type PendingResolution struct {
-	ConditionID string
-	MarketSlug  string
+	ConditionID  string
+	MarketSlug   string
 	RegisteredAt time.Time // 注册时刻（老龄化判定用）
 }
 
