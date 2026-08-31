@@ -45,6 +45,10 @@ func (p *PaperExecutor) Execute(c *Cross) (ExecResult, error) {
 	if c.Fill <= 0 || c.Shares <= 0 {
 		return ExecResult{Status: "failed"}, fmt.Errorf("成交价无效: fill=%v", c.Fill)
 	}
+	// 成交价边界（与回测 fill∈[0.05,0.95] 过滤一致，引擎 decide 已拦截，此处兜底）
+	if c.Fill < fillMin || c.Fill > fillMax {
+		return ExecResult{Status: "failed"}, fmt.Errorf("成交价越界: fill=%v（有效区间 %.2f~%.2f）", c.Fill, fillMin, fillMax)
+	}
 	return ExecResult{
 		Status:       "filled",
 		FilledShares: c.Shares,

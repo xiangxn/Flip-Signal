@@ -2,6 +2,13 @@ package flip
 
 import "sync"
 
+// fillBounds 是成交价（对侧 ask）的有效区间，与回测 fill.between(0.05, 0.95)
+// 过滤一致（python/v3/06_backtest.py）: 陈旧/退化盘口的极端 ask 不成交。
+const (
+	fillMin = 0.05
+	fillMax = 0.95
+)
+
 // Engine 是「自信崩溃」策略状态机（1s tick 粒度）。
 //
 // 状态流转（与回测 extract_cross 口径 1:1，见 docs/paper_plan_2026-08-31.md §3）:
@@ -115,7 +122,9 @@ func (e *Engine) ProcessTick(t Tick) *Cross {
 		return nil
 	}
 
-	// Confirming: 倒数确认 tick，满 ConfirmSec 后判定
+	// Confirming: 继续跟踪两侧穿越标记（cls 诊断，与回测整窗收集口径一致；
+	// trackCrossed 自带 rem 窗口过滤，窗口外 tick 不标记）
+	e.trackCrossed(t)
 	e.confirmLeft--
 	if e.confirmLeft > 0 {
 		return nil
@@ -185,6 +194,14 @@ func (e *Engine) decide(t Tick) *Cross {
 	// 成交价可用性: 对侧 ask 缺失无法定价
 	if otherAsk <= 0 {
 		c.RejectReason = "missing_ask"
+		e.cross = c
+		return c
+	}
+	// 成交价边界: 与回测 fill∈[0.05,0.95] 过滤一致（06_backtest.py），
+	// 陈旧/退化盘口（ask 极端值）不成交 —— 防 shares = stake/ask 失真，
+	// 且与回测信号频率口径对齐
+	if otherAsk < fillMin || otherAsk > fillMax {
+		c.RejectReason = "ask_out_of_band"
 		e.cross = c
 		return c
 	}

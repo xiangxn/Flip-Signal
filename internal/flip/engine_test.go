@@ -160,6 +160,44 @@ func TestEngine_RejectPostEndTooHigh(t *testing.T) {
 	}
 }
 
+func TestEngine_RejectAskOutOfBand(t *testing.T) {
+	e := NewEngine(DefaultConfig())
+	cfg := e.Config()
+	// C1✓ C2✓，但对侧 ask 越界（ask < 0.05）→ 不成交（与回测 fill∈[0.05,0.95] 过滤一致）
+	seq := []Tick{mkTick(200, 0.75, 0.98)} // downBid 0.98 → DownAsk = 0.02 < 0.05
+	for i := 1; i <= cfg.ConfirmSec; i++ {
+		seq = append(seq, mkTick(200-i, 0.60, 0.98))
+	}
+	outs := run(e, seq)
+	if len(outs) != 1 || outs[0].OK || outs[0].RejectReason != "ask_out_of_band" {
+		t.Fatalf("低价越界应拒绝: %+v", outs)
+	}
+
+	// 上界: ask > 0.95 → downBid 0.02 → DownAsk = 0.98
+	e = NewEngine(DefaultConfig())
+	seq = []Tick{mkTick(200, 0.75, 0.02)}
+	for i := 1; i <= cfg.ConfirmSec; i++ {
+		seq = append(seq, mkTick(200-i, 0.60, 0.02))
+	}
+	outs = run(e, seq)
+	if len(outs) != 1 || outs[0].OK || outs[0].RejectReason != "ask_out_of_band" {
+		t.Fatalf("高价越界应拒绝: %+v", outs)
+	}
+}
+
+func TestEngine_ConfirmingTracksCls(t *testing.T) {
+	e := NewEngine(DefaultConfig())
+	// UP 穿越进入 Confirming；确认期间 DOWN 也穿越 → cls = both
+	seq := []Tick{mkTick(200, 0.75, 0.10)}
+	for i := 1; i <= e.Config().ConfirmSec; i++ {
+		seq = append(seq, mkTick(200-i, 0.62, 0.80)) // DOWN 在确认期间穿越（0.80 > 0.7）
+	}
+	run(e, seq)
+	if res := e.Finalize(mkTick(0, 0.62, 0.10)); res.Cls != "both" {
+		t.Fatalf("确认期对侧穿越应记 both, got %s", res.Cls)
+	}
+}
+
 func TestEngine_ConfirmAtWindowTail(t *testing.T) {
 	e := NewEngine(DefaultConfig())
 	cfg := e.Config()
