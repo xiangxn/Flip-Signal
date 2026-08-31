@@ -29,6 +29,7 @@ import (
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/collect"
+	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
 	"github.com/necklace/flip-signal/internal/trading"
@@ -59,7 +60,6 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	_ = dashboardAddr // 步骤 5 Dashboard 接线（当前仅解析 flag）
 
 	// ── 策略配置 ──
 	cfg := flip.Config{
@@ -189,12 +189,14 @@ func main() {
 	)
 	go resolutionPoller.Run(ctx)
 
-	// ── 运行时状态（Dashboard 步骤 5 挂接）──
+	// ── 运行时状态（Dashboard 数据源）──
 	runtime := &runtimeState{
 		Engine:      flip.NewEngine(cfg),
 		Executor:    executor,
 		Recorder:    recorder,
 		TwapAdapter: twapAdapter,
+		Mode:        *mode,
+		StartedAt:   time.Now(),
 	}
 	runtime.books = func() (*sdk.OrderBook, *sdk.OrderBook) {
 		bookMu.RLock()
@@ -205,6 +207,12 @@ func main() {
 		tokMu.RLock()
 		defer tokMu.RUnlock()
 		return yesTok, noTok
+	}
+
+	// ── Dashboard（手机浏览器兼容的单页前端）──
+	if *dashboardAddr != "" {
+		dashState := dashboard.NewState(recorder, runtime, cfg, *mode)
+		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
 	log.Println("========================================")
@@ -385,7 +393,7 @@ func main() {
 	}
 }
 
-// runtimeState 聚合主循环需要共享的组件引用（Dashboard 步骤 5 挂接）。
+// runtimeState 聚合主循环需要共享的组件引用（Dashboard 数据源）。
 type runtimeState struct {
 	Engine      *flip.Engine
 	Executor    flip.Executor
@@ -394,8 +402,31 @@ type runtimeState struct {
 	ConditionID string
 	Slug        string
 	EventStart  int64
+	Mode        string    // 成交模式: paper/live
+	StartedAt   time.Time // 进程启动时刻
 	books       func() (*sdk.OrderBook, *sdk.OrderBook)
 	tokens      func() (string, string)
+}
+
+// Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照，无锁读）。
+func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
+	yb, nb := rt.books()
+	pm := collect.MakePMTick(yb, nb)
+	_, twAge := rt.TwapAdapter.Latest()
+	return dashboard.LiveSnapshot{
+		Mode:        rt.Mode,
+		StartedAt:   rt.StartedAt,
+		ConditionID: rt.ConditionID,
+		Slug:        rt.Slug,
+		EventStart:  rt.EventStart,
+		EngineState: rt.Engine.State(),
+		YesBid:      pm.YesBid,
+		YesAsk:      pm.YesAsk,
+		NoBid:       pm.NoBid,
+		NoAsk:       pm.NoAsk,
+		BookLatMs:   pm.BookLatMs,
+		TwapAgeMs:   twAge,
+	}
 }
 
 // sampleTick 读取当前盘口构造一条引擎 tick（1s 粒度）。

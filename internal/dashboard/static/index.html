@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0d1117">
+  <title>Flip Signal · 纸面监控</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot" id="liveDot"></span>
+      <h1>Flip Signal</h1>
+      <span class="badge" id="modeBadge">—</span>
+    </div>
+    <div class="uptime" id="uptime">—</div>
+  </header>
+
+  <main>
+    <!-- 统计卡片 -->
+    <section class="stats" id="stats">
+      <div class="card stat"><div class="stat-val" id="statSignal">—</div><div class="stat-lbl">信号</div></div>
+      <div class="card stat"><div class="stat-val" id="statWon">—</div><div class="stat-lbl">胜</div></div>
+      <div class="card stat"><div class="stat-val" id="statLost">—</div><div class="stat-lbl">负</div></div>
+      <div class="card stat"><div class="stat-val" id="statPending">—</div><div class="stat-lbl">待结算</div></div>
+      <div class="card stat"><div class="stat-val" id="statWr">—</div><div class="stat-lbl">胜率</div></div>
+      <div class="card stat"><div class="stat-val" id="statPnl">—</div><div class="stat-lbl">累计 P&amp;L</div></div>
+    </section>
+
+    <!-- 当前窗口 -->
+    <section class="card window">
+      <div class="win-head">
+        <h2>当前窗口</h2>
+        <span class="engine-state" id="engineState">—</span>
+      </div>
+      <div class="win-slug" id="winSlug">等待下一个窗口…</div>
+      <div class="win-grid">
+        <div class="side yes">
+          <div class="side-name">YES</div>
+          <div class="side-bid" id="yesBid">—</div>
+          <div class="side-ask">ask <span id="yesAsk">—</span></div>
+        </div>
+        <div class="side no">
+          <div class="side-name">NO</div>
+          <div class="side-bid" id="noBid">—</div>
+          <div class="side-ask">ask <span id="noAsk">—</span></div>
+        </div>
+      </div>
+      <div class="win-meta">
+        <span>剩余 <b id="winRem">—</b>s</span>
+        <span>book_lat <b id="winLat">—</b>ms</span>
+        <span>twap_age <b id="winTwap">—</b>ms</span>
+        <span id="winCond" class="cond">—</span>
+      </div>
+    </section>
+
+    <!-- 信号列表 -->
+    <section class="card">
+      <div class="list-head"><h2>信号</h2><button class="refresh" id="btnSignals">刷新</button></div>
+      <div class="table-wrap">
+        <table id="signalsTable">
+          <thead><tr>
+            <th>时间</th><th>侧</th><th>trigger</th><th>post_end</th><th>fill</th><th>份额</th><th>结果</th><th>P&amp;L</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="signalsEmpty" hidden>暂无信号</div>
+    </section>
+
+    <!-- 穿越观测 -->
+    <section class="card">
+      <div class="list-head"><h2>穿越观测（含失败）</h2><button class="refresh" id="btnCrosses">刷新</button></div>
+      <div class="table-wrap">
+        <table id="crossesTable">
+          <thead><tr>
+            <th>时间</th><th>侧</th><th>trigger</th><th>post_end</th><th>cls</th><th>判定</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="empty" id="crossesEmpty" hidden>暂无观测</div>
+    </section>
+  </main>
+
+  <footer class="foot" id="foot">—</footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
