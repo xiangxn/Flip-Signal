@@ -3,7 +3,7 @@
 ## 项目概述
 
 **Flip Signal** 是一个针对 **Polymarket BTC 5分钟市场**（btc-updown-5m，Chainlink TWAP-60 结算）的量化交易系统。
-当前策略 **「自信崩溃」flip**：检测 YES/NO 价格穿越 0.7 后 10 秒内的反转信号——一侧 bid 曾 >0.73（市场高度自信）
+当前策略 **「自信崩溃」flip**：检测 UP/DOWN 价格穿越 0.7 后 10 秒内的反转信号——一侧 bid 曾 >0.73（市场高度自信）
 且 10 秒内崩回 ≤0.66（自信瓦解）时买入对侧。
 
 ### 核心原则
@@ -83,7 +83,7 @@ FlipSignal/
         │ (CLOB books)   │
         └───────┬────────┘
                 ▼
-        YES/NO 盘口 (best bid/ask)
+        UP/DOWN 盘口 (best bid/ask)
                 │
                 ▼
         Flip Engine (1s tick)
@@ -103,8 +103,8 @@ FlipSignal/
 
 ```
 1. 计算下个 5分钟对齐时间戳；预取 gamma 市场信息（边界前 20s）
-2. 窗口起点 → 订阅 YES/NO token（MarketMonitor），引擎 Reset
-3. 每秒 1s tick：读 YES/NO 盘口 → ProcessTick(引擎状态机)
+2. 窗口起点 → 订阅 UP/DOWN token（MarketMonitor），引擎 Reset
+3. 每秒 1s tick：读 UP/DOWN 盘口 → ProcessTick(引擎状态机)
 4. 穿越检测 → 确认（+10s）→ C1/C2 判定 → 信号/失败穿越 → Recorder
 5. 窗口结束（rem=0）→ 事件封存 → 注册结算轮询 → 下一窗口
 ```
@@ -117,7 +117,7 @@ Watching ──首个上升沿(>0.7, 15<rem<260)──▶ Confirming ──+10s�
   └──────────── 事件结束(本窗口不再观测) ◀───────────────────┘
 ```
 
-- **Watching**: 1s tick 更新 YES/NO 两侧状态，只在 15 < rem < 260 的 tick 做上升沿检测
+- **Watching**: 1s tick 更新 UP/DOWN 两侧状态，只在 15 < rem < 260 的 tick 做上升沿检测
 - **Confirming**: 记录 trigger_bid，等 10 个 tick 取 post_end 判定
 - **Done**: 事件内不再检测（与回测每事件仅首个观测一致，无 fallback 重试）
 - 数据质量：盘口 bid/ask 为 0（缺数据）时**直接跳过信号检查**，记录 book_latency 供事后过滤
@@ -146,7 +146,7 @@ replace (
 
 （沿用既有规范，本分支全量适用）
 
-- **注释语言一律使用中文**，技术专有名词保留英文（如 BTC、PM、YES/NO 等）
+- **注释语言一律使用中文**，技术专有名词保留英文（如 BTC、PM、UP/DOWN 等）
 - **标准库优先**；`internal/flip/` 核心计算层零外部依赖，可独立测试
 - **纯函数优先**：特征提取/判定逻辑为纯函数，无副作用，table-driven 测试
 - 命名：文件 `snake_case.go`、导出 `PascalCase`、私有 `camelCase`、常量 `stateXxx`
