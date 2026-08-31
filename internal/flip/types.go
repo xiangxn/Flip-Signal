@@ -79,6 +79,7 @@ type Tick struct {
 	NoBid    float64 // NO 最优买价
 	NoAsk    float64 // NO 最优卖价
 	BookLatMs int64  // 盘口传输延迟（毫秒，诊断）
+	TwapAgeMs int64  // TWAP-60 距上次推送毫秒数（诊断，策略本身不用 BTC 特征）
 }
 
 // ── 输出 ──
@@ -97,6 +98,7 @@ type Cross struct {
 	OK        bool    `json:"ok"`          // 是否通过 C1/C2 成为信号
 	RejectReason string `json:"reject_reason,omitempty"` // 未通过原因
 	BookLatMs int64   `json:"book_latency_ms,omitempty"` // 确认时刻盘口延迟（诊断）
+	TwapAgeMs int64   `json:"twap_age_ms,omitempty"`     // TWAP 距上次推送毫秒数（诊断）
 }
 
 // crossAt 记录首个穿越时刻的上下文（Confirming 阶段使用）。
