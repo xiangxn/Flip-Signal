@@ -5,6 +5,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -70,8 +71,10 @@ func withLogging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		if r.URL.Path != "/api/state" && r.URL.Path != "/static/" {
-			log.Printf("[Dashboard] %s %s (%s)", r.Method, r.URL.Path, time.Since(start).Round(time.Microsecond))
+		// 高频轮询与静态资源不打日志（防刷屏）；favicon 404 也无须刷日志
+		p := r.URL.Path
+		if p != "/api/state" && !strings.HasPrefix(p, "/static/") && p != "/favicon.ico" {
+			log.Printf("[Dashboard] %s %s (%s)", r.Method, p, time.Since(start).Round(time.Microsecond))
 		}
 	})
 }

@@ -39,7 +39,10 @@ type stateResponse struct {
 	PendingCount int     `json:"pending_count"`
 	WinRate      float64 `json:"win_rate"`
 	CumPnl       float64 `json:"cumulative_pnl"`
-	CrossCount   int     `json:"cross_count"` // 全部穿越观测（含失败）
+	CrossCount   int     `json:"cross_count"`   // 全部穿越观测（含失败）
+	DayPnlPos    int     `json:"day_pnl_pos"`   // 逐日盈利天数（已结算）
+	DayTotal     int     `json:"day_total"`     // 有结算信号的天数
+	MaxDrawdown  float64 `json:"max_drawdown"`  // 累计 P&L 最大回撤（USDC）
 }
 
 // crossResponse 是 /api/crosses 与 /api/signals 的元素。
@@ -69,6 +72,7 @@ type crossResponse struct {
 func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	live := s.snapshot.Snapshot()
 	total, won, lost, pending, winRate, cumPnl := s.recorder.Stats()
+	daily, dayPos := s.recorder.DailyPnl()
 
 	writeJSON(w, stateResponse{
 		TS:           s.nowFn().UTC().Format(time.RFC3339),
@@ -91,7 +95,10 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		PendingCount: pending,
 		WinRate:      winRate,
 		CumPnl:       cumPnl,
-		CrossCount:   len(s.recorder.Crosses(100000)),
+		CrossCount:   s.recorder.Count(),
+		DayPnlPos:    dayPos,
+		DayTotal:     len(daily),
+		MaxDrawdown:  s.recorder.MaxDrawdown(),
 	})
 }
 
@@ -102,9 +109,14 @@ func (s *State) handleCrosses(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, mapRecords(records))
 }
 
-// handleSignals 返回信号列表（ok=true，含 P&L，recorder 已按时间倒序）。
+// handleSignals 返回信号列表（ok=true，含 P&L，recorder 已按时间倒序，?limit= 分页）。
 func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, mapRecords(s.recorder.Signals()))
+	limit := queryLimit(r, 200)
+	records := s.recorder.Signals()
+	if len(records) > limit {
+		records = records[:limit]
+	}
+	writeJSON(w, mapRecords(records))
 }
 
 // handleConfig 返回当前策略配置（前端展示标定参数）。

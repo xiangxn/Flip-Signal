@@ -45,6 +45,15 @@
     pnl.classList.toggle('pos', s.cumulative_pnl > 0);
     pnl.classList.toggle('neg', s.cumulative_pnl < 0);
 
+    // 最大回撤（负数越低越深）
+    var dd = $('statDd');
+    dd.textContent = fmtPnl(s.max_drawdown);
+    dd.classList.toggle('neg', s.max_drawdown < 0);
+
+    // 逐日盈利（已结算天数）
+    var day = $('statDay');
+    day.textContent = s.day_total > 0 ? s.day_pnl_pos + '/' + s.day_total + ' 天' : '—';
+
     $('engineState').textContent = s.engine_state;
     $('engineState').className = 'engine-state ' + s.engine_state.toLowerCase();
     // 当前窗口 slug → Polymarket 事件页（点击跳转查看实时盘口）
@@ -100,6 +109,7 @@
       else if (r.reject_reason === 'missing_book') status = '<span class="muted">数据缺失</span>';
       else if (r.reject_reason === 'trigger_bid_too_low') status = '<span class="muted">C1 不足</span>';
       else if (r.reject_reason === 'post_end_too_high') status = '<span class="muted">C2 未崩</span>';
+      else if (r.reject_reason === 'ask_out_of_band') status = '<span class="muted">成交价越界</span>';
       else status = '<span class="muted">' + esc(r.reject_reason) + '</span>';
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
@@ -112,9 +122,24 @@
     });
   }
 
-  function fetchJSON(url, cb) {
-    fetch(url).then(function (r) { return r.json(); }).then(cb)
-      .catch(function (e) { console.warn(url, e); setLive(false); });
+  function fetchJSON(url, cb, timeoutMs) {
+    // 超时兜底: 服务器卡死/断网时中止请求，避免 setInterval 堆积挂起连接
+    timeoutMs = timeoutMs || 8000;
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () {
+      ctrl.abort();
+      console.warn(url, 'fetch timeout');
+      setLive(false);
+    }, timeoutMs);
+    fetch(url, { signal: ctrl.signal })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { clearTimeout(timer); cb(d); })
+      .catch(function (e) {
+        if (e.name === 'AbortError') return; // 超时已单独告警
+        clearTimeout(timer);
+        console.warn(url, e);
+        setLive(false);
+      });
   }
 
   function tick() {
