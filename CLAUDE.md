@@ -28,6 +28,23 @@
   （Q1 28.8%），信号恰好集中在该区域。**实盘禁止启用**，引擎仅纸面运行供数据采集。
   分析脚本 `python/analyze_twap_calibration.py`，回测已支持 `--price-source` /
   `--outcome-source` 口径开关。
+- **🔴 v2 高频数据 2 周 Checkpoint（2026-08-31，3753 窗口/14 天/1s 分辨率）**：
+  基率结构完全复现（both 率 31.6%、only 类 follow WR 99.6%、flip 上界 +0.51），
+  但 1s 微观特征（PM tape 流向、Binance 1s OFI、top5 深度、reprice 速度）全部
+  无正 EV 边缘——PM 的 reprice 已把类别信息定价，flip/follow EV 收敛 ≈0。
+  唯一双半同号候选 flip od≤0&pe≤0.30（EV +0.046）经机制解剖为纯 fill 价差残渣
+  （both 率与 outcome 分布无变化）。旧 follow od0_pe4 与 wait 模式 B 在 v2 大样本
+  下失效（负 EV）。**实盘维持禁止**，4 周后复评（~09-15）。
+  详见 `docs/v2_checkpoint_2026-08-31.md`，脚本 `python/v2/`。
+- **🟢 v3 从零重建模（2026-08-31，3641 穿越观测/14 天）**：弃用旧特征族，单一目标
+  flip WR ≥ 35% 且 EV>0（含新字段：Binance 盘口失衡 bid5/ask5/bid10/ask10、成交价质量、
+  长程 regime、基差轨迹、双侧深度）。结论：**+0s 穿越即入无信号（AUC 0.51）；+10s 确认后
+  找到样本外稳定候选 `trigger_bid > 0.73 & post_end ≤ 0.66/0.68`**（post_end = 穿越侧
+  bid@+10s，即"市场高度自信但 10 秒内崩溃"）——n=202 WR 44.1%/EV +0.064、n=140 WR 50.7%/
+  EV +0.107，双半同号、test2d/长窗 OOS 验证正、Wilson CI 下界 >35%。机制：both 率 Δ+18.4pp
+  是真类别预测（非 fill 残渣），Up 占比无偏，口径无关（纯 PM 订单簿动力学，绕开 TWAP 之争）。
+  +2s 变体证伪；other_delta/深度/regime 无样本外边缘。**待 09-15 数据复验后纸面→小 stake**。
+  详见 `docs/v3/report_2026-08-31.md`，脚本 `python/v3/`。
 
 ---
 

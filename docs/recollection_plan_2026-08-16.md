@@ -205,7 +205,11 @@ internal/collect/
 3. ✅ `cmd/collect/main.go`：新采集程序（市场循环 + 1s ticker + price_change 聚合落盘）
 4. ✅ `go build ./...` + 实采验证：完整窗口 ticks=287 / trades_agg=578（原始 8.6 万笔聚合）；
    A/B 实测 customFeatureEnabled 与 price_change 无关（默认 false）
-5. ⬜ 正式采集 2 周 → checkpoint → 扩展 `python/flip/analyze.py` 与 `follow/analyze.py` 新特征族
+5. ✅ 正式采集 2 周（08-18~08-31, 3753 窗口）→ checkpoint 完成：
+   **基率结构完全复现，但 1s 微观特征（PM tape/1s OFI/深度/reprice）全部无正 EV 边缘；
+   唯一双半同号候选 flip od≤0&pe≤0.30 经机制解剖为纯 fill 价差残渣；旧 follow od0_pe4
+   与 wait 模式 B 在 v2 大样本下失效（负 EV）。实盘维持禁止。**
+   详见 `docs/v2_checkpoint_2026-08-31.md`（脚本 `python/v2/`）。4 周复评待续
 
 ## 9. 运行方式
 

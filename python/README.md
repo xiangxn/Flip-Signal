@@ -14,12 +14,20 @@ python/
 ├── follow/                # follow 线（买穿越侧，目标 only 类，EV 上界 +0.19）
 │   ├── backtest.py        #   模式 A 首个穿越（--filter: od0_pe4 等）/ 模式 B wait
 │   └── analyze.py         #   特征筛选（同 flip 结构）
+├── v2/                    # v2 格式（1s ticks, data/btc）分析 —— 2026-08-31 checkpoint
+│   ├── lib.py             #   v2 加载（修正行合并）+ 穿越检测 + 窗口特征
+│   ├── 01_base_rate.py    #   基率复核: only/both 结构 + 类别上界
+│   ├── 02_feature_screen.py  # 21 特征分桶筛选（PM tape/1s OFI/深度/reprice）
+│   ├── 03_candidates.py   #   组合候选 + 双半 split
+│   ├── 04_combo_scan.py   #   od×path_eff 阈值网格扫描
+│   └── 05_candidate_eval.py  # 最终候选体检 + wait 模式 B 重验
 ├── legacy/                # 旧 5s 快照格式时代全部脚本（归档参考，见 legacy/README.md）
 ├── requirements.txt
 └── venv/
 ```
 
 两条策略线**完全独立**（各自目录/回测/评估，P&L 分开，绝不合并）。
+v2 checkpoint 结论见 `docs/v2_checkpoint_2026-08-31.md`。
 
 ## 环境
 
