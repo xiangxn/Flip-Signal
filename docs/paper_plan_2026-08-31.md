@@ -123,12 +123,20 @@ Watching ──首个上升沿(>0.7, 15<rem<260)──▶ Confirming ──+10s�
 ```jsonc
 // 穿越记录（成功与失败都记 —— 校准信号频率必需）
 {"event_type":"cross", "ts":..., "date":"2026-08-31", "condition_id":"...", "slug":"...",
- "event_start":..., "side":"yes", "rem":120, "trigger_bid":0.74,
- "post_end":0.62, "fill":0.40, "fill_comp":0.38, "shares":5.0,
+ "event_start":..., "side":"up", "rem":120, "trigger_bid":0.74,   // side: up/down（回测为 yes/no）
+ "post_end":0.62, "fill":0.40, "fill_comp":0.38, "shares":5.0, "stake":2,
  "ok":true, "reject_reason":"", "book_latency_ms":120, "twap_age_ms":0,
- "cls":"both",                          // 窗口结束时回填
- "won":true, "pnl":+3.0, "resolved_at":"..."}  // 结算时回填
+ "cls":"both",                          // 窗口结束时回填（整窗类别: both/only）
+ "won":true, "pnl":+3.0, "resolved_at":"..."}  // 结算时回填（未结算行无此字段）
 ```
+
+- **即时落盘**：全部观测窗口结束时立即写盘（行级 flush），ok=true 行先写
+  won/pnl 空缺、结算后整体重写当日文件（temp+rename 原子替换）—— 崩溃/断电不丢已记录事件。
+- **重启恢复**：启动时扫描 `crosses_*.jsonl` 恢复内存态，未结算信号的 conditionID
+  自动重新注册结算轮询（`recorder.PendingSignals()`）。
+- **UTC 日**：`date` 与文件名切分均为 UTC 日（与回测 date 口径一致，避免本地时区跨日错位）。
+- **09-15 复验**：纸面 JSONL → 回测口径（up/down→yes/no、fill←fill_comp、won→flip_won）
+  由 `python/v3/reuse_signals.py` 完成，输出 `trades_paper_v3.csv` 与基准对比摘要。
 
 > 说明：`data/v3/` 是**数据输出目录**名（非代码版本字眼），如不合意可改
 > `data/paper/` 或 `data/signals/`。
@@ -136,8 +144,10 @@ Watching ──首个上升沿(>0.7, 15<rem<260)──▶ Confirming ──+10s�
 ## 5. 结算
 
 - 复用 `internal/trading/resolution_poller.go`：窗口结束注册 `(conditionID, slug)`，
-  10s 轮询 gamma，`umaResolutionStatus=="resolved"` 且 outcomePrices 含 "1" →
-  `Resolve(conditionID, outcome)`。
+  10s 轮询 gamma，`umaResolutionStatus=="resolved"` 且 outcomePrices 胜方 > 0.5（归一化容忍
+  "1"/"1.0"/"0.999…"）→ 回调 `Resolve(conditionID, outcome)`。
+- 回调失败（如落盘失败）保持 pending 下次轮询重试；超过 24h 未结算（争议/无效市场）
+  放弃轮询（记录保持未结算状态）。
 - 与回测的"官方 TWAP outcome"一致；collect 的流采样+修正机制不引入（直接等官方，更准）。
 
 ## 6. 配置（flag + 代码默认值，参照 cmd/collect 风格）
@@ -149,7 +159,7 @@ Watching ──首个上升沿(>0.7, 15<rem<260)──▶ Confirming ──+10s�
 
 ## 7. Dashboard 重写方案（internal/dashboard/）
 
-参照旧 dashboard 三件套（server.go / handlers.go / templates.go + static）重写：
+参照旧 dashboard 三件套重写（server.go / handlers.go / state.go + `go:embed static/`，无 templates.go）：
 
 | API | 内容 |
 |---|---|
@@ -166,10 +176,10 @@ Watching ──首个上升沿(>0.7, 15<rem<260)──▶ Confirming ──+10s�
 ```
 cmd/flip/main.go                  # 主循环：配置 + 组件装配 + 市场循环
 cmd/collect/                      # 保留（暂停运行）
-internal/flip/{types,engine,exec,recorder,engine_test}.go
-internal/dashboard/{server,handlers,state,templates}.go + static/
+internal/flip/{types,engine,exec,recorder,engine_test,recorder_test}.go
+internal/dashboard/{server,handlers,state}.go + static/
 internal/collect/  internal/feed/  internal/trading/resolution_poller.go
-python/v2/lib.py   python/v3/{featlib,02_model,03_rules,04_anatomy,06_backtest}.py
+python/v2/lib.py   python/v3/{featlib,02_model,03_rules,04_anatomy,06_backtest,reuse_signals}.py
 docs/{paper_plan,strategy_plan,report}_2026-08-31.md
 CLAUDE.md（更新） go.mod  go.sum  .gitignore
 ```

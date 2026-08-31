@@ -54,10 +54,9 @@ FlipSignal/
 │   │   ├── recorder.go                  # JSONL 记录（按日切分）+ P&L 结算
 │   │   └── engine_test.go               # 单元测试
 │   ├── dashboard/
-│   │   ├── server.go                    # HTTP server
+│   │   ├── server.go                    # HTTP server（go:embed static/）
 │   │   ├── handlers.go                  # /api/state, /api/crosses, /api/signals, /api/config
 │   │   ├── state.go                     # 运行时组件引用
-│   │   ├── templates.go                 # 嵌入式 HTML 模板
 │   │   └── static/                      # index.html, app.js, style.css（兼容手机浏览器）
 │   ├── collect/                         # 数据格式 v2 工具（BestBid/BestAsk/MakePMTick/
 │   │                                    #   ParseMarketTokens/SettlementWorker，引擎复用）
@@ -67,7 +66,7 @@ FlipSignal/
 ├── docs/                                # 当前策略文档（报告/方案/实施计划）
 ├── python/
 │   ├── v2/lib.py                        # 数据加载 + 穿越观测提取（特征库依赖）
-│   └── v3/                              # 特征库 + 分析/回测脚本（复验用）
+│   └── v3/                              # 特征库 + 分析/回测脚本 + reuse_signals.py（复验用）
 ├── go.mod / go.sum
 └── CLAUDE.md                            # 本文件
 ```
@@ -175,14 +174,18 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
    纸面验证通过后从 eth 分支恢复实盘路径接入。
 2. **口径与回测 1:1**：穿越检测/确认/C1/C2/P&L 全部映射回测 `extract_cross`
    口径（见 paper_plan §3.2 映射表），信号 JSONL 字段对齐回测 trades_v3.csv，
-   09-15 可直接复用 python 脚本复核。
+   09-15 用 `python/v3/reuse_signals.py` 映射复核（side up/down→yes/no、
+   fill←fill_comp、won→flip_won）。
 3. **首穿越不重试**：事件内首个上升沿即观测，不满足 C1/C2 即放弃本窗口——
    与回测刻意一致，非引擎缺陷。
 4. **fill 双记录**：真实对侧 ask（纸面/实盘口径）与互补价（回测口径）同时落盘，
    用于评估互补假设的有效性。
 5. **数据采集暂停**：cmd/collect 保留不运行（API 压力），09-15 复验样本 =
    纸面信号记录 + 现有 14 天数据。
-6. **单 WS 订阅复用**：引擎与采集共用 `feed.OrderBookAdapter` 的重启恢复模式。
+6. **即时落盘 + 重启恢复**：观测窗口结束立即落盘（行级 flush，崩溃不丢）；
+   结算回填 temp+rename 原子重写当日文件；重启扫描 JSONL 恢复内存态并
+   自动重新注册未结算信号的结算轮询。
+7. **单 WS 订阅复用**：引擎与采集共用 `feed.OrderBookAdapter` 的重启恢复模式。
 
 ---
 
