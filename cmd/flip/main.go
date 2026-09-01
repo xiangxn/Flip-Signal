@@ -52,6 +52,12 @@ const lateLimit = 40 * time.Second
 // （WS 断流/重启期防止基于过期盘口的假穿越；book_latency_ms 仍落盘供事后过滤）。
 const staleBookThresholdMs = 5000
 
+// twapMaxStale 是 TWAP 推送新鲜度阈值: 超过该时长未收到推送则重建订阅。
+// SDK 只处理连接层重连（断开自动重连+重订阅），连接正常但推送断流
+// （服务器/代理静默丢流）只有数据面监控能发现——2026-09-01 服务器实测
+// twap_age 持续增长、重启进程才恢复，TwapAdapter 看门狗据此重建订阅。
+const twapMaxStale = 2 * time.Minute
+
 // marketCache 缓存下一窗口的市场信息（稳态预取: 本窗 tick 尾部预取，loop 顶部复用）。
 type marketCache struct {
 	slug string
@@ -169,24 +175,11 @@ func main() {
 	}()
 
 	// ── Chainlink TWAP-60（诊断字段，策略本身不用 BTC 特征）──
-	// 注意 symbol 后缀: SDK 将 "BTC" 解析为 30s 窗口，须显式 "BTC_60" 才订阅 twap_sixty
-	twapMonitor := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC_60")
-	twapAdapter := feed.NewTwapAdapter(twapMonitor, "BTC", sdk.ChainlinkTwapWindowSixty)
-	twapAdapter.Start(ctx)
-	go func() {
-		for {
-			err := twapMonitor.Run(ctx)
-			if err == nil || ctx.Err() != nil {
-				return
-			}
-			log.Printf("[Twap] ⚠️ monitor 异常退出: %v —— 5 秒后重启", err)
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(5 * time.Second):
-			}
-		}
-	}()
+	// 注意 symbol 后缀: SDK 将 "BTC" 解析为 30s 窗口，须显式 "BTC_60" 才订阅 twap_sixty。
+	// 适配器内建新鲜度看门狗：SDK 只做连接层重连，推送断流（服务器/代理静默）
+	// 时超过 twapMaxStale 未收到推送即重建订阅（2026-09-01 服务器实测）
+	twapAdapter := feed.NewTwapAdapter(client, "BTC", sdk.ChainlinkTwapWindowSixty, twapMaxStale)
+	twapAdapter.StartWithMonitor(ctx)
 
 	// ── 记录器与结算轮询 ──
 	recorder, err := flip.NewRecorder(*outputDir)

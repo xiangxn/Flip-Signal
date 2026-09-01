@@ -251,7 +251,9 @@ func main() {
 	startTwap := func() (stop func()) {
 		mctx, mcancel := context.WithCancel(ctx)
 		mon := sdk.NewCryptoPriceMonitor(client, sdk.MonitorChainlinkTwap, "BTC_60")
-		ad := feed.NewTwapAdapter(mon, "BTC", sdk.ChainlinkTwapWindowSixty)
+		// maxStale=0: 新鲜度守护由 collect 主循环的 30s 检查负责（重建整个
+		// adapter + atomic 指针），adapter 内建看门狗不启用避免双守护
+		ad := feed.NewTwapAdapter(client, "BTC", sdk.ChainlinkTwapWindowSixty, 0)
 		ad.Start(mctx)
 		twapAdapterPtr.Store(ad)
 		go func() {
