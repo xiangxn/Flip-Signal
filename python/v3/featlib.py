@@ -219,6 +219,11 @@ def build_obs_features(events, obs, hist_ranges, by_start):
         f["flip_fill0s"] = pm0.get(f"{other}_ask")                 # 穿越即入 fill = 对侧 ask
         f["flip_fill2s"] = o.get("flip_fill2s")
         f["flip_fill10s"] = o.get("flip_fill10s")
+        # follow 镜像口径（买穿越侧）: follow_won = 穿越侧赢
+        f["follow_won"] = int(o["won"])
+        f["follow_fill0s"] = pm0.get(f"{side}_ask")                # 穿越即入 fill = 触发侧 ask
+        f["follow_fill2s"] = o.get("fill2s")                       # 1 - 对侧 bid@+2s
+        f["follow_fill10s"] = o.get("fill10s")                     # 1 - 对侧 bid@+10s
         f["other_delta2s"] = o.get("other_delta2s")                # v2 经典对照
         f["other_delta10s"] = o.get("other_delta10s")
         f["cls"] = o["cls"]
@@ -255,10 +260,13 @@ def main():
     print(f"数据: {DATA}  |  事件 {len(events)}  |  穿越观测 {len(df)}")
     print(f"flip 基线: WR {df['flip_won'].mean() * 100:.1f}%  "
           f"fill0s {df['flip_fill0s'].mean():.3f}  fill10s {df['flip_fill10s'].mean():.3f}")
+    print(f"follow 基线: WR {df['follow_won'].mean() * 100:.1f}%  "
+          f"fill0s {df['follow_fill0s'].mean():.3f}  fill10s {df['follow_fill10s'].mean():.3f}")
     print(f"按日分布: {df['date'].value_counts().sort_index().to_dict()}")
     feat_cols = [c for c in df.columns if c not in
-                 ("flip_won", "flip_fill0s", "flip_fill2s", "flip_fill10s", "cls",
-                  "side", "rem", "event_start", "date")]
+                 ("flip_won", "flip_fill0s", "flip_fill2s", "flip_fill10s",
+                  "follow_won", "follow_fill0s", "follow_fill2s", "follow_fill10s",
+                  "cls", "side", "rem", "event_start", "date")]
     print(f"特征数: {len(feat_cols)}（含 None 列: "
           f"{[c for c in feat_cols if df[c].isna().all()]}）")
 
