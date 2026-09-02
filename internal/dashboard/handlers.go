@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/necklace/flip-signal/internal/flip"
@@ -32,35 +33,42 @@ type stateResponse struct {
 	BookLatMs int64   `json:"book_latency_ms"`
 	TwapAgeMs int64   `json:"twap_age_ms"`
 
+	// Binance spot（−1 = 尚无推送）
+	SpotPrice float64 `json:"spot_price"`
+	SpotAgeMs int64   `json:"spot_age_ms"`
+
 	// 统计汇总（已结算 + 待结算信号）
-	SignalCount  int     `json:"signal_count"`
-	WonCount     int     `json:"won_count"`
-	LostCount    int     `json:"lost_count"`
-	PendingCount int     `json:"pending_count"`
-	WinRate      float64 `json:"win_rate"`
-	CumPnl       float64 `json:"cumulative_pnl"`
-	CrossCount   int     `json:"cross_count"`  // 全部穿越观测（含失败）
-	DayPnlPos    int     `json:"day_pnl_pos"`  // 逐日盈利天数（已结算）
-	DayTotal     int     `json:"day_total"`    // 有结算信号的天数
-	MaxDrawdown  float64 `json:"max_drawdown"` // 累计 P&L 最大回撤（USDC）
+	ObservationCount int     `json:"observation_count"` // 全部触底观测（含失败）
+	SignalCount      int     `json:"signal_count"`
+	WonCount         int     `json:"won_count"`
+	LostCount        int     `json:"lost_count"`
+	PendingCount     int     `json:"pending_count"`
+	WinRate          float64 `json:"win_rate"`
+	CumPnl           float64 `json:"cumulative_pnl"`
+	DayPnlPos        int     `json:"day_pnl_pos"`  // 逐日盈利天数（已结算）
+	DayTotal         int     `json:"day_total"`    // 有结算信号的天数
+	MaxDrawdown      float64 `json:"max_drawdown"` // 累计 P&L 最大回撤（USDC）
 }
 
-// crossResponse 是 /api/crosses 与 /api/signals 的元素。
-type crossResponse struct {
+// recordResponse 是 /api/observations 与 /api/signals 的元素。
+// 字段 = 观测记录（ts/date/condition_id/slug 对齐回测 CSV 键，09-15 复验映射用）。
+type recordResponse struct {
 	Ts           int64   `json:"ts"`
 	Date         string  `json:"date"`
 	ConditionID  string  `json:"condition_id"`
 	Slug         string  `json:"slug"`
-	Side         string  `json:"side"`
+	Side         string  `json:"side"` // 狗侧: yes/no
 	Rem          int     `json:"rem"`
-	TriggerBid   float64 `json:"trigger_bid"`
-	PostEnd      float64 `json:"post_end"`
 	Fill         float64 `json:"fill"`
-	FillComp     float64 `json:"fill_comp"`
-	Shares       float64 `json:"shares"`
+	M20          float64 `json:"m_20"`
+	M30          float64 `json:"m_30"`
+	M45          float64 `json:"m_45"`
+	DistS        float64 `json:"dist_s,omitempty"`
+	DistT        float64 `json:"dist_t,omitempty"`
 	OK           bool    `json:"ok"`
 	RejectReason string  `json:"reject_reason,omitempty"`
-	Cls          string  `json:"cls"`
+	Shares       float64 `json:"shares,omitempty"`
+	BookLatMs    int64   `json:"book_latency_ms,omitempty"`
 	Won          *bool   `json:"won,omitempty"`
 	PnL          float64 `json:"pnl,omitempty"`
 	ResolvedAt   string  `json:"resolved_at,omitempty"`
@@ -71,48 +79,55 @@ type crossResponse struct {
 // handleState 返回运行状态与统计汇总。
 func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	live := s.snapshot.Snapshot()
-	total, won, lost, pending, winRate, cumPnl := s.recorder.Stats()
-	daily, dayPos := s.recorder.DailyPnl()
+	total, won, lost, pending, winRate, cumPnl := s.signalStats()
+	daily, dayPos := s.dailySummary()
 
 	writeJSON(w, stateResponse{
-		TS:           s.nowFn().UTC().Format(time.RFC3339),
-		Mode:         s.mode,
-		UptimeSec:    int64(s.nowFn().Sub(s.startedAt).Seconds()),
-		ConditionID:  live.ConditionID,
-		Slug:         live.Slug,
-		EventStart:   live.EventStart,
-		EngineState:  live.EngineState,
-		UpBid:        live.UpBid,
-		UpAsk:        live.UpAsk,
-		DownBid:      live.DownBid,
-		DownAsk:      live.DownAsk,
-		Remaining:    s.remaining(live),
-		BookLatMs:    live.BookLatMs,
-		TwapAgeMs:    live.TwapAgeMs,
-		SignalCount:  total,
-		WonCount:     won,
-		LostCount:    lost,
-		PendingCount: pending,
-		WinRate:      winRate,
-		CumPnl:       cumPnl,
-		CrossCount:   s.recorder.Count(),
-		DayPnlPos:    dayPos,
-		DayTotal:     len(daily),
-		MaxDrawdown:  s.recorder.MaxDrawdown(),
+		TS:               s.nowFn().UTC().Format(time.RFC3339),
+		Mode:             s.mode,
+		UptimeSec:        int64(s.nowFn().Sub(s.startedAt).Seconds()),
+		ConditionID:      live.ConditionID,
+		Slug:             live.Slug,
+		EventStart:       live.EventStart,
+		EngineState:      live.EngineState,
+		UpBid:            live.UpBid,
+		UpAsk:            live.UpAsk,
+		DownBid:          live.DownBid,
+		DownAsk:          live.DownAsk,
+		Remaining:        s.remaining(live),
+		BookLatMs:        live.BookLatMs,
+		TwapAgeMs:        live.TwapAgeMs,
+		SpotPrice:        live.SpotPrice,
+		SpotAgeMs:        live.SpotAgeMs,
+		ObservationCount: len(s.recorder.Observations()),
+		SignalCount:      total,
+		WonCount:         won,
+		LostCount:        lost,
+		PendingCount:     pending,
+		WinRate:          winRate,
+		CumPnl:           cumPnl,
+		DayPnlPos:        dayPos,
+		DayTotal:         len(daily),
+		MaxDrawdown:      s.recorder.MaxDrawdown(),
 	})
 }
 
-// handleCrosses 返回穿越观测列表（成功+失败，时间倒序，?limit= 分页）。
-func (s *State) handleCrosses(w http.ResponseWriter, r *http.Request) {
+// handleObservations 返回触底观测列表（成功+失败，时间倒序，?limit= 分页）。
+func (s *State) handleObservations(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r, 50)
-	records := s.recorder.Crosses(limit)
+	records := s.recorder.Observations()
+	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
+	if len(records) > limit {
+		records = records[:limit]
+	}
 	writeJSON(w, mapRecords(records))
 }
 
-// handleSignals 返回信号列表（ok=true，含 P&L，recorder 已按时间倒序，?limit= 分页）。
+// handleSignals 返回信号列表（ok=true，含 P&L，时间倒序，?limit= 分页）。
 func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
 	limit := queryLimit(r, 200)
 	records := s.recorder.Signals()
+	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
 	if len(records) > limit {
 		records = records[:limit]
 	}
@@ -122,13 +137,13 @@ func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
 // handleConfig 返回当前策略配置（前端展示标定参数）。
 func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
-		"trigger_threshold": s.cfg.TriggerThreshold,
-		"trigger_bid_min":   s.cfg.TriggerBidMin,
-		"post_end_max":      s.cfg.PostEndMax,
-		"confirm_sec":       s.cfg.ConfirmSec,
-		"max_remaining":     s.cfg.MaxRemaining,
-		"min_remaining":     s.cfg.MinRemaining,
-		"stake":             s.cfg.Stake,
+		"trigger_ask_max": s.cfg.TriggerAskMax,
+		"crash_min_ask":   s.cfg.CrashMinAsk,
+		"crash_window":    s.cfg.CrashWindow,
+		"dist_lo":         s.cfg.DistLo,
+		"dist_hi":         s.cfg.DistHi,
+		"rem_min":         s.cfg.RemMin,
+		"stake":           s.cfg.Stake,
 	})
 }
 
@@ -146,25 +161,55 @@ func (s *State) remaining(live LiveSnapshot) int {
 	return int(rem)
 }
 
+// signalStats 汇总信号统计: 总数/赢/输/待结算/胜率/累计 P&L。
+// 胜率按已结算信号计（待结算不计入分母）。
+func (s *State) signalStats() (total, won, lost, pending int, winRate, cumPnl float64) {
+	obsCount, sigCount, wonCount := s.recorder.Counts()
+	_ = obsCount
+	pending = len(s.recorder.PendingSignals())
+	total, won = sigCount, wonCount
+	lost = sigCount - wonCount - pending
+	if resolved := won + lost; resolved > 0 {
+		winRate = float64(won) / float64(resolved)
+	}
+	for _, d := range s.recorder.DailyPnl() {
+		cumPnl += d.PnL
+	}
+	return
+}
+
+// dailySummary 返回逐日 P&L 序列与盈利天数。
+func (s *State) dailySummary() (daily []flip.DayPnl, dayPos int) {
+	daily = s.recorder.DailyPnl()
+	for _, d := range daily {
+		if d.PnL > 0 {
+			dayPos++
+		}
+	}
+	return
+}
+
 // mapRecords 将 flip.Record 映射为 API 响应元素。
-func mapRecords(records []*flip.Record) []crossResponse {
-	out := make([]crossResponse, 0, len(records))
+func mapRecords(records []*flip.Record) []recordResponse {
+	out := make([]recordResponse, 0, len(records))
 	for _, rec := range records {
-		out = append(out, crossResponse{
+		out = append(out, recordResponse{
 			Ts:           rec.Ts,
 			Date:         rec.Date,
 			ConditionID:  rec.ConditionID,
 			Slug:         rec.Slug,
 			Side:         rec.Side,
 			Rem:          rec.Rem,
-			TriggerBid:   rec.TriggerBid,
-			PostEnd:      rec.PostEnd,
 			Fill:         rec.Fill,
-			FillComp:     rec.FillComp,
-			Shares:       rec.Shares,
+			M20:          rec.M20,
+			M30:          rec.M30,
+			M45:          rec.M45,
+			DistS:        rec.DistS,
+			DistT:        rec.DistT,
 			OK:           rec.OK,
 			RejectReason: rec.RejectReason,
-			Cls:          rec.Cls,
+			Shares:       rec.Shares,
+			BookLatMs:    rec.BookLatMs,
 			Won:          rec.Won,
 			PnL:          rec.PnL,
 			ResolvedAt:   rec.ResolvedAt,

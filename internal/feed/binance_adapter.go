@@ -32,7 +32,12 @@ type BinanceMarketData struct {
 	AskDepth10 float64
 
 	// Timestamp
-	UpdatedAt int64 // unix milliseconds
+	UpdatedAt int64 // 交易所成交时间戳（unix 毫秒）
+
+	// RxAtMs 最近一次 @trade 推送的本地接收时刻（unix 毫秒）。
+	// 交易所时间戳不能当新鲜度判据——链路排队/服务器时钟都会让它失真；
+	// 只有本地接收时刻能反映「这条数据现在还活着」（spot 新鲜度判据）。
+	RxAtMs int64
 }
 
 // BinanceConfig holds configuration for the Binance adapter.
@@ -387,6 +392,7 @@ func (b *BinanceAdapter) handleTrade(data json.RawMessage) {
 	b.dataMu.Lock()
 	b.data.Price = price
 	b.data.UpdatedAt = trade.TradeTime
+	b.data.RxAtMs = time.Now().UnixMilli()
 	b.dataMu.Unlock()
 
 	b.volMu.Lock()

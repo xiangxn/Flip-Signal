@@ -86,7 +86,6 @@ main {
 .win-head { display: flex; justify-content: space-between; align-items: center; }
 .engine-state { font-size: 13px; padding: 2px 10px; border-radius: 10px; background: #21262d; }
 .engine-state.watching { background: #21262d; color: var(--muted); }
-.engine-state.confirming { background: #3a2d00; color: #e3b341; }
 .engine-state.done { background: #001f14; color: var(--pos); }
 .win-slug {
   font-size: 13px; color: var(--muted);
@@ -116,6 +115,8 @@ main {
   margin-top: 12px; font-size: 13px; color: var(--muted);
 }
 .win-meta b { color: var(--text); font-variant-numeric: tabular-nums; }
+.spot-age { font-size: 12px; }
+.spot-age.stale { color: var(--neg); }
 .cond { margin-left: auto; font-size: 12px; }
 
 /* ── 列表 ── */
@@ -144,6 +145,9 @@ tbody tr:last-child td { border-bottom: none; }
 }
 .side-tag.up { background: rgba(63, 185, 80, 0.15); color: var(--up); }
 .side-tag.down { background: rgba(210, 153, 34, 0.15); color: var(--down); }
+/* 狗侧记录标签: yes(=UP) 绿 / no(=DOWN) 金（v4 记录侧语义，颜色沿用 up/down） */
+.side-tag.yes { background: rgba(63, 185, 80, 0.15); color: var(--up); }
+.side-tag.no { background: rgba(210, 153, 34, 0.15); color: var(--down); }
 
 .won { color: var(--pos); font-weight: 600; }
 .lost { color: var(--neg); font-weight: 600; }
@@ -172,6 +176,7 @@ tbody tr:last-child td { border-bottom: none; }
   .stat-val { font-size: 18px; }
   .side-bid { font-size: 24px; }
   table { font-size: 13px; }
-  /* 窄屏隐藏次要列（cls），保持可读性 */
-  #crossesTable th:nth-child(5), #crossesTable td:nth-child(5) { display: none; }
+  /* 窄屏隐藏次要列（m45），保持可读性 */
+  #signalsTable th:nth-child(5), #signalsTable td:nth-child(5),
+  #obsTable th:nth-child(5), #obsTable td:nth-child(5) { display: none; }
 }

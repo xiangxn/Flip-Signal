@@ -18,12 +18,12 @@ var static, _ = fs.Sub(staticFiles, "static")
 // ListenAndServe 启动 HTTP dashboard，阻塞直到服务器错误退出。
 // 路由:
 //
-//	/              单页前端（手机浏览器兼容）
-//	/static/*      静态资源
-//	/api/state    运行状态
-//	/api/crosses  穿越观测
-//	/api/signals  信号列表
-//	/api/config   策略配置
+//	/                 单页前端（手机浏览器兼容）
+//	/static/*         静态资源
+//	/api/state        运行状态
+//	/api/observations 触底观测（成功+失败）
+//	/api/signals      信号列表
+//	/api/config       策略配置
 func (s *State) ListenAndServe(addr string) {
 	mux := http.NewServeMux()
 
@@ -33,7 +33,7 @@ func (s *State) ListenAndServe(addr string) {
 
 	// JSON API
 	mux.HandleFunc("/api/state", s.handleState)
-	mux.HandleFunc("/api/crosses", s.handleCrosses)
+	mux.HandleFunc("/api/observations", s.handleObservations)
 	mux.HandleFunc("/api/signals", s.handleSignals)
 	mux.HandleFunc("/api/config", s.handleConfig)
 

@@ -1,11 +1,21 @@
-// Flip Signal 纸面监控前端。
-// 轮询: /api/state 5s（窗口/盘口/统计）、/api/signals 与 /api/crosses 15s。
+// Dog@0.2 纸面监控前端。
+// 轮询: /api/state 5s（窗口/盘口/统计）、/api/signals 与 /api/observations 15s。
 (function () {
   'use strict';
 
   var $ = function (id) { return document.getElementById(id); };
   var stateInterval = 5000;
   var listInterval = 15000;
+
+  // 触底判定状态的中文映射（观测表/信号表共用）
+  var REJECT_CN = {
+    rem_low: '时间不足',
+    no_hist: 'σ 窗口不足',
+    missing_spot: '现货缺失',
+    missing_anchor: '锚缺失',
+    no_crash: '无急跌',
+    dist_out: '浅洞外'
+  };
 
   function fmtTime(tsMs) {
     var d = new Date(tsMs);
@@ -28,6 +38,16 @@
 
   function setLive(ok) {
     $('liveDot').classList.toggle('live', ok);
+  }
+
+  // 狗侧标签: yes=UP 配色 / no=DOWN 配色（元素 class 用 yes/no 而非 up/down）
+  function sideTag(side) {
+    return '<span class="side-tag ' + side + '">' + side.toUpperCase() + '</span>';
+  }
+
+  // dist 显示: 0 = 输入缺失未计算（dist_s ∈ (−0.5,0) 开区间，0 不可能是有效值）
+  function fmtDist(d) {
+    return d ? d.toFixed(2) : '—';
   }
 
   function renderState(s) {
@@ -75,9 +95,22 @@
     $('winLat').textContent = s.book_latency_ms;
     $('winTwap').textContent = s.twap_age_ms;
 
-    $('foot').textContent = 'TS ' + s.ts + ' · 穿越观测 ' + s.cross_count + ' 条';
+    // spot: −1 无推送（灰）；>2s 陈旧（红，引擎已判现货缺失）；否则正常
+    var spotAge = $('winSpotAge');
+    if (s.spot_age_ms < 0 || s.spot_price === 0) {
+      $('winSpot').textContent = '—';
+      spotAge.textContent = '无推送';
+      spotAge.className = 'spot-age stale';
+    } else {
+      $('winSpot').textContent = s.spot_price.toFixed(2);
+      spotAge.textContent = s.spot_age_ms + 'ms';
+      spotAge.className = 'spot-age' + (s.spot_age_ms > 2000 ? ' stale' : '');
+    }
+
+    $('foot').textContent = 'TS ' + s.ts + ' · 触底观测 ' + s.observation_count + ' 条';
   }
 
+  // 信号行: 时间 侧 rem fill m45 dist_s 份额 结果 P&L
   function renderSignals(list) {
     var tb = document.querySelector('#signalsTable tbody');
     tb.innerHTML = '';
@@ -87,36 +120,35 @@
       var pnlCls = r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '');
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
-        '<td><span class="side-tag ' + r.side + '">' + r.side.toUpperCase() + '</span></td>' +
-        '<td>' + r.trigger_bid.toFixed(3) + '</td>' +
-        '<td>' + r.post_end.toFixed(3) + '</td>' +
+        '<td>' + sideTag(r.side) + '</td>' +
+        '<td>' + r.rem + '</td>' +
         '<td>' + r.fill.toFixed(3) + '</td>' +
-        '<td>' + r.shares.toFixed(1) + '</td>' +
+        '<td>' + (r.m_45 ? r.m_45.toFixed(2) : '—') + '</td>' +
+        '<td>' + fmtDist(r.dist_s) + '</td>' +
+        '<td>' + (r.shares ? r.shares.toFixed(1) : '—') + '</td>' +
         '<td>' + (r.won == null ? '<span class="muted">待结算</span>' : (r.won ? '<span class="won">赢</span>' : '<span class="lost">输</span>')) + '</td>' +
         '<td class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td>';
       tb.appendChild(tr);
     });
   }
 
-  function renderCrosses(list) {
-    var tb = document.querySelector('#crossesTable tbody');
+  // 观测行: 时间 侧 rem fill m45 dist_s 判定
+  function renderObservations(list) {
+    var tb = document.querySelector('#obsTable tbody');
     tb.innerHTML = '';
-    $('crossesEmpty').hidden = list.length > 0;
+    $('obsEmpty').hidden = list.length > 0;
     list.forEach(function (r) {
       var tr = document.createElement('tr');
       var status;
       if (r.ok) status = '<span class="won">信号</span>';
-      else if (r.reject_reason === 'missing_book') status = '<span class="muted">数据缺失</span>';
-      else if (r.reject_reason === 'trigger_bid_too_low') status = '<span class="muted">C1 不足</span>';
-      else if (r.reject_reason === 'post_end_too_high') status = '<span class="muted">C2 未崩</span>';
-      else if (r.reject_reason === 'ask_out_of_band') status = '<span class="muted">成交价越界</span>';
-      else status = '<span class="muted">' + esc(r.reject_reason) + '</span>';
+      else status = '<span class="muted">' + (REJECT_CN[r.reject_reason] || esc(r.reject_reason)) + '</span>';
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
-        '<td><span class="side-tag ' + r.side + '">' + r.side.toUpperCase() + '</span></td>' +
-        '<td>' + r.trigger_bid.toFixed(3) + '</td>' +
-        '<td>' + r.post_end.toFixed(3) + '</td>' +
-        '<td class="muted">' + esc(r.cls) + '</td>' +
+        '<td>' + sideTag(r.side) + '</td>' +
+        '<td>' + r.rem + '</td>' +
+        '<td>' + r.fill.toFixed(3) + '</td>' +
+        '<td>' + (r.m_45 ? r.m_45.toFixed(2) : '—') + '</td>' +
+        '<td>' + fmtDist(r.dist_s) + '</td>' +
         '<td>' + status + '</td>';
       tb.appendChild(tr);
     });
@@ -147,11 +179,11 @@
   }
   function tickLists() {
     fetchJSON('/api/signals', renderSignals);
-    fetchJSON('/api/crosses?limit=50', renderCrosses);
+    fetchJSON('/api/observations?limit=50', renderObservations);
   }
 
   $('btnSignals').addEventListener('click', function () { fetchJSON('/api/signals', renderSignals); });
-  $('btnCrosses').addEventListener('click', function () { fetchJSON('/api/crosses?limit=50', renderCrosses); });
+  $('btnObs').addEventListener('click', function () { fetchJSON('/api/observations?limit=50', renderObservations); });
 
   setInterval(tick, stateInterval);
   setInterval(tickLists, listInterval);

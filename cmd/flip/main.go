@@ -1,15 +1,17 @@
-// Command flip 是「自信崩溃」翻转策略引擎入口（docs/strategy_plan_2026-08-31.md）。
+// Command flip 是「狗@0.2」策略引擎入口（口径文档 docs/engine_plan_dog020_2026-09-02.md）。
 //
-// 连接 Polymarket CLOB WebSocket（UP/DOWN 订单簿）与 Chainlink TWAP-60（诊断），
-// 每秒驱动 flip.Engine 状态机检测穿越信号，纸面模拟成交（PaperExecutor），
-// 官方结算后记录完整 P&L 到 JSONL（按日切分）。
+// 连接 Polymarket CLOB WebSocket（UP/DOWN 订单簿）、Chainlink TWAP-60（锚/σ）与
+// Binance BTCUSDT spot（浅洞腿），每秒驱动 flip.Engine 状态机检测「触底观测」——
+// 某侧 ask 首次砸到 ≤0.20 的下狗机会：急跌(m_45) × 浅洞(dist_s) × 时间(rem) 三腿
+// 全过即 ok 信号，纸面模拟成交（PaperExecutor），官方结算后回填完整 P&L 到 JSONL
+// （touches_YYYY-MM-DD.jsonl，按日切分）。成功与失败的观测都落盘（频率校准用）。
 //
-// 纸面/实盘同源：成交执行由 -mode 区分（live 未实现，纸面验证后接入）。
+// 结算轮询只注册 ok 信号；崩溃后重启按磁盘 pending 恢复注册。
 //
 // 用法：
 //
-//	go run ./cmd/flip -output data/v3 -dashboard :8090
-//	go run ./cmd/flip --trigger-bid-min 0.73 --post-end-max 0.66 --stake 2
+//	go run ./cmd/flip -output data/v4 -dashboard :8090
+//	go run ./cmd/flip --trigger-ask-max 0.2 --crash-min-ask 0.4 --stake 2
 package main
 
 import (
@@ -19,6 +21,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"math"
 	"os"
 	"os/signal"
 	"sync"
@@ -28,7 +31,6 @@ import (
 	"github.com/tidwall/gjson"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
-	"github.com/necklace/flip-signal/internal/collect"
 	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
@@ -39,29 +41,96 @@ import (
 const windowSec = 300
 
 // prefetchLead 是市场信息预取提前量：窗口边界前多少秒开始调
-// FetchMarketBySlug 并缓存结果（与 cmd/collect 同款约定）。
+// FetchMarketBySlug 并缓存结果。
 const prefetchLead = 20 * time.Second
 
-// lateLimit 是订阅迟到阈值: 已落后窗口边界超过该时长则跳过本窗口。
-// 订阅迟到 ≤lateLimit 安全（检测窗 rem<260，首 40s 本就不观测，行为与
-// 准时订阅等价）；>lateLimit 时引擎首 tick 落在检测窗内，会把订阅前已
-// 存在的盘口误判为上升沿（假穿越），必须跳过。
-const lateLimit = 40 * time.Second
+// lateLimit 是订阅迟到阈值：已落后窗口边界超过该时长则跳过本窗口。
+// v4 从窗口起点就开始观测判定（无 v3 前 40s 检测盲区），迟到 >15s 意味着
+// 盘口证据缺失 15 个槽位，会把 m_45 急跌窗的头部真实打薄——整窗跳过
+// 防假截断（迟到 ≤15s 时 45 槽窗仍基本完整，与回测 ±1-2 tick 相位差同级）。
+const lateLimit = 15 * time.Second
 
-// staleBookThresholdMs 是盘口陈旧阈值: 传输延迟超过该值按缺数据处理
-// （WS 断流/重启期防止基于过期盘口的假穿越；book_latency_ms 仍落盘供事后过滤）。
-const staleBookThresholdMs = 5000
+// spotFreshMs 是 Binance spot 新鲜度阈值: 距本地接收 >此毫秒判现货缺失。
+// BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻而非
+// 交易所成交时间戳（链路排队/服务器时钟都会让后者失真，见 BinanceAdapter）。
+const spotFreshMs = 2000
 
-// twapMaxStale 是 TWAP 推送新鲜度阈值: 超过该时长未收到推送则重建订阅。
-// SDK 只处理连接层重连（断开自动重连+重订阅），连接正常但推送断流
-// （服务器/代理静默丢流）只有数据面监控能发现——2026-09-01 服务器实测
-// twap_age 持续增长、重启进程才恢复，TwapAdapter 看门狗据此重建订阅。
+// twapMaxStale 是 TWAP 推送新鲜度阈值: 超过该时长未收到推送则重建订阅
+// （2026-09-01 服务器实测断流事件，TwapAdapter 内建看门狗，见其注释）。
 const twapMaxStale = 2 * time.Minute
+
+// twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
+const twapLookbackSeconds = 60
+
+// histWindows 是 σ 滚动窗容量（前 ≤18 个已完成窗口的振幅均值）——
+// 与回测 hist 窗口数一致（python/v4/01_backtest_r1.py）。
+const histWindows = 18
+
+// histMin 是 σ 可用所需最少窗口数: 不足则 no_hist（冷启动期）。
+const histMin = 3
 
 // marketCache 缓存下一窗口的市场信息（稳态预取: 本窗 tick 尾部预取，loop 顶部复用）。
 type marketCache struct {
 	slug string
 	res  *gjson.Result
+}
+
+// histState 维护 σ 的滚动窗口: hist_bps = 前 ≤histWindows 个已完成窗口
+// |tw_close − tw_open| 的均值，换算成 bps = mean/anchor·1e4（与回测口径一致，
+// dist = Δ价/anchor·1e4/hist_bps）。
+//
+// 启动时用官方历史范围预热（feed.FetchTwapRanges，消除冷启动 no_hist 期）；
+// live 每窗口结束追加本窗 |close − anchor|。push 严格发生在窗口结束后——
+// σ 永远只用已结束窗口，不混入当前窗。
+type histState struct {
+	mu   sync.Mutex
+	vals []float64 // 振幅（$），时间正序
+}
+
+func newHistState() *histState { return &histState{} }
+
+// seed 预热: 官方范围整表替换（热启动段在 ~19s 内完成，先于任何 live push）。
+func (h *histState) seed(vals []float64) {
+	if len(vals) == 0 {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(vals) > histWindows {
+		vals = vals[len(vals)-histWindows:] // 只留最近的
+	}
+	h.vals = append(h.vals[:0], vals...)
+}
+
+// push 窗口结束后追加一个振幅（$）。
+func (h *histState) push(amp float64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.vals = append(h.vals, amp)
+	if len(h.vals) > histWindows {
+		h.vals = append(h.vals[:0], h.vals[len(h.vals)-histWindows:]...)
+	}
+}
+
+// bps 返回当前可用 σ（bps 口径）；不足 histMin 窗返回 0（不可用）。anchor ≤0 恒不可用。
+func (h *histState) bps(anchor float64) float64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if len(h.vals) < histMin || anchor <= 0 {
+		return 0
+	}
+	var sum float64
+	for _, v := range h.vals {
+		sum += v
+	}
+	return sum / float64(len(h.vals)) / anchor * 1e4
+}
+
+// count 返回已收集窗口数（日志用）。
+func (h *histState) count() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.vals)
 }
 
 func init() {
@@ -70,13 +139,16 @@ func init() {
 
 func main() {
 	// ── CLI 参数（与回测脚本同名，优先级最高）──
-	outputDir := flag.String("output", "data/v3", "信号 JSONL 输出目录（按日切分）")
+	outputDir := flag.String("output", "data/v4", "观测 JSONL 输出目录（按日切分）")
 	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（如 :8090）")
 	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug 前缀")
 	mode := flag.String("mode", "paper", "成交模式: paper|live（live 未实现）")
-	triggerThreshold := flag.Float64("trigger-threshold", 0.7, "穿越阈值（触发侧 bid 首次超过）")
-	triggerBidMin := flag.Float64("trigger-bid-min", 0.73, "C1 高度自信: 穿越时刻触发侧 bid 下限")
-	postEndMax := flag.Float64("post-end-max", 0.66, "C2 快速崩溃: 确认时刻触发侧 bid 上限")
+	triggerAskMax := flag.Float64("trigger-ask-max", 0.20, "触发阈值: 某侧 ask ≤ 此值 即触底观测")
+	crashMinAsk := flag.Float64("crash-min-ask", 0.40, "急跌腿: m_45 窗内同侧 ask 曾 ≥ 此值")
+	crashWindow := flag.Int("crash-window", 45, "急跌窗: 触发前 N 个 tick 槽位内求 max")
+	distLo := flag.Float64("dist-lo", -0.5, "浅洞带下界: dist_s 必须 > 此值（开区间）")
+	distHi := flag.Float64("dist-hi", 0.0, "浅洞带上界: dist_s 必须 < 此值（开区间）")
+	remMin := flag.Int("rem-min", 180, "时间腿: 仅 rem > 此值的触发有效")
 	stake := flag.Float64("stake", 2, "每信号投入 USDC")
 	flag.Parse()
 
@@ -85,18 +157,15 @@ func main() {
 
 	// ── 策略配置 ──
 	cfg := flip.Config{
-		TriggerThreshold: *triggerThreshold,
-		TriggerBidMin:    *triggerBidMin,
-		PostEndMax:       *postEndMax,
-		ConfirmSec:       10, // +10s 确认窗口（+2s 变体已证伪，勿改）
-		MaxRemaining:     260,
-		MinRemaining:     15,
-		Stake:            *stake,
+		TriggerAskMax: *triggerAskMax,
+		CrashMinAsk:   *crashMinAsk,
+		CrashWindow:   *crashWindow,
+		DistLo:        *distLo,
+		DistHi:        *distHi,
+		RemMin:        *remMin,
+		Stake:         *stake,
 	}
-	executor, err := flip.NewExecutor(cfg, flip.ExecMode(*mode))
-	if err != nil {
-		log.Fatalf("[Flip] %v", err)
-	}
+	executor := flip.NewExecutor(*mode)
 
 	// ── Polymarket 客户端（未配置私钥则自动生成临时密钥，只读运行）──
 	cfgSDK := defaultSDKConfig()
@@ -111,10 +180,10 @@ func main() {
 	}
 	client := sdk.NewClient(&cfgSDK)
 	if readOnly {
-		log.Println("[Flip] ⚠️  未配置 POLYMARKET_OWNER_KEY —— 只读运行（纸面交易）")
+		log.Println("[Dog] ⚠️  未配置 POLYMARKET_OWNER_KEY —— 只读运行（纸面交易）")
 	}
 
-	// ── PM 订单簿订阅（SDK MarketMonitor，参照 cmd/collect 模式）──
+	// ── PM 订单簿订阅（SDK MarketMonitor）──
 	monitor := sdk.NewMarketMonitor(cfgSDK.Polymarket.ClobWSBaseURL, false, client, false)
 	var (
 		subMu     sync.RWMutex
@@ -150,7 +219,7 @@ func main() {
 			}
 		}
 	}()
-	// monitor 重启恢复（参照 collect：Run 退出后 SDK 清空订阅，无条件重启）
+	// monitor 重启恢复（SDK 清空订阅，无条件重启）
 	go func() {
 		for {
 			err := monitor.Run(ctx)
@@ -158,9 +227,9 @@ func main() {
 				return
 			}
 			if err != nil {
-				log.Printf("[Flip] ⚠️ MarketMonitor 异常退出: %v —— 5 秒后重启", err)
+				log.Printf("[Dog] ⚠️ MarketMonitor 异常退出: %v —— 5 秒后重启", err)
 			} else {
-				log.Printf("[Flip] ⚠️ MarketMonitor 干净退出 —— 5 秒后重启")
+				log.Printf("[Dog] ⚠️ MarketMonitor 干净退出 —— 5 秒后重启")
 			}
 			select {
 			case <-ctx.Done():
@@ -174,17 +243,37 @@ func main() {
 		}
 	}()
 
-	// ── Chainlink TWAP-60（诊断字段，策略本身不用 BTC 特征）──
-	// 注意 symbol 后缀: SDK 将 "BTC" 解析为 30s 窗口，须显式 "BTC_60" 才订阅 twap_sixty。
-	// 适配器内建新鲜度看门狗：SDK 只做连接层重连，推送断流（服务器/代理静默）
-	// 时超过 twapMaxStale 未收到推送即重建订阅（2026-09-01 服务器实测）
+	// ── Chainlink TWAP-60（anchor/σ 数据源，结算口径）──
+	// symbol 后缀: SDK 将 "BTC" 解析为 30s 窗口，须显式 "BTC_60" 才订阅 twap_sixty。
 	twapAdapter := feed.NewTwapAdapter(client, "BTC", sdk.ChainlinkTwapWindowSixty, twapMaxStale)
 	twapAdapter.StartWithMonitor(ctx)
+
+	// ── Binance BTCUSDT spot（浅洞腿现货参考价，不出单）──
+	// Start 首次拨号失败不自愈（返回 err），外层包装指数退避重试直至连上；
+	// 后续断线由 runReadLoop 自愈重连。拨号走 http.ProxyFromEnvironment
+	// （部署机勿设指向不通代理的 HTTP(S)_PROXY）。
+	binance := feed.NewBinanceAdapter()
+	go func() {
+		backoff := time.Second
+		for {
+			err := binance.Start(ctx)
+			if err == nil || ctx.Err() != nil {
+				return
+			}
+			log.Printf("[Binance] ⚠️ 首次拨号失败: %v —— %v 后重试", err, backoff.Round(time.Millisecond))
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff = min(backoff*2, 30*time.Second)
+		}
+	}()
 
 	// ── 记录器与结算轮询 ──
 	recorder, err := flip.NewRecorder(*outputDir)
 	if err != nil {
-		log.Fatalf("[Flip] 记录器创建失败: %v", err)
+		log.Fatalf("[Dog] 记录器创建失败: %v", err)
 	}
 	defer recorder.Close()
 
@@ -192,26 +281,25 @@ func main() {
 		client.FetchMarketBySlug,
 		10*time.Second,
 		func(conditionID string, outcome int) error {
-			if err := recorder.Resolve(conditionID, outcome); err != nil {
-				log.Printf("[Flip] ⚠️ 结算回填失败: %v（保持 pending，下次轮询重试）", err)
-				return err
-			}
+			// 命中返回 true（含已结算重复命中）；未命中说明 pending 已移除/不存在
+			recorder.Resolve(conditionID, outcome, time.Now())
 			return nil
 		},
 	)
 	// 重启恢复: 磁盘上未结算信号（崩溃遗留）重新注册结算轮询
 	for _, sig := range recorder.PendingSignals() {
 		resolutionPoller.Register(sig.ConditionID, sig.Slug)
-		log.Printf("[Flip] 🔄 恢复未结算信号: %s slug=%s", sig.ConditionID, sig.Slug)
+		log.Printf("[Dog] 🔄 恢复未结算信号: %s slug=%s", sig.ConditionID, sig.Slug)
 	}
 	go resolutionPoller.Run(ctx)
 
 	// ── 运行时状态（Dashboard 数据源）──
 	runtime := &runtimeState{
-		Engine:      flip.NewEngine(cfg),
 		Executor:    executor,
 		Recorder:    recorder,
 		TwapAdapter: twapAdapter,
+		Binance:     binance,
+		Stake:       cfg.Stake,
 		Mode:        *mode,
 		StartedAt:   time.Now(),
 	}
@@ -232,12 +320,24 @@ func main() {
 		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
+	// σ 冷启动预热: 官方历史 |close−open| 范围回填（≤18 窗，逐窗间隔 1s ≈ 19s，
+	// crypto-price 接口限速低）。预热完成后首窗即有 σ；全部缺失则回退冷启动
+	// （前 3 个完成窗口前 no_hist，与回测口径一致）
+	hist := newHistState()
+	go func() {
+		log.Printf("[Cycle] σ 预热: 拉取官方 TWAP 历史范围（≤%d 窗）...", histWindows)
+		vals := feed.FetchTwapRanges(client, histWindows, windowSec, twapLookbackSeconds)
+		hist.seed(vals)
+		log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
+	}()
+
 	log.Println("========================================")
-	log.Printf(" Flip Signal Detection — 纸面交易（mode=%s）", *mode)
+	log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", *mode)
 	log.Printf(" 输出: %s  |  Slug: %s", *outputDir, *slugPrefix)
-	log.Printf(" 参数: trigger>%.2f C1 bid>%.2f C2 post_end≤%.2f stake=%.0fUSDC confirm=+%ds",
-		cfg.TriggerThreshold, cfg.TriggerBidMin, cfg.PostEndMax, cfg.Stake, cfg.ConfirmSec)
-	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 诊断]")
+	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
+		cfg.TriggerAskMax, cfg.CrashWindow, cfg.CrashMinAsk,
+		cfg.DistLo, cfg.DistHi, cfg.RemMin, cfg.Stake)
+	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 浅洞]")
 	log.Println("========================================")
 
 	// ── 市场周期主循环 ──
@@ -246,14 +346,14 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("[Flip] 正在关闭...")
+			log.Println("[Dog] 正在关闭...")
 			return
 		default:
 		}
 
 		// 步骤 1: 对齐下一个 5 分钟窗口。
 		// 已落后边界 ≤lateLimit 时直接进入本窗口（迟到订阅安全，稳态收尾
-		// 普遍晚几百毫秒）；>lateLimit 才跳过（防订阅迟到导致假穿越）。
+		// 普遍晚几百毫秒）；>lateLimit 才跳过（证据缺失太多防假判定）。
 		now := time.Now()
 		alignedTs := now.Unix() / windowSec * windowSec
 		nextStart := time.Unix(alignedTs, 0)
@@ -332,7 +432,7 @@ func main() {
 			}
 		}
 		conditionID := marketData.Get("conditionId").String()
-		upTokenID, downTokenID := collect.ParseMarketTokens(marketData)
+		upTokenID, downTokenID := parseMarketTokens(marketData)
 		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
 			select {
@@ -360,11 +460,17 @@ func main() {
 		upBook, downBook = nil, nil
 		bookMu.Unlock()
 
-		// 步骤 5: 启动事件采集与检测
-		endTime := nextStart.Add(windowSec * time.Second)
+		// 步骤 5: 注入窗口上下文（anchor/σ），启动 1s tick 采集
+		// anchor = 边界瞬间的 TWAP-60 流值（官方开盘价 p50 偏差 0.08bps / p99
+		// 1.14bps，口径文档已量化——记录在案，复验按分布对比不做逐笔对账）
+		anchor, _ := twapAdapter.Latest()
 		engine := flip.NewEngine(cfg)
+		engine.BeginWindow(anchor, hist.bps(anchor))
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
-		log.Printf("[Cycle] event=%s 开始采集（窗口 %s）...", conditionID, slug)
+		endTime := nextStart.Add(windowSec * time.Second)
+
+		log.Printf("[Cycle] event=%s 窗口开始 anchor=%.2f hist_bps=%.2f（%d 窗）",
+			conditionID, anchor, hist.bps(anchor), hist.count())
 
 		ticker := time.NewTicker(time.Second)
 		lastTick := flip.Tick{}
@@ -382,9 +488,11 @@ func main() {
 				}
 				lastTick = sampleTick(tickTime, rem, runtime)
 
-				// 引擎驱动（穿越/确认/判定）
-				if c := engine.ProcessTick(lastTick); c != nil {
-					handleCross(c, runtime, cfg.TriggerThreshold)
+				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
+				if o := engine.ProcessTick(lastTick); o != nil {
+					if rec := handleObservation(o, runtime, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK {
+						resolutionPoller.Register(conditionID, slug)
+					}
 				}
 				if rem == 0 {
 					ticker.Stop()
@@ -405,33 +513,23 @@ func main() {
 				}
 				// 每 30s 打印一次窗口进度（rem 每秒递减，无重复）
 				if rem%30 == 0 {
-					log.Printf("[Event] %s rem=%ds up=%.3f/%.3f down=%.3f/%.3f state=%s",
+					log.Printf("[Event] %s rem=%ds up=%.3f/%.3f down=%.3f/%.3f spot=%.2f state=%s",
 						conditionID, rem, lastTick.UpBid, lastTick.UpAsk,
-						lastTick.DownBid, lastTick.DownAsk, engine.State())
+						lastTick.DownBid, lastTick.DownAsk, lastTick.BinPrice, engine.State())
 				}
 			}
 		}
 
-		// 步骤 6: 窗口结束 → Finalize（补判定 + cls）→ 记录 → 注册结算
-		res := engine.Finalize(lastTick)
-		if res.Cross != nil {
-			if err := recorder.RecordCross(conditionID, slug, nextStart.Unix(), res.Cross, res.Cls, cfg.Stake); err != nil {
-				log.Printf("[Flip] 记录失败: %v", err)
-			} else {
-				status := "失败"
-				if res.Cross.OK {
-					status = "🎯 信号"
-				}
-				log.Printf("[Event] %s 穿越观测: %s side=%s trigger=%.3f post_end=%.3f fill=%.3f shares=%.1f (%s)",
-					conditionID, status, res.Cross.Side, res.Cross.TriggerBid,
-					res.Cross.PostEnd, res.Cross.Fill, res.Cross.Shares, res.Cross.RejectReason)
-			}
+		// 步骤 6: 窗口结束 → σ 滚动窗追加本窗振幅（严格只用已结束窗口）。
+		// close 采自边界瞬间的 TWAP 流值（与官方收盘价口径差异已在文档量化）。
+		// 无触底的窗口无记录（回测 extract 同款语义），本窗结算注册已在触发时完成。
+		if anchor > 0 && lastTick.TwapPrice > 0 {
+			hist.push(math.Abs(lastTick.TwapPrice - anchor))
+			log.Printf("[Cycle] 窗口结束 %s: |close−anchor|=%.2f, σ 现 %d 窗",
+				conditionID, math.Abs(lastTick.TwapPrice-anchor), hist.count())
 		} else {
-			log.Printf("[Event] %s 无穿越观测 cls=%s", conditionID, res.Cls)
+			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)
 		}
-
-		// 注册异步结算（gamma umaResolutionStatus → Resolve 回填 P&L）
-		resolutionPoller.Register(conditionID, slug)
 	}
 }
 
@@ -445,9 +543,11 @@ type runtimeState struct {
 	Executor    flip.Executor
 	Recorder    *flip.Recorder
 	TwapAdapter *feed.TwapAdapter
+	Binance     *feed.BinanceAdapter
 	ConditionID string
 	Slug        string
 	EventStart  int64
+	Stake       float64   // 每信号投入（构造后不变）
 	Mode        string    // 成交模式: paper/live（构造后不变）
 	StartedAt   time.Time // 进程启动时刻（构造后不变）
 	books       func() (*sdk.OrderBook, *sdk.OrderBook)
@@ -459,8 +559,17 @@ type runtimeState struct {
 // Engine.State() 内部另有锁，读后调用安全。
 func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 	yb, nb := rt.books()
-	pm := collect.MakePMTick(yb, nb)
+	pm := makePMTick(yb, nb)
 	_, twAge := rt.TwapAdapter.Latest()
+	bin := rt.Binance.LatestData()
+
+	// spot 显示口径: 未推送显示 0/−1（前端判灰）；有推送则显示最近价与
+	// 本地接收龄（前端按 >2s 标红——与引擎判 stale 的阈值一致）
+	spotPrice, spotAgeMs := 0.0, int64(-1)
+	if bin.RxAtMs > 0 {
+		spotPrice = bin.Price
+		spotAgeMs = time.Now().UnixMilli() - bin.RxAtMs
+	}
 
 	rt.mu.RLock()
 	snap := dashboard.LiveSnapshot{
@@ -469,13 +578,15 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 		ConditionID: rt.ConditionID,
 		Slug:        rt.Slug,
 		EventStart:  rt.EventStart,
-		EngineState: rt.Engine.State(),
+		EngineState: rt.Engine.State().String(),
 		UpBid:       pm.UpBid,
 		UpAsk:       pm.UpAsk,
 		DownBid:     pm.DownBid,
 		DownAsk:     pm.DownAsk,
 		BookLatMs:   pm.BookLatMs,
 		TwapAgeMs:   twAge,
+		SpotPrice:   spotPrice,
+		SpotAgeMs:   spotAgeMs,
 	}
 	rt.mu.RUnlock()
 	return snap
@@ -491,18 +602,22 @@ func (rt *runtimeState) setWindow(engine *flip.Engine, conditionID, slug string,
 	rt.mu.Unlock()
 }
 
-// sampleTick 读取当前盘口构造一条引擎 tick（1s 粒度）。
+// sampleTick 读取当前盘口/现货/TWAP 构造一条引擎 tick（1s 粒度）。
+// 盘口缺失时 bid/ask 为 0（引擎判无效 tick 不检）；spot 新鲜度超阈值置 0
+// （= missing_spot）；TWAP 现值随身携带（dist_t 观察腿 + 窗口 close 采样）。
 func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 	yb, nb := rt.books()
-	pm := collect.MakePMTick(yb, nb)
-	// 陈旧盘口保护: WS 断流/重启期间盘口传输延迟超阈值时按缺数据处理
-	// （bid/ask=0 → 引擎跳过信号检查），防止基于过期盘口的假穿越；
-	// book_latency_ms 仍落盘供事后过滤（paper_plan §11）
-	if pm.BookLatMs > staleBookThresholdMs {
-		pm.UpBid, pm.UpAsk, pm.DownBid, pm.DownAsk = 0, 0, 0, 0
+	pm := makePMTick(yb, nb)
+
+	// Binance spot（浅洞腿输入）: 本地接收新鲜度 ≤spotFreshMs 才有效——
+	// 断流后保留的最后价必须判 stale（交易所时间戳不可作新鲜度判据）
+	bin := rt.Binance.LatestData()
+	spot := 0.0
+	if bin.RxAtMs > 0 && t.UnixMilli()-bin.RxAtMs <= spotFreshMs {
+		spot = bin.Price
 	}
-	// TWAP-60 仅作诊断（TwapAgeMs），策略本身不用任何 BTC 特征
-	_, twAge := rt.TwapAdapter.Latest()
+
+	twapPrice, twAge := rt.TwapAdapter.Latest()
 	return flip.Tick{
 		Ts:        t.UnixMilli(),
 		Rem:       rem,
@@ -511,29 +626,37 @@ func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 		DownBid:   pm.DownBid,
 		DownAsk:   pm.DownAsk,
 		BookLatMs: pm.BookLatMs,
+		BinPrice:  spot,
+		TwapPrice: twapPrice,
 		TwapAgeMs: twAge,
 	}
 }
 
-// handleCross 处理引擎产出的穿越判定（成功或失败）。
-func handleCross(c *flip.Cross, rt *runtimeState, triggerThreshold float64) {
-	if !c.OK {
-		log.Printf("[Flip] 穿越否决: side=%s trigger=%.3f post_end=%.3f reason=%s",
-			c.Side, c.TriggerBid, c.PostEnd, c.RejectReason)
-		return
+// handleObservation 处理引擎产出的触底观测（成功与失败都落盘，频率校准用）:
+// ok 信号先纸面执行（PaperExecutor 校验 fill>0），随后 RecordObservation 立即
+// 落盘（行级 flush，崩溃不丢）。返回落盘记录（落盘失败返回 nil）——ok 信号的
+// 结算轮询注册由调用方按 rec.OK 决定。
+func handleObservation(o *flip.Observation, rt *runtimeState, conditionID, slug string, eventStart int64) *flip.Record {
+	if o.OK {
+		// 信号 → 纸面执行（PaperExecutor 恒 filled；live 模式后续接入）
+		if err := rt.Executor.Execute(o); err != nil {
+			log.Printf("[Trading] ⚠️ 信号未执行: %v（仍记录观测）", err)
+		}
+		log.Printf("[Event] 🎯 触底信号 side=%s rem=%ds fill=%.3f m20=%.2f m30=%.2f m45=%.2f dist_s=%.2f dist_t=%.2f shares=%.1f",
+			o.Side, o.Rem, o.Fill, o.M20, o.M30, o.M45, o.DistS, o.DistT, o.Shares)
+	} else {
+		log.Printf("[Event] 触底否决 side=%s rem=%ds fill=%.3f m45=%.2f dist_s=%.2f reason=%s",
+			o.Side, o.Rem, o.Fill, o.M45, o.DistS, o.RejectReason)
 	}
-	// 信号 → 纸面执行（PaperExecutor 恒 filled；live 模式后续接入）
-	res, err := rt.Executor.Execute(c)
+	rec, err := rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake)
 	if err != nil {
-		log.Printf("[Trading] ⚠️ 信号未执行: %v", err)
-		return
+		log.Printf("[Dog] 观测落盘失败: %v", err)
+		return nil
 	}
-	log.Printf("[Flip] 🎯 SIGNAL: %s>%.2f C1(%.3f) C2(%.3f) fill=%.3f shares=%.1f | status=%s avg_fill=%.3f",
-		c.Side, triggerThreshold, c.TriggerBid, c.PostEnd, c.Fill, c.Shares,
-		res.Status, res.AvgFillPrice)
+	return rec
 }
 
-// defaultSDKConfig 构造 SDK 配置（环境变量覆盖，参照 cmd/collect 约定）。
+// defaultSDKConfig 构造 SDK 配置（环境变量覆盖）。
 func defaultSDKConfig() sdk.Config {
 	cfg := sdk.Config{
 		HttpTimeout: 10 * time.Second,

@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117">
-  <title>Flip Signal 监控</title>
+  <title>Dog@0.2 监控</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="liveDot"></span>
-      <h1>Flip Signal</h1>
+      <h1>Dog@0.2</h1>
       <span class="badge" id="modeBadge">—</span>
     </div>
     <div class="uptime" id="uptime">—</div>
@@ -41,12 +41,12 @@
       </div>
       <div class="win-grid">
         <div class="side up">
-          <div class="side-name">UP</div>
+          <div class="side-name">UP (=YES)</div>
           <div class="side-bid" id="upBid">—</div>
           <div class="side-ask">ask <span id="upAsk">—</span></div>
         </div>
         <div class="side down">
-          <div class="side-name">DOWN</div>
+          <div class="side-name">DOWN (=NO)</div>
           <div class="side-bid" id="downBid">—</div>
           <div class="side-ask">ask <span id="downAsk">—</span></div>
         </div>
@@ -55,6 +55,7 @@
         <span>剩余 <b id="winRem">—</b>s</span>
         <span>book_lat <b id="winLat">—</b>ms</span>
         <span>twap_age <b id="winTwap">—</b>ms</span>
+        <span>spot <b id="winSpot">—</b> <span class="spot-age" id="winSpotAge">—</span></span>
         <span id="winCond" class="cond">—</span>
       </div>
     </section>
@@ -65,7 +66,7 @@
       <div class="table-wrap">
         <table id="signalsTable">
           <thead><tr>
-            <th>时间</th><th>侧</th><th>trigger</th><th>post_end</th><th>fill</th><th>份额</th><th>结果</th><th>P&amp;L</th>
+            <th>时间</th><th>侧</th><th>rem</th><th>fill</th><th>m45</th><th>dist_s</th><th>份额</th><th>结果</th><th>P&amp;L</th>
           </tr></thead>
           <tbody></tbody>
         </table>
@@ -73,18 +74,18 @@
       <div class="empty" id="signalsEmpty" hidden>暂无信号</div>
     </section>
 
-    <!-- 穿越观测 -->
+    <!-- 触底观测 -->
     <section class="card">
-      <div class="list-head"><h2>穿越观测（含失败）</h2><button class="refresh" id="btnCrosses">刷新</button></div>
+      <div class="list-head"><h2>触底观测（含失败）</h2><button class="refresh" id="btnObs">刷新</button></div>
       <div class="table-wrap">
-        <table id="crossesTable">
+        <table id="obsTable">
           <thead><tr>
-            <th>时间</th><th>侧</th><th>trigger</th><th>post_end</th><th>cls</th><th>判定</th>
+            <th>时间</th><th>侧</th><th>rem</th><th>fill</th><th>m45</th><th>dist_s</th><th>判定</th>
           </tr></thead>
           <tbody></tbody>
         </table>
       </div>
-      <div class="empty" id="crossesEmpty" hidden>暂无观测</div>
+      <div class="empty" id="obsEmpty" hidden>暂无观测</div>
     </section>
   </main>
 
