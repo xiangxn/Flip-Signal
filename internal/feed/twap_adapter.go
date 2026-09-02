@@ -230,17 +230,29 @@ func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapL
 
 	ranges := make([]float64, 0, windowN)
 	for k := windowN; k >= 1; k-- {
+		// 相邻窗口请求起点至少间隔 1s（含失败窗——失败 continue 若跳过间隔，
+		// 连续失败会退化成 ~0.2s 连发，实测反而加重上游限流）
+		if k < windowN {
+			time.Sleep(time.Second)
+		}
 		start := time.Unix(aligned-int64(k)*windowSec, 0).UTC()
 		end := start.Add(time.Duration(windowSec) * time.Second)
 		openPrice, closePrice := client.FetchOpenPrice(
 			sdk.BTC, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
 		if openPrice <= 0 || closePrice <= 0 {
-			log.Printf("[Twap] ⚠️ 历史窗口 %s 官方价格缺失，跳过", start.Format("15:04"))
-			continue
+			// 该接口失败多为 Polymarket 后端上游 Chainlink 限流——上游 429 被包成
+			// HTTP 400（body: Chainlink API error 429），SDK 仅对 429 重试故不生效。
+			// 等 2s 重试一次（给上游喘息），仍失败才跳过。
+			log.Printf("[Twap] ⚠️ 历史窗口 %s 官方价格缺失（上游限流？），2s 后重试", start.Format("15:04"))
+			time.Sleep(2 * time.Second)
+			openPrice, closePrice = client.FetchOpenPrice(
+				sdk.BTC, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
+			if openPrice <= 0 || closePrice <= 0 {
+				log.Printf("[Twap] ⚠️ 历史窗口 %s 官方价格缺失，跳过", start.Format("15:04"))
+				continue
+			}
 		}
 		ranges = append(ranges, math.Abs(closePrice-openPrice))
-		// crypto-price 接口限速低，逐窗口间隔 1s 防止启动时连发触发 429
-		time.Sleep(time.Second)
 	}
 	return ranges
 }
