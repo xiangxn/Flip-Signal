@@ -10,7 +10,7 @@
 #   ./build.sh <name> <arch>      # build cmd/<name> for linux/<arch>
 #   ./build.sh --clean            # remove dist/
 #
-# 可用命令由 cmd/ 目录自动检测: flip, collect, compact
+# 可用命令由 cmd/ 目录自动检测（v4 分支仅剩 flip: dog@0.2 策略引擎）
 # ============================================================
 set -euo pipefail
 
@@ -111,5 +111,5 @@ echo ""
 echo "Transfer to Ubuntu:"
 echo "  ./deploy.sh $CMD"
 echo ""
-echo "Run on Ubuntu (flip 引擎，纸面模式):"
-echo "  nohup ./flip -output data/v3 -dashboard :8090 >> flip.log 2>&1 &"
+echo "Run on Ubuntu (dog@0.2 引擎，纸面模式):"
+echo "  nohup ./flip -output data/v4 -dashboard :8090 >> flip.log 2>&1 &"

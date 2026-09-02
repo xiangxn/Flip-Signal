@@ -3,19 +3,23 @@ set -euo pipefail
 
 source .env
 
-# 用法: ./down.sh <v3|btc|eth>
-#   v3  — 下载 /root/lastrading/data/v3（flip 纸面信号 JSONL）到 ./data
+# 用法: ./down.sh <v4|v3|btc|eth>
+#   v4  — 下载 /root/lastrading/data/v4（dog@0.2 触底观测 JSONL）到 ./data
+#   v3  — 下载 /root/lastrading/data/v3（旧 flip 信号 JSONL，兼容保留）
 #   btc — 下载 /root/lastrading/data 到 ./data（旧采集数据，兼容保留）
 #   eth — 下载 /root/lastrading/eth/data 到 ./data（兼容保留）
 
 SYMBOL="${1:-}"
 
 if [ -z "$SYMBOL" ]; then
-    echo "用法: $0 <v3|btc|eth>"
+    echo "用法: $0 <v4|v3|btc|eth>"
     exit 1
 fi
 
 case "$SYMBOL" in
+    v4)
+        REMOTE_DIR="/root/lastrading/data/v4"
+        ;;
     v3)
         REMOTE_DIR="/root/lastrading/data/v3"
         ;;
@@ -26,7 +30,7 @@ case "$SYMBOL" in
         REMOTE_DIR="/root/lastrading/eth/data"
         ;;
     *)
-        echo "错误: 无效参数 '$SYMBOL'，只支持 v3、btc 或 eth"
+        echo "错误: 无效参数 '$SYMBOL'，只支持 v4、v3、btc 或 eth"
         exit 1
         ;;
 esac
