@@ -557,6 +557,9 @@ type runtimeState struct {
 // Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照）。
 // Engine 指针在锁内读取；指针自身稳定（主循环只换不释放），
 // Engine.State() 内部另有锁，读后调用安全。
+// ⚠️ 首个窗口边界前 Engine 为 nil（启动空窗：Dashboard 先于窗口循环开服，
+// 最长等 ~5 分钟才 setWindow）——判空，nil 时状态留空（前端此时显示
+// 「等待下一个窗口…」，口径一致）。
 func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 	yb, nb := rt.books()
 	pm := makePMTick(yb, nb)
@@ -572,13 +575,17 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 	}
 
 	rt.mu.RLock()
+	engineState := ""
+	if rt.Engine != nil {
+		engineState = rt.Engine.State().String()
+	}
 	snap := dashboard.LiveSnapshot{
 		Mode:        rt.Mode,
 		StartedAt:   rt.StartedAt,
 		ConditionID: rt.ConditionID,
 		Slug:        rt.Slug,
 		EventStart:  rt.EventStart,
-		EngineState: rt.Engine.State().String(),
+		EngineState: engineState,
 		UpBid:       pm.UpBid,
 		UpAsk:       pm.UpAsk,
 		DownBid:     pm.DownBid,
