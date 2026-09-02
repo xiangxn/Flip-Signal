@@ -1,359 +1,246 @@
 package flip
 
 import (
+	"bufio"
+	"encoding/json"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
 
-// newTestRecorder 创建临时目录 recorder，测试结束后清理。
-func newTestRecorder(t *testing.T) *Recorder {
+// testTs 返回 2026-09-02 12:00:00 UTC 的 epoch 毫秒。
+func testTs(t *testing.T) (int64, int64, time.Time) {
 	t.Helper()
-	dir := t.TempDir()
-	r, err := NewRecorder(dir)
-	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
-	}
-	t.Cleanup(func() { r.Close() })
-	return r
+	base := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	return base.UnixMilli(), base.UnixMilli() + 30_000, base.Add(5 * time.Minute)
 }
 
-// mkSignalCross 构造一条已通过判定的信号观测（ok=true, stake=2）。
-func mkSignalCross(side string, ts int64) *Cross {
-	return &Cross{
-		Ts:         ts,
-		Side:       side,
-		Rem:        200,
-		TriggerBid: 0.80,
-		PostEnd:    0.50,
-		Fill:       0.50,
-		FillComp:   0.50,
-		Shares:     4.0, // stake 2 / fill 0.5
-		OK:         true,
+func mkObs(ts int64, side string, ok bool, fill float64) *Observation {
+	stake := 2.0
+	o := &Observation{Ts: ts, Side: side, Rem: 250, Fill: fill, M45: 0.55, DistS: -0.2, OK: ok}
+	if ok {
+		o.Shares = stake / fill
 	}
+	return o
 }
 
-// recFile 读取当日 jsonl 文件内容（单文件假设）。
-func recFile(t *testing.T, dir string) string {
+// readDay 把当日文件读成 map[conditionID]Record（校验落盘内容用）。
+func readDay(t *testing.T, dir, date string) map[string]Record {
 	t.Helper()
-	files, _ := filepath.Glob(filepath.Join(dir, "crosses_*.jsonl"))
-	if len(files) != 1 {
-		t.Fatalf("jsonl 文件数 = %d, want 1", len(files))
-	}
-	data, err := os.ReadFile(files[0])
+	f, err := os.Open(recordFilePath(dir, date))
 	if err != nil {
-		t.Fatalf("ReadFile: %v", err)
+		t.Fatalf("打开 %s: %v", date, err)
 	}
-	return string(data)
-}
-
-// TestRecorder_ResolveWon 验证 UP 侧信号 + outcome=1(DOWN 赢) → flip 赢。
-func TestRecorder_ResolveWon(t *testing.T) {
-	r := newTestRecorder(t)
-	ts := int64(1788186000000)
-
-	// UP 侧触发: outcome=1 表示 DOWN 胜 → flip(UP 崩溃)赢
-	if err := r.RecordCross("condA", "btc-updown-5m-1", ts, mkSignalCross("up", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-	if err := r.Resolve("condA", 1); err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-
-	sigs := r.Signals()
-	if len(sigs) != 1 {
-		t.Fatalf("signals = %d, want 1", len(sigs))
-	}
-	s := sigs[0]
-	if s.Won == nil || !*s.Won {
-		t.Fatalf("up 触发 + outcome=1 → won=false, 应为 true")
-	}
-	// pnl = shares - stake = 4 - 2 = 2
-	if s.PnL != 2.0 {
-		t.Fatalf("pnl = %v, want 2.0", s.PnL)
-	}
-	if s.ResolvedAt == "" {
-		t.Fatalf("resolved_at 未填充")
-	}
-}
-
-// TestRecorder_ResolveDownWon 验证 DOWN 侧信号 + outcome=0(UP 赢) → flip 赢
-// （down 触发 = 市场信 DOWN 会跌 → 买 UP；UP 赢 = flip 赢）。
-func TestRecorder_ResolveDownWon(t *testing.T) {
-	r := newTestRecorder(t)
-	ts := int64(1788186300000)
-
-	if err := r.RecordCross("condB", "btc-updown-5m-2", ts, mkSignalCross("down", ts), "only", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-	if err := r.Resolve("condB", 0); err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-
-	sigs := r.Signals()
-	if len(sigs) != 1 {
-		t.Fatalf("signals = %d, want 1", len(sigs))
-	}
-	s := sigs[0]
-	if s.Won == nil || !*s.Won {
-		t.Fatalf("down 触发 + outcome=0(UP 赢) → won=false, 应为 true")
-	}
-	if s.PnL != 2.0 {
-		t.Fatalf("pnl = %v, want 2.0", s.PnL)
-	}
-}
-
-// TestRecorder_ResolveDownLost 验证 DOWN 侧信号 + outcome=1(DOWN 赢) → flip 输。
-func TestRecorder_ResolveDownLost(t *testing.T) {
-	r := newTestRecorder(t)
-	ts := int64(1788186500000)
-
-	if err := r.RecordCross("condF", "btc-updown-5m-6", ts, mkSignalCross("down", ts), "only", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-	if err := r.Resolve("condF", 1); err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-
-	sigs := r.Signals()
-	if len(sigs) != 1 {
-		t.Fatalf("signals = %d, want 1", len(sigs))
-	}
-	s := sigs[0]
-	if s.Won == nil || *s.Won {
-		t.Fatalf("down 触发 + outcome=1(DOWN 赢) → won=true, 应为 false")
-	}
-	if s.PnL != -2.0 {
-		t.Fatalf("pnl = %v, want -2.0", s.PnL)
-	}
-}
-
-// TestRecorder_ResolveIdempotent 验证同一 conditionID 重复结算安全。
-func TestRecorder_ResolveIdempotent(t *testing.T) {
-	r := newTestRecorder(t)
-	ts := int64(1788186600000)
-
-	if err := r.RecordCross("condC", "btc-updown-5m-3", ts, mkSignalCross("up", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-	if err := r.Resolve("condC", 1); err != nil {
-		t.Fatalf("Resolve #1: %v", err)
-	}
-	if err := r.Resolve("condC", 1); err != nil {
-		t.Fatalf("Resolve #2: %v", err)
-	}
-	sigs := r.Signals()
-	if len(sigs) != 1 {
-		t.Fatalf("重复结算后 signals = %d, want 1", len(sigs))
-	}
-}
-
-// TestRecorder_ResolveUnknownNoOp 验证未知 conditionID 结算为 no-op。
-func TestRecorder_ResolveUnknownNoOp(t *testing.T) {
-	r := newTestRecorder(t)
-	if err := r.Resolve("nope", 0); err != nil {
-		t.Fatalf("未知 conditionID 应 no-op: %v", err)
-	}
-}
-
-// TestRecorder_FileWritten 验证 ok=false 记录立即落盘（行级 flush，无需 Close）。
-func TestRecorder_FileWritten(t *testing.T) {
-	dir := t.TempDir()
-	r, err := NewRecorder(dir)
-	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
-	}
-	defer r.Close()
-
-	c := &Cross{Ts: 1788186900000, Side: "up", Rem: 100, TriggerBid: 0.71, OK: false, RejectReason: "trigger_bid_too_low"}
-	if err := r.RecordCross("condD", "btc-updown-5m-4", 1788186900000/1000, c, "only", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-
-	// 不调用 Close 也应有文件内容（行级 flush）
-	if data := recFile(t, dir); len(data) == 0 {
-		t.Fatalf("jsonl 文件为空（行级 flush 未生效）")
-	}
-}
-
-// TestRecorder_ImmediateWrite 验证 ok=true 信号记录立即落盘:
-// 结算前盘上已有该行，且 won/pnl/resolved_at 未填充。
-func TestRecorder_ImmediateWrite(t *testing.T) {
-	dir := t.TempDir()
-	r, err := NewRecorder(dir)
-	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
-	}
-	defer r.Close()
-
-	ts := int64(1788187200000)
-	if err := r.RecordCross("condE", "btc-updown-5m-5", ts, mkSignalCross("down", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-
-	data := recFile(t, dir)
-	lines := strings.Split(strings.TrimSpace(data), "\n")
-	if len(lines) != 1 {
-		t.Fatalf("行数 = %d, want 1", len(lines))
-	}
-	if !strings.Contains(lines[0], `"ok":true`) {
-		t.Fatalf("未结算信号行应含 ok:true: %s", lines[0])
-	}
-	if strings.Contains(lines[0], `"won":`) || strings.Contains(lines[0], `"resolved_at"`) {
-		t.Fatalf("结算前不应有 won/resolved_at 字段: %s", lines[0])
-	}
-}
-
-// TestRecorder_ResolveRewritesDisk 验证结算回填后当日文件被原子重写:
-// ok 行获得 won/pnl/resolved_at，失败行原样保留。
-func TestRecorder_ResolveRewritesDisk(t *testing.T) {
-	dir := t.TempDir()
-	r, err := NewRecorder(dir)
-	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
-	}
-	defer r.Close()
-
-	// 先写一条失败观测，再写一条信号，结算后者
-	failed := &Cross{Ts: 1788187250000, Side: "down", Rem: 100, TriggerBid: 0.80, PostEnd: 0.70, OK: false, RejectReason: "post_end_too_high"}
-	if err := r.RecordCross("condF", "btc-updown-5m-6", 1788187250000/1000, failed, "only", 2.0); err != nil {
-		t.Fatalf("RecordCross failed: %v", err)
-	}
-	ts := int64(1788187300000)
-	if err := r.RecordCross("condG", "btc-updown-5m-7", ts, mkSignalCross("up", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross signal: %v", err)
-	}
-	if err := r.Resolve("condG", 1); err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-
-	data := recFile(t, dir)
-	lines := strings.Split(strings.TrimSpace(data), "\n")
-	if len(lines) != 2 {
-		t.Fatalf("行数 = %d, want 2（每事件仍一行）", len(lines))
-	}
-	var sigLine, failLine string
-	for _, ln := range lines {
-		if strings.Contains(ln, `"condition_id":"condG"`) {
-			sigLine = ln
-		} else {
-			failLine = ln
+	defer f.Close()
+	out := map[string]Record{}
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		var rec Record
+		if err := json.Unmarshal(sc.Bytes(), &rec); err != nil {
+			t.Fatalf("行解析失败: %v", err)
 		}
+		out[rec.ConditionID] = rec
 	}
-	if sigLine == "" {
-		t.Fatalf("未找到结算后的信号行: %s", data)
-	}
-	for _, want := range []string{`"won":true`, `"pnl":2`, `"resolved_at"`} {
-		if !strings.Contains(sigLine, want) {
-			t.Fatalf("信号行缺 %s: %s", want, sigLine)
-		}
-	}
-	if !strings.Contains(failLine, `"ok":false`) || strings.Contains(failLine, `"won":`) {
-		t.Fatalf("失败行应保持原样: %s", failLine)
-	}
+	return out
 }
 
-// TestRecorder_ResolveRollback 验证写盘失败时结算字段回滚、保持 pending 可重试。
-func TestRecorder_ResolveRollback(t *testing.T) {
+func approxEq(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
+func TestRecordObservation(t *testing.T) {
 	dir := t.TempDir()
 	r, err := NewRecorder(dir)
 	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
+		t.Fatal(err)
 	}
-	defer r.Close()
+	ts, _, _ := testTs(t)
 
-	ts := int64(1788187400000)
-	if err := r.RecordCross("condR", "btc-updown-5m-8", ts, mkSignalCross("up", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
-	}
-	// 删除记录文件使 rewriteDay 的 os.ReadFile 失败
-	day := time.UnixMilli(ts).UTC().Format("2006-01-02")
-	if err := os.Remove(filepath.Join(dir, "crosses_"+day+".jsonl")); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if err := r.Resolve("condR", 1); err == nil {
-		t.Fatalf("文件缺失时 Resolve 应返回错误")
-	}
-	pending := r.PendingSignals()
-	if len(pending) != 1 {
-		t.Fatalf("pending = %d, want 1（回滚后保持待结算）", len(pending))
-	}
-	s := pending[0]
-	if s.Won != nil || s.PnL != 0 || s.ResolvedAt != "" {
-		t.Fatalf("结算字段未回滚: won=%v pnl=%v resolved=%q", s.Won, s.PnL, s.ResolvedAt)
-	}
-}
-
-// TestRecorder_LoadPendingRestores 验证重启后从磁盘恢复内存态
-// （pending/resolved/failed 三态 + 统计访问器）。
-func TestRecorder_LoadPendingRestores(t *testing.T) {
-	dir := t.TempDir()
-	r, err := NewRecorder(dir)
+	// ok 信号
+	okRec, err := r.RecordObservation("cond-a", "btc-updown-5m-0", 1_760_000_000, mkObs(ts, SideYes, true, 0.19), 2)
 	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
+		t.Fatal(err)
 	}
-	ts := int64(1788187500000)
-	if err := r.RecordCross("condP", "btc-updown-5m-9", ts, mkSignalCross("up", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross signal: %v", err)
+	if okRec.EventType != recordEventType || okRec.Date != "2026-09-02" {
+		t.Fatalf("记录元信息: %+v", okRec)
 	}
-	failed := &Cross{Ts: 1788187600000, Side: "down", Rem: 100, TriggerBid: 0.71, OK: false, RejectReason: "trigger_bid_too_low"}
-	if err := r.RecordCross("condF2", "btc-updown-5m-10", 1788187600000/1000, failed, "only", 2.0); err != nil {
-		t.Fatalf("RecordCross failed: %v", err)
+	// 失败观测
+	if _, err := r.RecordObservation("cond-b", "btc-updown-5m-1", 1_760_000_300, mkObs(ts+1000, SideNo, false, 0.15), 2); err != nil {
+		t.Fatal(err)
 	}
-	if err := r.Resolve("condP", 1); err != nil {
-		t.Fatalf("Resolve: %v", err)
+
+	if obs, sig, _ := r.Counts(); obs != 2 || sig != 1 {
+		t.Fatalf("Counts = %d/%d, 期望 2/1", obs, sig)
+	}
+	if len(r.PendingSignals()) != 1 {
+		t.Fatal("pending 应 1 条")
+	}
+	if _, err := os.Stat(recordFilePath(dir, "2026-09-02")); err != nil {
+		t.Fatalf("日文件未创建: %v", err)
 	}
 	if err := r.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// 模拟重启: 新 recorder 从磁盘恢复
-	r2, err := NewRecorder(dir)
-	if err != nil {
-		t.Fatalf("NewRecorder #2: %v", err)
-	}
-	defer r2.Close()
-
-	if got := r2.PendingSignals(); len(got) != 0 {
-		t.Fatalf("重启后 pending = %d, want 0（已结算）", len(got))
-	}
-	sigs := r2.Signals()
-	if len(sigs) != 1 || sigs[0].Won == nil || !*sigs[0].Won || sigs[0].PnL != 2.0 {
-		t.Fatalf("重启后信号结算状态丢失: %+v", sigs)
-	}
-	if got := r2.Count(); got != 2 {
-		t.Fatalf("重启后 Count = %d, want 2", got)
-	}
-	daily, pos := r2.DailyPnl()
-	if len(daily) != 1 || pos != 1 || daily[sigs[0].Date] != 2.0 {
-		t.Fatalf("逐日统计异常: daily=%v pos=%d", daily, pos)
-	}
-	if dd := r2.MaxDrawdown(); dd != 0 {
-		t.Fatalf("MaxDrawdown = %v, want 0", dd)
+		t.Fatal(err)
 	}
 }
 
-// TestRecorder_UTCDateAndFilename 验证 UTC 日口径:
-// 23:30Z 的观测落在 UTC 当日文件，而非本地时区日期。
-func TestRecorder_UTCDateAndFilename(t *testing.T) {
+func TestResolveMapping(t *testing.T) {
 	dir := t.TempDir()
+	r, _ := NewRecorder(dir)
+	tsA, tsB, at := testTs(t)
+
+	// yes 狗 + outcome 0(Up) → 赢
+	r.RecordObservation("cond-a", "slug", tsA, mkObs(tsA, SideYes, true, 0.19), 2)
+	// no 狗 + outcome 1(Down) → 赢
+	r.RecordObservation("cond-b", "slug", tsB, mkObs(tsB, SideNo, true, 0.19), 2)
+	// no 狗 + outcome 0(Up) → 输
+	r.RecordObservation("cond-c", "slug", tsB+1000, mkObs(tsB+1000, SideNo, true, 0.19), 2)
+
+	if !r.Resolve("cond-a", OutcomeUp, at) {
+		t.Fatal("cond-a 应命中")
+	}
+	if !r.Resolve("cond-b", OutcomeDown, at) {
+		t.Fatal("cond-b 应命中")
+	}
+	if !r.Resolve("cond-c", OutcomeUp, at) {
+		t.Fatal("cond-c 应命中")
+	}
+	if r.Resolve("cond-a", OutcomeDown, at) {
+		t.Fatal("重复结算应 false")
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatal("pending 应清空")
+	}
+
+	wantWin, wantLose := 2/0.19-2, -2.0
+	day := readDay(t, dir, "2026-09-02")
+	for _, id := range []string{"cond-a", "cond-b"} {
+		rec := day[id]
+		if rec.Won == nil || !*rec.Won || !approxEq(rec.PnL, wantWin) || rec.ResolvedAt == "" {
+			t.Fatalf("%s 应为赢: %+v", id, rec)
+		}
+	}
+	if rec := day["cond-c"]; rec.Won == nil || *rec.Won || !approxEq(rec.PnL, wantLose) {
+		t.Fatalf("cond-c 应为输: %+v", rec)
+	}
+}
+
+func TestDailyPnlAndDrawdown(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := NewRecorder(dir)
+	tsA, tsB, at := testTs(t)
+	// 先输后赢（按 ts 序 → 结算序一致）
+	r.RecordObservation("lose", "slug", tsA, mkObs(tsA, SideNo, true, 0.19), 2)
+	r.RecordObservation("win", "slug", tsB, mkObs(tsB, SideYes, true, 0.19), 2)
+	r.Resolve("lose", OutcomeUp, at) // no 狗 + Up → 输 −2
+	r.Resolve("win", OutcomeUp, at)  // yes 狗 + Up → 赢 shares−2
+
+	dp := r.DailyPnl()
+	if len(dp) != 1 || dp[0].N != 2 || !approxEq(dp[0].PnL, 2/0.19-4) {
+		t.Fatalf("DailyPnl = %+v", dp)
+	}
+	if dd := r.MaxDrawdown(); !approxEq(dd, -2) {
+		t.Fatalf("MaxDrawdown = %v, 期望 −2（先输 −2 后赢回）", dd)
+	}
+}
+
+func TestRestartRecovery(t *testing.T) {
+	dir := t.TempDir()
+	ts, _, _ := testTs(t)
+
+	r1, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r1.RecordObservation("cond-a", "slug", ts, mkObs(ts, SideYes, true, 0.19), 2)
+	r1.Close() // 未结算即"崩溃"退出
+
+	r2, err := NewRecorder(dir) // 重启
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	if len(r2.Observations()) != 1 || len(r2.PendingSignals()) != 1 {
+		t.Fatalf("重启恢复: obs/pending = %d/%d, 期望 1/1",
+			len(r2.Observations()), len(r2.PendingSignals()))
+	}
+	if !r2.Resolve("cond-a", OutcomeUp, ts2time(ts)) {
+		t.Fatal("重启后应能结算")
+	}
+	day := readDay(t, dir, "2026-09-02")
+	if rec := day["cond-a"]; rec.Won == nil || !*rec.Won {
+		t.Fatalf("重启结算后文件应回填: %+v", rec)
+	}
+}
+
+func ts2time(ms int64) time.Time { return time.UnixMilli(ms) }
+
+func TestDaySplit(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := NewRecorder(dir)
+	tsA, _, _ := testTs(t)
+	nextDay := time.Date(2026, 9, 3, 0, 1, 0, 0, time.UTC).UnixMilli()
+
+	r.RecordObservation("a", "slug", tsA, mkObs(tsA, SideYes, false, 0.19), 2)
+	r.RecordObservation("b", "slug", nextDay, mkObs(nextDay, SideYes, false, 0.19), 2)
+
+	for _, d := range []string{"2026-09-02", "2026-09-03"} {
+		if _, err := os.Stat(recordFilePath(dir, d)); err != nil {
+			t.Fatalf("%s 文件缺失: %v", d, err)
+		}
+	}
+	if len(r.Observations()) != 2 {
+		t.Fatalf("跨日记录数 = %d, 期望 2", len(r.Observations()))
+	}
+}
+
+func TestSchemaGuard(t *testing.T) {
+	dir := t.TempDir()
+	ts, _, _ := testTs(t)
+
+	// 先放一条旧格式（v3 crosses_ 语义）与一条合法行
+	legacy := []byte(`{"event_type":"cross","ts":1,"ok":true,"won":true,"pnl":9}` + "\n")
+	valid, _ := json.Marshal(&Record{Observation: *mkObs(ts, SideYes, true, 0.19),
+		EventType: recordEventType, Date: "2026-09-02", ConditionID: "c-ok"})
+	if err := os.WriteFile(recordFilePath(dir, "2026-09-02"), append(legacy, append(valid, '\n')...), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	r, err := NewRecorder(dir)
 	if err != nil {
-		t.Fatalf("NewRecorder: %v", err)
+		t.Fatal(err)
 	}
 	defer r.Close()
+	// 旧格式行被跳过（不落 failed 桶、不污染统计）
+	obs, sig, won := r.Counts()
+	if obs != 1 || sig != 1 || won != 0 {
+		t.Fatalf("Counts = %d/%d/%d, 期望 1/1/0（旧格式应跳过）", obs, sig, won)
+	}
+	if len(r.PendingSignals()) != 1 || len(r.Observations()) != 1 {
+		t.Fatal("pending/observations 应只含合法行")
+	}
+}
 
-	// 2026-08-31T23:30:00Z（本地 UTC+8 为 09-01 07:30，若用本地日会跨文件）
-	ts := time.Date(2026, 8, 31, 23, 30, 0, 0, time.UTC).UnixMilli()
-	if err := r.RecordCross("condT", "btc-updown-5m-11", ts, mkSignalCross("up", ts), "both", 2.0); err != nil {
-		t.Fatalf("RecordCross: %v", err)
+func TestWonFor(t *testing.T) {
+	cases := []struct {
+		side    string
+		outcome int
+		want    bool
+	}{
+		{SideYes, OutcomeUp, true},
+		{SideYes, OutcomeDown, false},
+		{SideNo, OutcomeDown, true},
+		{SideNo, OutcomeUp, false},
 	}
-	if _, err := os.Stat(filepath.Join(dir, "crosses_2026-08-31.jsonl")); err != nil {
-		t.Fatalf("UTC 日文件缺失（非 UTC 口径）: %v", err)
+	for _, c := range cases {
+		if got := WonFor(c.side, c.outcome); got != c.want {
+			t.Fatalf("WonFor(%s,%d) = %v, 期望 %v", c.side, c.outcome, got, c.want)
+		}
 	}
-	if got := r.Signals()[0].Date; got != "2026-08-31" {
-		t.Fatalf("Date = %q, want 2026-08-31（UTC 日）", got)
+}
+
+func TestFileNaming(t *testing.T) {
+	dir := t.TempDir()
+	_ = dir
+	if got := filepath.Base(recordFilePath("/x", "2026-09-02")); got != "touches_2026-09-02.jsonl" {
+		t.Fatalf("文件名 = %s", got)
 	}
 }

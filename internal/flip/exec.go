@@ -1,69 +1,36 @@
 package flip
 
-import "fmt"
-
-// ExecMode 区分成交执行模式（纸面/实盘同源，见 docs/paper_plan_2026-08-31.md §2.3）。
-type ExecMode string
-
-const (
-	// ModePaper 纸面模式: 按信号成交口径（对侧 ask@+10s）模拟成交，不真下单。
-	ModePaper ExecMode = "paper"
-	// ModeLive 实盘模式: FAK 真实下单（后续阶段接入，当前未实现）。
-	ModeLive ExecMode = "live"
+import (
+	"fmt"
+	"log"
 )
 
-// ExecResult 是一次信号执行的成交结果。
-type ExecResult struct {
-	Status       string  // "filled" | "failed"
-	FilledShares float64 // 成交股数（failed 时为 0）
-	AvgFillPrice float64 // 成交均价
-}
-
-// Executor 抽象成交执行：纸面模拟与实盘 FAK 同源，由 mode 配置切换。
-// live 实现（FAK + CLOB 凭证）在纸面验证通过后接入（届时恢复实盘路径）。
+// Executor 负责信号成交（纸面/实盘同接口）。当前仅纸面实现；
+// live（FAK）接口预留——纸面验证通过后从 eth 分支历史恢复实盘路径。
 type Executor interface {
-	// Execute 执行一次信号（Cross.OK=true 时调用）。返回成交结果。
-	Execute(c *Cross) (ExecResult, error)
+	Execute(obs *Observation) error
 }
 
-// PaperExecutor 纸面成交执行器：直接按信号成交口径（fill = 对侧 ask@+10s）
-// 全额成交，无滑点（与回测口径一致）。
-type PaperExecutor struct {
-	cfg Config
-}
+// PaperExecutor 纸面成交：观测已含决策时刻狗侧 ask（≤0.20），无真实订单。
+// 只校验 fill > 0 ——v4 回测无任何 fill 边界，v3 的 [0.05,0.95] 检查整体删除
+// （执行层不得吞掉合法信号）。
+type PaperExecutor struct{}
 
-// NewPaperExecutor 构造纸面执行器。
-func NewPaperExecutor(cfg Config) *PaperExecutor {
-	return &PaperExecutor{cfg: cfg}
-}
-
-// Execute 按信号口径模拟成交: shares = stake/fill，成交价 = fill。
-func (p *PaperExecutor) Execute(c *Cross) (ExecResult, error) {
-	if c == nil || !c.OK {
-		return ExecResult{Status: "failed"}, fmt.Errorf("信号未通过判定，无法执行")
+// Execute 校验并记账一笔纸面信号。
+func (PaperExecutor) Execute(obs *Observation) error {
+	if obs == nil || !(obs.Fill > 0) {
+		return fmt.Errorf("PaperExecutor: fill 无效（obs=%+v）", obs)
 	}
-	if c.Fill <= 0 || c.Shares <= 0 {
-		return ExecResult{Status: "failed"}, fmt.Errorf("成交价无效: fill=%v", c.Fill)
-	}
-	// 成交价边界（与回测 fill∈[0.05,0.95] 过滤一致，引擎 decide 已拦截，此处兜底）
-	if c.Fill < fillMin || c.Fill > fillMax {
-		return ExecResult{Status: "failed"}, fmt.Errorf("成交价越界: fill=%v（有效区间 %.2f~%.2f）", c.Fill, fillMin, fillMax)
-	}
-	return ExecResult{
-		Status:       "filled",
-		FilledShares: c.Shares,
-		AvgFillPrice: c.Fill,
-	}, nil
+	return nil
 }
 
-// NewExecutor 按 mode 构造执行器。live 模式尚未实现（后续阶段接入）。
-func NewExecutor(cfg Config, mode ExecMode) (Executor, error) {
+// NewExecutor 按模式返回执行器；live 未实现时回退纸面并告警。
+func NewExecutor(mode string) Executor {
 	switch mode {
-	case ModePaper:
-		return NewPaperExecutor(cfg), nil
-	case ModeLive:
-		return nil, fmt.Errorf("live 模式未实现（纸面验证通过后接入 FAK 实盘路径）")
+	case "live":
+		log.Printf("⚠️ live 模式尚未实现（FAK 接口预留），回退纸面执行")
+		return PaperExecutor{}
 	default:
-		return nil, fmt.Errorf("未知执行模式: %q", mode)
+		return PaperExecutor{}
 	}
 }
