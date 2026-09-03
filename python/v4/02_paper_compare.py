@@ -1,23 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-v4 纸面记录对账与口径复核（dog@0.2 R1 m_45 纯现货）。
+v4 纸面记录对账与口径复核（dog@0.2 组合版侧别带——2026-09-03 起引擎现行口径;
+早前 R1 (−0.5,0) 双侧已退居回测对照, 见 01 脚本 rules 前两条）。
 
 读引擎落盘的 touches_*.jsonl（触发 tick 即记，成功/失败都记），输出:
 
-  1) 观测量/信号量逐日统计（信号频率 ≈ 回测 17.5/日, 观测 ~260/日）
-  2) 信号口径复核: 用记录里的 m_45/dist_s/rem 重判四腿, 与 ok 列比对
+  1) 观测量/信号量逐日统计（信号频率 ≈ 回测组合单层 44.6/日, 观测 ~260/日）
+  2) 信号口径复核: 用记录里的 side/m_45/dist_s/rem 重判四腿（per-side 带
+     yes(−0.6,0)/no(−1,0), 镜像 01 rules 组合版 pureC）, 与 ok 列比对
      （不一致告警——ok 与重判应恒等; dist_s=0=输入缺失不参与重判）
   3) 结算口径: 已结算信号的 WR/EV/P&L（won+pnl 回填行）, 待结算计数
   4) reject_reason 分布（对照实测: rem_low ~40%、no_crash 等）
-  5) 与回测 trades_r1.csv 的字段口径对照（可选项 --btcsv）: 同名键
+  5) 与回测 trades_r1_combo.csv 的字段口径对照（可选项 --btcsv）: 同名键
      date/event_start/side/rem/fill/m_20/m_30/m_45/dist_s/dist_t 语义一致
      确认; 纸面与回测日期不重叠时不做逐笔对账, 只对照分布形状
 
 对账键: |ts − event_start·1000| ≤ 2s（ts 为触底 unix 毫秒, event_start 为窗口
 起点 unix 秒）——不用 rem（live 与数据有 ±1-2 tick 相位差, 见口径文档 §3）。
 
-用法: python 02_paper_compare.py [--data <dir>] [--btcsv trades_r1.csv]
+用法: python 02_paper_compare.py [--data <dir>] [--btcsv trades_r1_combo.csv]
 """
 import argparse
 import json
@@ -31,7 +33,9 @@ BASE = Path(__file__).resolve().parent
 
 STAKE = 2.0
 CRASH_MIN = 0.40
-BAND = (-0.5, 0.0)
+# 组合版侧别带（01 rules pureC 同源）: yes 破位中继 (−0.6,0) / no 顶部恐慌 (−1,0)
+BAND_YC = (-0.6, 0.0)
+BAND_NO = (-1.0, 0.0)
 REM_MIN = 180
 ALIGN_MS = 2000  # 对账对齐容差（ts 与 event_start 双重对齐）
 
@@ -69,11 +73,12 @@ def load_records(data_dir):
 
 
 def rejudge(r):
-    """用记录特征重判四腿（镜像 01_backtest_r1.py rules）; 输入缺失返回 None。"""
+    """用记录特征重判四腿（镜像 01 rules 组合版 pureC）; 输入缺失返回 None。"""
     if (r.get("m_45") or 0) < CRASH_MIN:
         return False
     ds = r.get("dist_s")
-    if not ds or not (BAND[0] < ds < BAND[1]):  # dist_s=0/缺 = 未计算
+    lo = BAND_NO[0] if r.get("side") == "no" else BAND_YC[0]
+    if not ds or not (lo < ds < 0.0):  # dist_s=0/缺 = 未计算
         return None
     if not (r.get("rem") or 0) > REM_MIN:
         return False
@@ -81,11 +86,11 @@ def rejudge(r):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="v4 纸面记录对账（dog@0.2 R1 纯现货）")
+    ap = argparse.ArgumentParser(description="v4 纸面记录对账（dog@0.2 组合版侧别带）")
     ap.add_argument("--data", default=str(BASE.parent.parent / "data" / "v4"),
                     help="引擎 touches_*.jsonl 目录")
-    ap.add_argument("--btcsv", default=str(BASE / "data" / "trades_r1.csv"),
-                    help="回测逐笔 CSV（对照口径用, 可不存在）")
+    ap.add_argument("--btcsv", default=str(BASE / "data" / "trades_r1_combo.csv"),
+                    help="回测逐笔 CSV（对照口径用 = 组合版明细, 可不存在）")
     args = ap.parse_args()
 
     rows = load_records(args.data)
@@ -114,7 +119,7 @@ def main():
         print("  口径复核: 全部观测输入缺失（dist_s=0），无法重判——σ/spot 持续缺失？")
 
     # 2) 观测与信号逐日统计
-    print("\n逐日（观测 | 信号 ok | 信号/日 对照回测 ≈17.5）:")
+    print("\n逐日（观测 | 信号 ok | 信号/日 对照回测组合单层 ≈44.6）:")
     day_g = df.groupby("date")
     for d, g in sorted(day_g):
         print(f"  {d}: 观测 {len(g):3d} | 信号 {int(g['ok'].sum()):3d} | "
@@ -122,7 +127,7 @@ def main():
     obs_day = len(df) / len(day_g)
     sig = df[df["ok"]]
     sig_day = len(sig) / len(day_g) if len(day_g) else 0
-    print(f"  日均: 观测 {obs_day:.0f} | 信号 {sig_day:.1f}（回测纯现货 17.5/日）")
+    print(f"  日均: 观测 {obs_day:.0f} | 信号 {sig_day:.1f}（回测组合单层 44.6/日）")
 
     # 3) reject 分布（全部观测）
     if "reject_reason" in df:
@@ -150,7 +155,7 @@ def main():
             nd = settled["date"].nunique()
             print(f"  已结算 {len(settled)}/{len(sig)}: WR {k/len(settled)*100:.1f}%  "
                   f"P&L {pnl:+.1f}U/{nd}天  EV {pnl/len(settled):+.3f}U/注  "
-                  f"（对照基准 WR 29.0% / EV +1.078U/注, 样本小别过早下结论）")
+                  f"（对照基准组合 WR 24.6% / EV +0.633U/注, 样本小别过早下结论）")
             print("  逐日:")
             for d, g in sorted(settled.groupby("date")):
                 gk = int(g["won"].sum())
@@ -166,7 +171,7 @@ def main():
         print(f"\n回测 CSV {btcsv.name}: {len(bt)} 行, 日期 {bt['date'].min()}~{bt['date'].max()}")
         print("  字段映射核对:")
         missing = [k for k, v in FIELD_MAP.items() if v not in bt.columns]
-        print(f"    trades_r1.csv: 缺 {missing if missing else '无'}")
+        print(f"    {btcsv.name}: 缺 {missing if missing else '无'}")
         have = [k for k in df.columns if k in FIELD_MAP and k in ("dist_s", "ok", "won")]
         print(f"    touches 记录: 对齐键 event_start 存在={ 'event_start' in df.columns }, "
               f"won 回填={int(df['won'].notna().sum())} 行")
