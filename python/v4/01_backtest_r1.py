@@ -91,7 +91,17 @@ def extract(data_dir):
         rem = t.get("rem")
         if rem is None:
             continue
-        dog = "yes" if (pm.get("yes_ask") or 1) <= 0.20 else "no"
+        ya = (pm.get("yes_ask") or 1)
+        na = (pm.get("no_ask") or 1)
+        if ya <= 0.20 and na <= 0.20:
+            # 交叉态（14 天历史 0 次）：狗侧 = sgn·(spot−anchor)<0 一侧（浅洞带
+            # 可能成立侧），镜像 Go 引擎；spot/锚不可判时退回 yes。
+            spot = (t.get("bin") or {}).get("price")
+            dog = "no" if (spot or 0) > anchor else "yes"
+        elif ya <= 0.20:
+            dog = "yes"
+        else:
+            dog = "no"
         sgn = 1.0 if dog == "yes" else -1.0
         won = 1 if ((outcome == 0) if dog == "yes" else (outcome == 1)) else 0
         r = {"event_start": e["start_time"], "side": dog, "rem": rem,

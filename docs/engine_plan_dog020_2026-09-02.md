@@ -18,7 +18,9 @@ n=245, WR 29.0% [23.7,35.0], EV +1.078U/注, +264U/14 天, 日正 12/14（双层
 
 每 300s 窗口**每事件只观测一次**（首个满足条件 tick，无重试）：
 1. **触发** = 首个「有效 tick」上某侧 ask 满足 `0 < ask ≤ 0.20`。有效 = book_latency_ms ≤ 300（MAX_LAT）且 **UP/DOWN 双侧 bid/ask 四字段 > 0**（整簿快照门控，脚本 :79 与 Go 引擎同款；2026-09-03 由「仅 UP 双齐全」扩为对称四字段——实测报价缺失为整行全空（14 天 3.04%，两侧同秒为 0），历史结果与旧版全等；缺失 ask 经 `or 1` 语义不触发——Go 侧盘口缺失为 0，触发条件必须写 `0 < ask`，ask=0 绝不能触发）
-   dog = yes ⇔ UpAsk ≤ 0.20（两侧都 ≤0.20 取 yes，镜像脚本判断顺序）
+   dog = 唯一触底侧（UpAsk ≤ 0.20 → yes；否则 DownAsk ≤ 0.20 → no）；交叉态（两侧都 ≤0.20，
+   2026-09-03 起镜像 Go 引擎）：取 sgn·(spot−anchor) < 0 的一侧（= 浅洞带可能成立侧；spot=锚/
+   缺失退回 yes）——14 天历史 0 次，纯语义规定，行为与旧「默认 yes」全等
 2. **急跌腿**：m_45 = 触发 tick 前 **45 个 tick 序号槽位**（[i−45, i−1]）内同侧 ask 的 max ≥ 0.40（CRASH_MIN）。窗口按**索引**而非时间：ring 存最近 45 个槽位完整快照（无效 tick 压 0 占槽、不贡献），窗口头自然截断（ring 未满取现有——CSV 41 行 rem>250 即此类，合法非 reject）；**先判后插**（当前触发 tick 不进窗）；引擎自计数 tick 序号等价 python 数组索引
 3. **浅洞腿**：dist_s = sgn·(spot − anchor)/anchor·1e4/hist_bps ∈ (−0.5, 0) 开区间；sgn dog=yes +1/no −1；
    spot = Binance BTCUSDT @trade 最新价（本 tick 采样）；anchor = 窗口开盘 Chainlink TWAP-60 值；hist_bps = 前 ≤18 个**已结束**窗口 |tw_close−tw_open| 均值（≥3 窗可用）
@@ -28,7 +30,9 @@ n=245, WR 29.0% [23.7,35.0], EV +1.078U/注, +264U/14 天, 日正 12/14（双层
 7. 结算：gamma resolved → won = 狗赢（side yes→outcome 0 / no→outcome 1）；pnl = shares−stake 赢 / −stake 输
 
 reject_reason 顺序（固定并文档化，供复验按原因计数；回测只按掩码入选无顺序概念）：
-rem_low → no_hist → missing_spot → missing_anchor → no_crash → dist_out（missing_book 不产出行）。
+rem_low → no_hist → missing_spot → no_crash → dist_out（missing_book 不产出行）。
+锚缺失窗口（anchor≤0，窗口级）2026-09-03 起**整窗早退不产观测**（镜像回测 :69 锚缺失
+事件直接跳过）；missing_anchor 仅存 decide 纯函数防线，现网不可达。
 
 实测分布（3640 触底窗校准期望值）：rem≤180 首触 1445（39.7%）、无急跌腿 935、CSV 入选行 rem∈[181,289] 且其中 41 行 rem>250（窗头截断真实存在）、fill∈[0.10,0.20]。
 
@@ -55,8 +59,8 @@ rem_low → no_hist → missing_spot → missing_anchor → no_crash → dist_ou
   - `lateLimit` 40s→15s（v4 从窗起点就观测判定，无 v3 前 40s 盲区；迟到 >15s 整窗跳过，防 m45 证据缺失的假截断）；删除 v3 的 staleBookThresholdMs=5s 盘口清零分支（引擎 latency≤300 过滤已覆盖，重复）
   - 触发 tick 即 handleObservation→Execute+RecordObservation+Register 结算轮询（ok 行）；日志/统计文案全部换 dog 语义
 - internal/flip/engine_test.go 重写 + recorder_test.go 适配：
-  - 触发（valid/invalid latency、up 报价缺失、缺 ask 不触发、双 ask≤0.2 取 yes、事件内仅首观测）
-  - 四腿判定与各 reject_reason（rem_low/no_hist/missing_spot/missing_anchor/no_crash/dist_out）、m_45 窗截断/无效 tick 不贡献但占槽、dist_s 符号/开区间边界、done 后不再检
+  - 触发（valid/invalid latency、up 报价缺失、缺 ask 不触发、交叉态双侧 ask≤0.2 按现货偏离选边、锚缺失窗口整窗不观测、事件内仅首观测）
+  - 四腿判定与各 reject_reason（rem_low/no_hist/missing_spot/no_crash/dist_out；missing_anchor 直调 decide 防线）、m_45 窗截断/无效 tick 不贡献但占槽、dist_s 符号/开区间边界、done 后不再检
   - recorder：touches_ 文件名/切日、won 映射、rewriteDay 原子回填、重启恢复分流
 
 ### B. Dashboard 适配（无 v3 语义残留）

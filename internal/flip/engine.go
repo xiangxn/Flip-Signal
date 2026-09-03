@@ -18,6 +18,8 @@ const lookMax = 45
 // 与回测「每事件仅首个观测、无重试」口径刻意一致。
 //
 // 判定输入全部经 Tick / BeginWindow 注入，本包零外部依赖、无副作用可测：
+//   - 锚缺失窗口（anchor ≤ 0，窗口级）整窗不观测不占槽——镜像回测 :69 锚缺失
+//     事件直接跳过（观测宇宙 1:1；missing_anchor 仅存 decide 纯函数防线，现网不可达）
 //   - 有效 tick = BookLatMs ≤ 300 且 UP(=yes)/DOWN(=no) 双侧 bid/ask 报价齐全
 //     （整簿快照门控，镜像回测 :79；实测缺失为整行全空，只挡无快照行）
 //   - 急跌窗 = 索引槽位 ring（先判后插：触发 tick 不进窗；无效 tick 压 0 占槽，
@@ -81,6 +83,11 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 		e.state = stateDone // rem==0 终 tick：窗口结束
 		return nil
 	}
+	if e.anchor <= 0 {
+		// 锚缺失窗口（BeginWindow 时边界 TWAP 缺值）：整窗直接丢掉本 tick——
+		// 不观测、不占槽，镜像回测 :69 锚缺失事件整体跳过（无 missing_anchor 行）。
+		return nil
+	}
 
 	// tick 无效（延迟过高）：占槽不检——与回测一致，其后触发仍按索引计数。
 	if t.BookLatMs > maxLat {
@@ -97,11 +104,21 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 
 	var obs *Observation
 	switch {
+	case t.UpAsk <= e.cfg.TriggerAskMax && t.DownAsk <= e.cfg.TriggerAskMax:
+		// 交叉态：两侧 ask 同时 ≤0.2（14 天 0 次——互补套利结构近不可能，
+		// 出现即有一侧报价陈旧）。狗侧取 sgn·(spot−anchor)<0 的一侧——浅洞带
+		// 可能成立侧（另一侧 dist 必带外）；不可判（spot≤0 缺失或 spot=锚）
+		// 退回 yes，任一侧同归 dist_out，无差异。
+		side := SideYes
+		if t.BinPrice > e.anchor {
+			side = SideNo
+		}
+		obs = e.decide(t, side)
 	case t.UpAsk <= e.cfg.TriggerAskMax:
-		// UP ask 触底 → 狗侧 yes（与回测判断顺序一致：两侧都 ≤0.2 取 yes）
+		// UP ask 触底 → 狗侧 yes（ask>0 由整簿门控保证）
 		obs = e.decide(t, SideYes)
-	case t.DownAsk > 0 && t.DownAsk <= e.cfg.TriggerAskMax:
-		// DOWN ask 触底 → 狗侧 no（0<ask 守卫：盘口缺失的 0 绝不能触发）
+	case t.DownAsk <= e.cfg.TriggerAskMax:
+		// DOWN ask 触底 → 狗侧 no（ask>0 由整簿门控保证，无需 0 守卫）
 		obs = e.decide(t, SideNo)
 	}
 	if obs != nil {

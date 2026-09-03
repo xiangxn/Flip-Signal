@@ -59,23 +59,27 @@ func TestTrigger(t *testing.T) {
 		latency   int64 // 触发 tick 盘口延迟（>300 = 无效）
 		upBid     float64
 		upAsk     float64
-		downBid0  bool // 覆写 DownBid=0（整簿门控用例）
+		downBid0  bool   // 覆写 DownBid=0（整簿门控用例）
 		downAsk   float64
+		spot      float64 // 覆写 BinPrice（0 = 保持 stdTick 默认 spot=anchor；交叉态选边用）
 		wantSide  string
 		wantFill  float64
 		wantNoObs bool // 期望不产出观测
 	}{
-		{"首个有效 tick 触底 yes", 0, 0, 0.8, 0.19, false, 0.9, SideYes, 0.19, false},
-		{"触底发生在 no 侧", 0, 0, 0.8, 0.55, false, 0.12, SideNo, 0.12, false},
-		{"双 ask≤0.2 取 yes", 0, 0, 0.8, 0.19, false, 0.15, SideYes, 0.19, false},
-		{"ask 恰为 0.20 触发", 0, 0, 0.8, 0.20, false, 0.9, SideYes, 0.20, false},
-		{"延迟>300ms tick 不检不触发", 0, 400, 0.8, 0.19, false, 0.9, "", 0, true},
-		{"UP 报价缺失不触发（bid=0）", 0, 0, 0, 0.19, false, 0.15, "", 0, true},
-		{"UP ask=0 不触发", 0, 0, 0.8, 0, false, 0.15, "", 0, true},
-		{"Down ask=0 不触发", 0, 0, 0.8, 0.55, false, 0, "", 0, true},
-		{"DOWN 簿缺失压制 yes 触底（bid=0）", 0, 0, 0.8, 0.19, true, 0.9, "", 0, true},
-		{"DOWN bid=0 压制 no 触底", 0, 0, 0.8, 0.55, true, 0.12, "", 0, true},
-		{"两侧均不触底无观测", 0, 0, 0.8, 0.55, false, 0.6, "", 0, true},
+		{"首个有效 tick 触底 yes", 0, 0, 0.8, 0.19, false, 0.9, 0, SideYes, 0.19, false},
+		{"触底发生在 no 侧", 0, 0, 0.8, 0.55, false, 0.12, 0, SideNo, 0.12, false},
+		{"双 ask≤0.2 spot=锚 默认 yes", 0, 0, 0.8, 0.19, false, 0.15, 0, SideYes, 0.19, false},
+		{"ask 恰为 0.20 触发", 0, 0, 0.8, 0.20, false, 0.9, 0, SideYes, 0.20, false},
+		{"延迟>300ms tick 不检不触发", 0, 400, 0.8, 0.19, false, 0.9, 0, "", 0, true},
+		{"UP 报价缺失不触发（bid=0）", 0, 0, 0, 0.19, false, 0.15, 0, "", 0, true},
+		{"UP ask=0 不触发", 0, 0, 0.8, 0, false, 0.15, 0, "", 0, true},
+		{"Down ask=0 不触发", 0, 0, 0.8, 0.55, false, 0, 0, "", 0, true},
+		{"DOWN 簿缺失压制 yes 触底（bid=0）", 0, 0, 0.8, 0.19, true, 0.9, 0, "", 0, true},
+		{"DOWN bid=0 压制 no 触底", 0, 0, 0.8, 0.55, true, 0.12, 0, "", 0, true},
+		{"两侧均不触底无观测", 0, 0, 0.8, 0.55, false, 0.6, 0, "", 0, true},
+		{"交叉态双侧≤0.2 spot>锚 取 no", 0, 0, 0.8, 0.19, false, 0.18, 100_010, SideNo, 0.18, false},
+		{"交叉态双侧≤0.2 spot<锚 取 yes", 0, 0, 0.8, 0.19, false, 0.18, 99_990, SideYes, 0.19, false},
+		{"交叉态 spot=锚 退回 yes", 0, 0, 0.8, 0.19, false, 0.18, 0, SideYes, 0.19, false},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -85,6 +89,9 @@ func TestTrigger(t *testing.T) {
 			tick.UpBid = c.upBid
 			if c.downBid0 {
 				tick.DownBid = 0
+			}
+			if c.spot != 0 {
+				tick.BinPrice = c.spot
 			}
 			tick.BookLatMs = c.latency
 			o := e.ProcessTick(tick)
@@ -104,6 +111,38 @@ func TestTrigger(t *testing.T) {
 				t.Fatalf("rem = %d, 期望 250", o.Rem)
 			}
 		})
+	}
+}
+
+// TestAnchorZeroWindow 锚缺失窗口（BeginWindow 收到 anchor=0，窗口级属性）整窗不观测：
+// 镜像回测 :69 锚缺失事件整体跳过——触底不落盘（含交叉态），rem==0 终 tick 照常转 Done。
+func TestAnchorZeroWindow(t *testing.T) {
+	e := NewEngine(cfgOK())
+	e.BeginWindow(0, tHist) // anchor 缺失
+	for i := 0; i < 3; i++ {
+		if o := e.ProcessTick(stdTick(250-i, 0.19, 0.18)); o != nil {
+			t.Fatalf("锚缺失窗口不应产出任何观测: %+v", o)
+		}
+	}
+	if got := e.State().String(); got != "Watching" {
+		t.Fatalf("state = %s, 期望 Watching", got)
+	}
+	if o := e.ProcessTick(stdTick(0, 0.19, 0.18)); o != nil {
+		t.Fatalf("rem==0 终 tick 不应产观测: %+v", o)
+	}
+	if got := e.State().String(); got != "Done" {
+		t.Fatalf("rem==0 后 state = %s, 期望 Done", got)
+	}
+}
+
+// TestDecideMissingAnchor decide 纯函数防线：直接调用下锚缺失输入仍回 missing_anchor
+// （ProcessTick 已整窗早退，此路径现网不可达，防未来直调层回归）。
+func TestDecideMissingAnchor(t *testing.T) {
+	e := NewEngine(cfgOK())
+	e.BeginWindow(0, tHist) // anchor 缺失
+	o := e.decide(stdTick(250, 0.19, 0.9), SideYes)
+	if o == nil || o.RejectReason != RejectMissingAnchor {
+		t.Fatalf("decide(anchor=0) = %+v, 期望 missing_anchor", o)
 	}
 }
 
@@ -145,7 +184,6 @@ func TestRejectReasons(t *testing.T) {
 		{"rem_low（rem=180 边界）", nil, 5, 180, 99_986, RejectRemLow, false, true, -0.2},
 		{"no_hist（σ 窗口不可用）", func(e *Engine) { e.BeginWindow(tAnchor, 0) }, 5, 250, 99_986, RejectNoHist, false, false, 0},
 		{"missing_spot（无 Binance 价）", nil, 5, 250, 0, RejectMissingSpot, false, false, 0},
-		{"missing_anchor（开盘 TWAP 缺失）", func(e *Engine) { e.BeginWindow(0, tHist) }, 5, 250, 99_986, RejectMissingAnchor, false, false, 0},
 		{"no_crash（窗内从未 ≥0.40）", nil, 0, 250, 99_986, RejectNoCrash, false, true, -0.2},
 		{"dist_out（spot 已过锚 +0.143σ）", nil, 5, 250, 100_010, RejectDistOut, false, true, 0.14285714285714285},
 		{"dist_out（下界外 −1.0σ）", nil, 5, 250, 99_930, RejectDistOut, false, true, -1.0},

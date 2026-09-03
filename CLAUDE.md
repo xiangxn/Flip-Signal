@@ -16,7 +16,8 @@
   `docs/dog020_mapping_2026-09-02.md`，分析/回测脚本 `python/v4/`（权威 =
   `python/v4/01_backtest_r1.py`）。
 - **信号条件（触发与急跌腿来自 PM 订单簿；浅洞腿输入 Binance spot）**：
-  - 触发：每事件首个有效 tick 上某侧 ask 满足 `0 < ask ≤ 0.20`（dog=yes 优先）
+  - 触发：每事件首个有效 tick 上某侧 ask 满足 `0 < ask ≤ 0.20`（唯一触底侧即狗侧；
+    两侧都 ≤0.2 的交叉态取 sgn·(spot−anchor)<0 一侧，14 天历史 0 次）
   - 急跌：m_45 = 触发前 45 个 tick 槽位内同侧 ask max ≥ 0.40
   - 浅洞：dist_s = sgn·(spot−anchor)/anchor·1e4/hist_bps ∈ (−0.5, 0) 开区间
   - 时间：rem > 180（窗口前 ~2 分钟）
@@ -126,10 +127,11 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
    └────────── 窗口结束(rem==0) ◀───────────┘
 ```
 
-- **Watching**: 1s tick 更新两侧状态；有效 tick（latency≤300 且 UP/DOWN 双侧报价齐全
+- **Watching**: 1s tick 更新两侧状态；锚缺失窗口（anchor≤0，窗口级）整窗不观测
+  （镜像回测 :69 锚缺失事件跳过）；有效 tick（latency≤300 且 UP/DOWN 双侧报价齐全
   ——整簿快照门控，实测缺失为整行全空）上检查 up/down ask 是否 ≤0.20
-- **判定顺序**（一次完成）：rem_low → no_hist → missing_spot → missing_anchor →
-  no_crash → dist_out；全过 → ok（shares = stake/fill）
+- **判定顺序**（一次完成）：rem_low → no_hist → missing_spot → no_crash → dist_out
+  （missing_anchor 现网不可达，仅 decide 纯函数防线）；全过 → ok（shares = stake/fill）
 - **Done**: 事件内不再检测（与回测每事件仅首个观测一致，无 fallback 重试）
 - 数据质量：无效 tick 压 0 占槽（不进触发检查，不贡献急跌窗 max）
 
