@@ -4,7 +4,7 @@
 // 一次性判定三腿（急跌 × 浅洞 × 时间，docs/engine_plan_dog020_2026-09-02.md）:
 //
 //	急跌   m_45: 触发前 45 tick 内同侧 ask 曾 ≥ 0.40（窗口 max）
-//	浅洞   dist_s ∈ (-0.5, 0): Binance spot 距锚(twap_open) ≤0.5σ 但未过锚
+//	浅洞   dist_s ∈ (-0.5, 0): spot 在狗败侧、向狗败方向偏锚 ≤0.5σ（浅坑未走深）
 //	时间   rem > 180
 //
 // dist 定义: dist = sgn·(price − anchor)/anchor·1e4 / hist_bps
@@ -67,8 +67,8 @@ func DefaultConfig() Config {
 		TriggerAskMax: 0.20, // 0.2 触底（dog@0.2 规则族核心）
 		CrashMinAsk:   0.40, // 急跌: 45s 窗口内曾 ≥ 0.40
 		CrashWindow:   45,   // 急跌窗（tick 槽位）
-		DistLo:        -0.5, // 浅洞带下界（≤0.5σ）
-		DistHi:        0.0,  // 浅洞带上界（未过锚）
+		DistLo:        -0.5, // 浅洞带下界: 坑深 ≤0.5σ（坑过深 = 砸盘被现货确认）
+		DistHi:        0.0,  // 浅洞带上界: dist_s<0 = 现货须在狗败侧（方向约束）
 		RemMin:        180,  // 窗口前 2 分钟内才观测
 		Stake:         2,    // 每笔 2 USDC
 	}
