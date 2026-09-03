@@ -22,7 +22,10 @@ n=245, WR 29.0% [23.7,35.0], EV +1.078U/注, +264U/14 天, 日正 12/14（双层
    2026-09-03 起镜像 Go 引擎）：取 sgn·(spot−anchor) < 0 的一侧（= 浅洞带可能成立侧；spot=锚/
    缺失退回 yes）——14 天历史 0 次，纯语义规定，行为与旧「默认 yes」全等
 2. **急跌腿**：m_45 = 触发 tick 前 **45 个 tick 序号槽位**（[i−45, i−1]）内同侧 ask 的 max ≥ 0.40（CRASH_MIN）。窗口按**索引**而非时间：ring 存最近 45 个槽位完整快照（无效 tick 压 0 占槽、不贡献），窗口头自然截断（ring 未满取现有——CSV 41 行 rem>250 即此类，合法非 reject）；**先判后插**（当前触发 tick 不进窗）；引擎自计数 tick 序号等价 python 数组索引
-3. **浅洞腿**：dist_s = sgn·(spot − anchor)/anchor·1e4/hist_bps ∈ (−0.5, 0) 开区间；sgn dog=yes +1/no −1；
+3. **浅洞腿**：dist_s = sgn·(spot − anchor)/anchor·1e4/hist_bps ∈ (lo(side), 0) 开区间，
+   侧别带 lo = yes **−0.6** / no **−1.0**（组合版，2026-09-03 起引擎现行——见下节；
+   R1 双侧 (−0.5, 0) 为 09-02~09-03 上午历史口径，退 01 rules 对照前两条）；
+   sgn dog=yes +1/no −1；
    spot = Binance BTCUSDT @trade 最新价（本 tick 采样）；anchor = 窗口开盘 Chainlink TWAP-60 值；hist_bps = 前 ≤18 个**已结束**窗口 |tw_close−tw_open| 均值（≥3 窗可用）
 4. **时间腿**：rem > 180（REM_MIN 严格大于）
 5. 全过 → ok 信号：shares = stake/fill（fill = 触发 tick 狗侧 ask，≤0.20 无滑点）；不过 → 观测落盘 ok=false + reject_reason，事件 Done
@@ -36,8 +39,10 @@ rem_low → no_hist → missing_spot → no_crash → dist_out（missing_book �
 
 实测分布（3640 触底窗校准期望值）：rem≤180 首触 1445（39.7%）、无急跌腿 935、CSV 入选行 rem∈[181,289] 且其中 41 行 rem>250（窗头截断真实存在）、fill∈[0.10,0.20]。
 
-**观察变体（python-only，2026-09-03 起，未落引擎；引擎维持 R1 (−0.5, 0) 双侧）**：
-侧别带组合 yes → (−0.6, 0) / no → (−1, 0)（sgn 口径同 §3；09-03 分桶扫描 per-side
+**现行引擎口径 = 组合版侧别带（2026-09-03 起落引擎 DefaultConfig；回测观察头条,
+R1 (−0.5, 0) 双侧退 01 rules 对照；per-side 参数 = Config DistLoYes/DistLoNo,
+flags -dist-lo-yes/-dist-lo-no）**：
+yes 带 → (−0.6, 0) / no 带 → (−1, 0)（sgn 口径同 §3；09-03 分桶扫描 per-side
 argmax）。机理：Binance spot 领先 Chainlink TWAP 的基差是侧别系统性的——no 触底 =
 顶部恐慌族（触发时 spot 领先 TWAP 中位 +0.84σ，现货尚未真跌 → dist_s 天然深一档，
 R1 带内 14 天仅 38 例 vs yes 207 例）；yes 触底 = 破位下行中继（领先 −0.38σ），现货
@@ -55,7 +60,12 @@ R1 带内 14 天仅 38 例 vs yes 207 例）；yes 触底 = 破位下行中继�
   in-sample 红利）
 - 早前 no(−1,0) 放宽观察（noR，n=546 +331U，明细 `trades_r1_noR.csv` 已删）被组合版
   吸收，不再单独报告
-落地与否待 09-15 双样本复验后决策；落地需 per-side 带参数（引擎/回测/文档同步改）。
+- 2026-09-03 已落引擎纸面（DefaultConfig 直接切组合带，无额外 flag 即生效）。
+  对账联动：02_paper_compare 重判/基准/默认 `--btcsv` 已切组合口径；mirror 参考表
+  `/tmp/mirror_ref.json` 重生成（pure → 组合 pureC，no 339/yes 286）——3640 事件逐笔
+  镜像 side/ok 全一致 ✅。09-15 双样本复验 = 现网组合带记录 vs 组合回测行；此前
+  (09-03 部署前) 的 R1 口径记录单独处理（组合 ⊇ R1，ok=true 行全部兼容，仅窄带
+  dist_out 行在组合重判下翻 True——02 复核会有少量历史「不一致」，非 bug）。
 
 **live 与回测数据口径差异（已知、可接受）**：
 - 数据首 tick rem=298/297，live ticker 首 tick ≈299/300 → tick 序号 ±1~2 相位差；rem>180 门槛与 45 窗边缘 ~10 行/14天 受影响；**复验对账用 |trigger_ts − event_start·1000| 对齐，不用 rem**

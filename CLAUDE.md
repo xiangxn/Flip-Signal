@@ -5,7 +5,8 @@
 **Flip Signal** 是一个针对 **Polymarket BTC 5分钟市场**（btc-updown-5m，Chainlink TWAP-60 结算）的量化交易系统。
 当前策略 **「狗@0.2」**：检测 UP/DOWN 盘口某侧 ask 被砸到 ≤0.20 的 tick（下狗机会），
 若该侧刚经历急跌（45s 内 ask 曾 ≥0.40）且 Binance spot 相对锚（TWAP-60 开盘）处于
-**浅洞**（spot 在狗败侧、向狗败方向偏锚 ≤0.5σ 的浅坑，dist_s ∈ (−0.5, 0)）、窗口尚余 >180s，则买入该下狗。
+**浅洞**（spot 在狗败侧浅坑，dist_s ∈ (lo(side), 0)；lo = yes −0.6 / no −1.0——
+2026-09-03 组合版侧别带，见下）、窗口尚余 >180s，则买入该下狗。
 
 ### 核心原则
 > **不预测涨跌，只判断「市场刚把某个 outcome 砸到 0.2 的极端折价——砸出急跌坑，
@@ -19,7 +20,8 @@
   - 触发：每事件首个有效 tick 上某侧 ask 满足 `0 < ask ≤ 0.20`（唯一触底侧即狗侧；
     两侧都 ≤0.2 的交叉态取 sgn·(spot−anchor)<0 一侧，14 天历史 0 次）
   - 急跌：m_45 = 触发前 45 个 tick 槽位内同侧 ask max ≥ 0.40
-  - 浅洞：dist_s = sgn·(spot−anchor)/anchor·1e4/hist_bps ∈ (−0.5, 0) 开区间
+  - 浅洞：dist_s = sgn·(spot−anchor)/anchor·1e4/hist_bps ∈ (lo(side), 0) 开区间，
+    侧别带 lo = yes −0.6 / no −1.0（组合版，2026-09-03 落引擎；R1 双侧 (−0.5,0) 退对照）
   - 时间：rem > 180（窗口前 ~2 分钟）
   - σ（hist_bps）= 前 ≤18 个已完窗口 |tw_close−tw_open| 均值（≥3 窗可用）
 - **成交口径**：fill = 触发 tick 狗侧 ask（≤0.20，无滑点）；`shares = stake/fill`；
@@ -28,15 +30,17 @@
   ResolutionPoller 轮询触发
 - **回测基准（14 天，2U/笔，2026-08-18~31）**：R1 m_45 纯现货 n=245，WR 29.0%，
   EV +1.078U/注，+264U/14 天；日正 12/14；双层（+dist_t）n=197，WR 30.5%，EV +1.234U/注
-- 观察变体（2026-09-03 起 01 脚本四规则报告，未落引擎，09-15 后定）：侧别带组合
-  yes(−0.6,0)+no(−1,0)（09-03 分桶 argmax；no=顶部恐慌族 spot 领先 TWAP → 带深一档,
-  yes=破位下行中继 → 稍深；事件级基差全量校正 ≡ dist_t 带已证伪无 alpha）纯现货 n=625
-  WR 24.6% EV +0.633U/注 +396U/14 天 日正 11/14 h1+133/h2+263；双层 n=530
-  EV +0.686U/注 +364U（dist_t 层减分, 头条取单层）。总 P&L 高于 R1（+396 vs +264）但
-  EV/注摊薄（0.633 vs 1.078），09-15 OOS 核心看点 = 总收益优势能否站住；原 no(−1,0)
-  放宽观察（noR n=546 +331U）已被组合版吸收，不再单独报告
-- 🔴 **状态：纸面交易实施中**。引擎纸面运行验证信号频率/时序/P&L，待 **09-15 双样本
-  复验**（现网记录 + 已有 14 天数据）后评估是否小 stake 实盘。
+  ——R1 已退居回测对照（01 四规则报告前两条），不再落引擎
+- **引擎现行口径 = 组合版侧别带**（2026-09-03 落引擎；回测头条）：yes → (−0.6, 0) /
+  no → (−1, 0)（09-03 分桶 argmax；no=顶部恐慌族 spot 领先 TWAP → 带深一档,
+  yes=破位下行中继 → 稍深；事件级基差全量校正 ≡ dist_t 带已证伪无 alpha）回测纯现货
+  n=625 WR 24.6% EV +0.633U/注 +396U/14 天 日正 11/14 h1+133/h2+263；双层 n=530
+  EV +0.686U/注 +364U（dist_t 层减分, 引擎取单层）。总 P&L 高于 R1（+396 vs +264）但
+  EV/注摊薄（0.633 vs 1.078），09-15 OOS 核心看点 = 总收益优势能否站住（vs 纯带宽放宽
+  的 in-sample 红利）；原 no(−1,0) 放宽观察（noR n=546 +331U）已被组合版吸收
+- 🔴 **状态：纸面交易实施中（组合带）**。引擎纸面运行验证信号频率/时序/P&L（换带后
+  信号频率 ≈ 44.6/日, 注意 09-03 换带前旧记录为 R1 口径），待 **09-15 双样本复验**
+  （现网组合带记录 + 已有 14 天数据）后评估是否小 stake 实盘。
 - 已证伪：flip「自信崩溃」家族（v3，分支 v3 保留）、v1/v2 follow/wait 族、0.2 深度
   全市场扫、双层版单独 TWAP 腿等——历史分析/代码在 git 其他分支可查。
 
@@ -193,9 +197,11 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
 1. **纸面/实盘同源**：成交执行抽象为 `Executor` 接口，`mode: paper|live` 配置区分。
    阶段一仅 `PaperExecutor`（校验 fill>0，无其它边界）；live（FAK）接口与配置已预留，
    纸面验证通过后从 eth 分支历史恢复实盘路径接入。
-2. **口径与回测 1:1**：触发/急跌窗/浅洞/时间腿/σ/P&L 全部映射回测 `01_backtest_r1.py`
-   口径（详见 `docs/dog020_mapping_2026-09-02.md`），观测 JSONL 字段对齐回测 CSV，
-   09-15 用 `python/v4/02_paper_compare.py` 映射复核（ok ⇔ in_pure、won ⇔ settle_won）。
+2. **口径与回测 1:1**：触发/急跌窗/浅洞（侧别带 yes −0.6 / no −1.0）/时间腿/σ/P&L
+   全部映射回测 `01_backtest_r1.py`（详见 `docs/dog020_mapping_2026-09-02.md`），
+   观测 JSONL 字段对齐回测 CSV——对照基准 `trades_r1_combo.csv`（组合版），
+   09-15 用 `python/v4/02_paper_compare.py` 映射复核（ok ⇔ in_pure=组合版、won ⇔
+   settle_won）。
 3. **首触不重试**：事件内首个触底 tick 即观测，判定失败即 Done（本窗不再检）——
    与回测刻意一致，非引擎缺陷。
 4. **观测全落盘**：失败观测同样落盘（reject_reason 分解），供信号频率校准与
@@ -217,10 +223,10 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
 # 纸面运行（默认）
 go run ./cmd/flip -output data/v4 -dashboard :8090
 
-# 参数（与回测脚本同名）
+# 参数（与回测脚本同名；浅洞带为侧别带）
 go run ./cmd/flip --trigger-ask-max 0.2 --crash-min-ask 0.4 \
-                  --crash-window 45 --dist-lo -0.5 --dist-hi 0 \
-                  --rem-min 180 --stake 2 --mode paper
+                  --crash-window 45 --dist-lo-yes -0.6 --dist-lo-no -1.0 \
+                  --dist-hi 0 --rem-min 180 --stake 2 --mode paper
 ```
 
 环境变量（无配置即只读运行）：
