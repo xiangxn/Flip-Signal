@@ -59,6 +59,12 @@ const spotFreshMs = 2000
 // （2026-09-01 服务器实测断流事件，TwapAdapter 内建看门狗，见其注释）。
 const twapMaxStale = 2 * time.Minute
 
+// twapCloseFreshMs 是窗口结束 σ push 的 TWAP 新鲜度上限: 超过判为断流陈旧，
+// 本窗振幅不 push（缺一窗可接受——陈旧 close 会把假振幅污染进其后 18 窗的 σ
+// 尺度，进而扭曲浅洞带判定）。2min 看门狗重建线太粗，够不到数秒~分钟的推送
+// 缺口（data/v4 实测曾现 55s 缺口）；正常推送龄 p99≈1.7s（119 行记录），10s 余量充足。
+const twapCloseFreshMs = 10_000
+
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
 const twapLookbackSeconds = 60
 
@@ -283,8 +289,14 @@ func main() {
 		client.FetchMarketBySlug,
 		10*time.Second,
 		func(conditionID string, outcome int) error {
-			// 命中返回 true（含已结算重复命中）；未命中说明 pending 已移除/不存在
-			recorder.Resolve(conditionID, outcome, time.Now())
+			// Resolve 返回 false = recorder.pending 中无此市场（从未注册/早已结算
+			// 摘除——重复回调、或轮询表与记录器失步）。poller 先回调后移除，正常
+			// 每市场仅命中一次；未命中即结算从未回填（won/pnl 永远悬空，静默），
+			// 记日志兜底排查。磁盘重写失败不影响此布尔（recorder 内部已记 ⚠️）。
+			if !recorder.Resolve(conditionID, outcome, time.Now()) {
+				log.Printf("[Dog] ⚠️ 结算回填未命中 %s outcome=%d（pending 中无此市场）",
+					conditionID, outcome)
+			}
 			return nil
 		},
 	)
@@ -525,12 +537,18 @@ func main() {
 		// 步骤 6: 窗口结束 → σ 滚动窗追加本窗振幅（严格只用已结束窗口）。
 		// close 采自边界瞬间的 TWAP 流值（与官方收盘价口径差异已在文档量化）。
 		// 无触底的窗口无记录（回测 extract 同款语义），本窗结算注册已在触发时完成。
-		if anchor > 0 && lastTick.TwapPrice > 0 {
+		// 新鲜度守卫: 断流期陈旧流值会把本窗振幅放大成假 σ 污染其后 18 窗，
+		// 缺一窗可接受（阈值依据见 twapCloseFreshMs）。
+		switch {
+		case anchor <= 0 || lastTick.TwapPrice <= 0:
+			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)
+		case lastTick.TwapAgeMs > twapCloseFreshMs:
+			log.Printf("[Cycle] ⚠️ 窗口结束 %s TWAP 陈旧（龄 %dms），本窗不计入 σ",
+				conditionID, lastTick.TwapAgeMs)
+		default:
 			hist.push(math.Abs(lastTick.TwapPrice - anchor))
 			log.Printf("[Cycle] 窗口结束 %s: |close−anchor|=%.2f, σ 现 %d 窗",
 				conditionID, math.Abs(lastTick.TwapPrice-anchor), hist.count())
-		} else {
-			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)
 		}
 	}
 }
