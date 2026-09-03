@@ -11,24 +11,32 @@ v4 狗@0.2 R1 家族回测（2 USDC/笔）—— 急跌进 0.2 × 浅洞 × 前 
   时间腿  rem > 180（窗口前 ~2 分钟）
   双层版  在纯现货版之上加 dist_t ∈ (-0.5, 0): 当前 Chainlink TWAP-60 同样浅
           （慢变量确认「真浅洞」; 单独用 TWAP 无 alpha, 见 16_r1_twap.py）
-  no侧放宽 观察变体（2026-09-03, 仅回测报告不落引擎）: no 侧浅洞带放宽到 (−1, 0),
-          yes 侧不变 (−0.5, 0)—— no 触底到 0.2 时现货几乎总已跑出 ≥0.5σ 坑
-          （带内 14 天仅 38 例 vs yes 207; 数据见 03_shallow_band_check.py），
-          深度放宽观察补量与 EV 摊薄。带内 no 侧子集 WR 42.1% EV +2.37U/注
-          为全策略最佳（n=38 样本小, 不当定论）。
+  侧别带组合版（2026-09-03 分桶扫描定带, 观察头条, 不落引擎）:
+          yes (−0.6, 0) / no (−1, 0)。机制: no 触底=顶部恐慌族（spot 领先 TWAP
+          中位 +0.84σ, 现货尚未真正下跌）, no 侧 dist_s 天然深一档, (−0.5,0) 只收
+          38 例; yes 触底=破位下行中继（领先 −0.38σ）, spot 深度即破位度。扫描
+          （/tmp/flipdog/bo_gauge/scan2_params.py, 14 天同批; 带=(-x,0) 左界累积）:
+          yes argmax (−0.6,0) +239U（−0.65 起衰减）; no argmax (−1.0,0) +157U
+          （−1.05 起衰减, h1 仍正）; hi>0 无增量。腿灵敏度 θ=0.4 / τ=180 维持原值
+          （θ↑EV↑量减; τ=150 边际 266 笔仅 +35U 弱正）。R1 双侧 (−0.5,0) 保留为
+          对照（口径与 09-15 复验映射一致）; 早前 no侧放宽(−1,0) 观察（n=546,
+          2026-09-03 上午）被组合版吸收（其 yes 侧 ⊂ 组合 yes 带, 超集 +79 笔）。
   dist 定义: dist = sgn·(price − anchor)/anchor·1e4 / hist_bps
              sgn: dog=yes +1 / dog=no −1（>0 = 现货已在狗赢侧）
              hist_bps = 前 ≤18 窗 |tw_close−tw_open| 均值（≥3 窗可用）
 收益口径: 2U/注, shares = 2/fill（fill = 触发 ask）; 赢 → shares−2; 输 → −2。
           官方 outcome 结算（0=Up 1=Down）。EV/股 = WR − fill。
 
-本脚本: 自包含提取 + 四规则回测（纯现货 / 双层 / no侧放宽纯现货 / no侧放宽双层）,
+本脚本: 自包含提取 + 四规则回测（R1 纯现货/双层 对照 + 组合 纯现货/双层 头条）,
       输出摘要、h1/h2、逐日 P&L、逐日明细 CSV（供 09-15 及未来数据 OOS 复算）。
-      基准两条（纯现货/双层）口径与历史完全一致, no侧放宽为附加报告。
+      对照两条口径与历史完全一致（trades_r1.csv 语义不变, 02_paper_compare 兼容）。
 参考基线（08-18~08-31, 14 天）:
-  m_45 纯现货  n=245 WR 29.0% EV +1.078U/注 P&L +264U  日正 12/14
-  m_45 双层    n=197 WR 30.5% EV +1.234U/注 P&L +243U
-  附 no侧放宽 纯现货 n≈546 见运行输出（明细导出 trades_r1_noR.csv）
+  R1 m_45 纯现货    n=245 WR 29.0% EV +1.078U/注 P&L +264U  日正 12/14
+  R1 m_45 双层      n=197 WR 30.5% EV +1.234U/注 P&L +243U
+  组合 纯现货       n=625 WR 24.6% EV +0.633U/注 P&L +396U  日正 11/14 h1+133/h2+263
+  组合 双层         n=530 WR 25.1% EV +0.686U/注 P&L +364U  （dist_t 层对组合族减分,
+                    与「TWAP 口径单独无 alpha」一致; 头条取单层, 双层仅对照）
+  引擎现仍双侧 (−0.5,0); 组合带 09-15 OOS 复验后定夺是否落引擎。
 用法: python 01_backtest_r1.py [--data <事件目录>] [--stake 2]
 """
 import argparse
@@ -46,10 +54,11 @@ from v2.lib import load_events  # noqa: E402
 STAKE = 2.0
 MAX_LAT = 300          # pm book_latency_ms 上限
 CRASH_WINDOW = 45      # 急跌窗口（tick）
-CRASH_MIN = 0.40       # 窗口内曾 ≥ θ
-BAND = (-0.5, 0.0)     # 浅洞带（R1 基准, yes/no 共用）
-BAND_NO = (-1.0, 0.0)  # no 侧放宽带（2026-09-03 观察变体; yes 侧仍用 BAND）
-REM_MIN = 180          # 时间腿
+CRASH_MIN = 0.40       # 窗口内曾 ≥ θ（09-03 灵敏度: P&L argmax, θ↑ EV↑量减）
+BAND = (-0.5, 0.0)     # R1 对照带（2026-09-02 定稿, yes/no 共用; 口径与历史一致）
+BAND_YC = (-0.6, 0.0)  # 组合版 yes 带（09-03 分桶 argmax; 破位下行中继族）
+BAND_NO = (-1.0, 0.0)  # 组合版 no 带（09-03 分桶 argmax; 顶部恐慌族, spot 领先 TWAP）
+REM_MIN = 180          # 时间腿（09-03 灵敏度: τ=150 边际弱正, 维持原值）
 LOOKS = (20, 30, 45, 60)  # 顺带记录的窗口, 供子版本复算
 
 
@@ -157,20 +166,21 @@ def shallow(v, band=BAND):
 
 def rules(df):
     """四规则 → 布尔掩码。m_45 缺失(NaN)/dist 缺失 → 不入选。
-    前两条 = R1 基准（双侧 BAND, 口径与历史一致）; 后两条 = no 侧放宽变体
-    （no 用 BAND_NO=(−1,0), yes 用 BAND, dist_t 层同理）。"""
+    前两条 = R1 对照（双侧 BAND, 口径与历史一致）; 后两条 = 组合版头条
+    （侧别带 yes BAND_YC / no BAND_NO, dist_t 层同理; 2026-09-03 分桶扫描定带）。"""
     crash = df["m_45"] >= CRASH_MIN
     rem_ok = df["rem"] > REM_MIN
     yes_s = df["side"] == "yes"
-    # R1 基准: 双侧 (−0.5, 0)
+    # R1 对照: 双侧 (−0.5, 0)
     pure = crash & rem_ok & shallow(df["dist_s"])
     dual = pure & shallow(df["dist_t"])
-    # no 侧放宽变体: no → (−1, 0), yes → (−0.5, 0)
-    ds_ok = (yes_s & shallow(df["dist_s"])) | (~yes_s & shallow(df["dist_s"], BAND_NO))
-    dt_ok = (yes_s & shallow(df["dist_t"])) | (~yes_s & shallow(df["dist_t"], BAND_NO))
-    pureR = crash & rem_ok & ds_ok
-    dualR = pureR & dt_ok
-    return pure, dual, pureR, dualR
+    # 组合版: yes → (−0.6, 0), no → (−1, 0)
+    ds = df["dist_s"]
+    pureC = crash & rem_ok & ((yes_s & shallow(ds, BAND_YC)) |
+                              (~yes_s & shallow(ds, BAND_NO)))
+    dt = df["dist_t"]
+    dualC = pureC & ((yes_s & shallow(dt, BAND_YC)) | (~yes_s & shallow(dt, BAND_NO)))
+    return pure, dual, pureC, dualC
 
 
 def wilson(k, n, z=1.96):
@@ -223,23 +233,23 @@ def main():
         BASE.parent.parent / "data" / "btc"), help="data/btc 事件目录")
     ap.add_argument("--stake", type=float, default=STAKE)
     ap.add_argument("--csv", default=str(BASE / "data" / "trades_r1.csv"),
-                    help="明细 CSV 输出路径（R1 基准两条）")
-    ap.add_argument("--csv-norelax", default=str(BASE / "data" / "trades_r1_noR.csv"),
-                    help="no 侧放宽变体明细 CSV 输出路径")
+                    help="明细 CSV 输出路径（R1 对照两条, 语义与历史一致）")
+    ap.add_argument("--csv-combo", default=str(BASE / "data" / "trades_r1_combo.csv"),
+                    help="组合版头条明细 CSV 输出路径")
     args = ap.parse_args()
     STAKE = args.stake
 
     df = extract(args.data)
     print(f"数据 {args.data}: 事件 → 0.2 首触 {len(df)}\n")
-    pure, dual, pureR, dualR = rules(df)
+    pure, dual, pureC, dualC = rules(df)
     ndays = df["date"].nunique()
-    for name, mask in (("R1 m_45 纯现货", pure), ("R1 m_45 双层", dual),
-                       ("R1 m_45 no侧放宽(−1,0) 纯现货", pureR),
-                       ("R1 m_45 no侧放宽(−1,0) 双层", dualR)):
+    for name, mask in (("R1 m_45 纯现货（对照）", pure), ("R1 m_45 双层（对照）", dual),
+                       ("组合 yes(−0.6,0)+no(−1,0) 纯现货", pureC),
+                       ("组合 yes(−0.6,0)+no(−1,0) 双层", dualC)):
         report(name, df[mask], ndays)
 
-    # 导出逐笔明细（基准文件: in_pure/in_dual = 基准两条; noR 文件: 同列名指放宽版两条,
-    # 勿与 trades_r1.csv 混读）。供 OOS/子版本复算。
+    # 导出逐笔明细（对照文件: in_pure/in_dual = R1 两条, 语义与历史一致, 02_paper_compare
+    # 兼容; combo 文件: 同列名指组合版两条, 勿与 trades_r1.csv 混读）。供 OOS/子版本复算。
     cols = ["date", "event_start", "side", "rem", "fill", "m_20", "m_30", "m_45",
             "dist_s", "dist_t", "in_pure", "in_dual", "settle_won"]
     m = pure | dual
@@ -248,12 +258,12 @@ def main():
     out["in_dual"] = dual[m]
     out[cols].to_csv(args.csv, index=False)
     print(f"已导出逐笔明细 {args.csv}（{len(out)} 行）")
-    mR = pureR | dualR
-    outR = df[mR].copy()
-    outR["in_pure"] = pureR[mR]
-    outR["in_dual"] = dualR[mR]
-    outR[cols].to_csv(args.csv_norelax, index=False)
-    print(f"已导出 no侧放宽明细 {args.csv_norelax}（{len(outR)} 行）")
+    mC = pureC | dualC
+    outC = df[mC].copy()
+    outC["in_pure"] = pureC[mC]
+    outC["in_dual"] = dualC[mC]
+    outC[cols].to_csv(args.csv_combo, index=False)
+    print(f"已导出组合版明细 {args.csv_combo}（{len(outC)} 行）")
 
 
 if __name__ == "__main__":
