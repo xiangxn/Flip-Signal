@@ -649,11 +649,11 @@ func handleObservation(o *flip.Observation, rt *runtimeState, conditionID, slug 
 		if err := rt.Executor.Execute(o); err != nil {
 			log.Printf("[Trading] ⚠️ 信号未执行: %v（仍记录观测）", err)
 		}
-		log.Printf("[Event] 🎯 触底信号 side=%s rem=%ds fill=%.3f m20=%.2f m30=%.2f m45=%.2f dist_s=%.2f dist_t=%.2f shares=%.1f",
-			o.Side, o.Rem, o.Fill, o.M20, o.M30, o.M45, o.DistS, o.DistT, o.Shares)
+		log.Printf("[Event] 🎯 触底信号 side=%s rem=%ds fill=%.3f m20=%.2f m30=%.2f m45=%.2f dist_s=%.2f dist_t=%.2f shares=%.1f anchor=%.2f σ=%.2f spot=%.2f",
+			o.Side, o.Rem, o.Fill, o.M20, o.M30, o.M45, o.DistS, o.DistT, o.Shares, o.Anchor, o.HistBps, o.Spot)
 	} else {
-		log.Printf("[Event] 触底否决 side=%s rem=%ds fill=%.3f m45=%.2f dist_s=%.2f reason=%s",
-			o.Side, o.Rem, o.Fill, o.M45, o.DistS, o.RejectReason)
+		log.Printf("[Event] 触底否决 side=%s rem=%ds fill=%.3f m45=%.2f dist_s=%.2f reason=%s anchor=%.2f σ=%.2f spot=%.2f",
+			o.Side, o.Rem, o.Fill, o.M45, o.DistS, o.RejectReason, o.Anchor, o.HistBps, o.Spot)
 	}
 	rec, err := rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake)
 	if err != nil {

@@ -126,6 +126,11 @@ func (e *Engine) decide(t Tick, side string) *Observation {
 	o := &Observation{
 		Ts: t.Ts, Side: side, Rem: t.Rem, Fill: fill,
 		BookLatMs: t.BookLatMs, TwapAgeMs: t.TwapAgeMs,
+		// 决策原始输入随行快照（诊断: 浅洞带分解 / anchor·σ 口径差比对）
+		Anchor:    e.anchor,
+		HistBps:   e.histBps,
+		Spot:      t.BinPrice,
+		TwapPrice: t.TwapPrice,
 	}
 
 	// 回看窗口 max（先判后插：ring 尚未含本 tick；0 = 无有效 ask 同 NaN）

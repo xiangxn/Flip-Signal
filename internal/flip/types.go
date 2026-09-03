@@ -131,6 +131,13 @@ type Observation struct {
 	Shares       float64 `json:"shares,omitempty"`          // 目标股数 = stake/fill（仅 ok=true）
 	BookLatMs    int64   `json:"book_latency_ms,omitempty"` // 触底时刻盘口延迟（诊断）
 	TwapAgeMs    int64   `json:"twap_age_ms,omitempty"`     // TWAP 距上次推送毫秒数（诊断）
+
+	// 浅洞腿决策原始输入（2026-09-03 起落盘，诊断 anchor/σ/spot 口径差与
+	// yes/no 进带率漂移用；0 = 该输入当时缺失，与 reject_reason 呼应）
+	Anchor    float64 `json:"anchor"`    // 本窗 anchor = 边界 TWAP-60 流值（USD）
+	HistBps   float64 `json:"hist_bps"`  // σ（bps）: 前 ≤18 已完窗 |close−open| 均值（0 = 不足 3 窗）
+	Spot      float64 `json:"spot"`      // 触底 tick Binance BTCUSDT 价（0 = 缺失/陈旧 >2s）
+	TwapPrice float64 `json:"twap_price"` // 触底 tick TWAP-60 流值（dist_t 观察腿输入）
 }
 
 // Record 是一条触底观测的完整落盘记录（成功与失败都记）。
