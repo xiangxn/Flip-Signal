@@ -11,17 +11,24 @@ v4 狗@0.2 R1 家族回测（2 USDC/笔）—— 急跌进 0.2 × 浅洞 × 前 
   时间腿  rem > 180（窗口前 ~2 分钟）
   双层版  在纯现货版之上加 dist_t ∈ (-0.5, 0): 当前 Chainlink TWAP-60 同样浅
           （慢变量确认「真浅洞」; 单独用 TWAP 无 alpha, 见 16_r1_twap.py）
+  no侧放宽 观察变体（2026-09-03, 仅回测报告不落引擎）: no 侧浅洞带放宽到 (−1, 0),
+          yes 侧不变 (−0.5, 0)—— no 触底到 0.2 时现货几乎总已跑出 ≥0.5σ 坑
+          （带内 14 天仅 38 例 vs yes 207; 数据见 03_shallow_band_check.py），
+          深度放宽观察补量与 EV 摊薄。带内 no 侧子集 WR 42.1% EV +2.37U/注
+          为全策略最佳（n=38 样本小, 不当定论）。
   dist 定义: dist = sgn·(price − anchor)/anchor·1e4 / hist_bps
              sgn: dog=yes +1 / dog=no −1（>0 = 现货已在狗赢侧）
              hist_bps = 前 ≤18 窗 |tw_close−tw_open| 均值（≥3 窗可用）
 收益口径: 2U/注, shares = 2/fill（fill = 触发 ask）; 赢 → shares−2; 输 → −2。
           官方 outcome 结算（0=Up 1=Down）。EV/股 = WR − fill。
 
-本脚本: 自包含提取 + 两个规则回测（纯现货 / 双层）, 输出摘要、h1/h2、
-      逐日 P&L、逐日明细 CSV（供 09-15 及未来数据 OOS 复算）。
+本脚本: 自包含提取 + 四规则回测（纯现货 / 双层 / no侧放宽纯现货 / no侧放宽双层）,
+      输出摘要、h1/h2、逐日 P&L、逐日明细 CSV（供 09-15 及未来数据 OOS 复算）。
+      基准两条（纯现货/双层）口径与历史完全一致, no侧放宽为附加报告。
 参考基线（08-18~08-31, 14 天）:
   m_45 纯现货  n=245 WR 29.0% EV +1.078U/注 P&L +264U  日正 12/14
   m_45 双层    n=197 WR 30.5% EV +1.234U/注 P&L +243U
+  附 no侧放宽 纯现货 n≈546 见运行输出（明细导出 trades_r1_noR.csv）
 用法: python 01_backtest_r1.py [--data <事件目录>] [--stake 2]
 """
 import argparse
@@ -40,7 +47,8 @@ STAKE = 2.0
 MAX_LAT = 300          # pm book_latency_ms 上限
 CRASH_WINDOW = 45      # 急跌窗口（tick）
 CRASH_MIN = 0.40       # 窗口内曾 ≥ θ
-BAND = (-0.5, 0.0)     # 浅洞带
+BAND = (-0.5, 0.0)     # 浅洞带（R1 基准, yes/no 共用）
+BAND_NO = (-1.0, 0.0)  # no 侧放宽带（2026-09-03 观察变体; yes 侧仍用 BAND）
 REM_MIN = 180          # 时间腿
 LOOKS = (20, 30, 45, 60)  # 顺带记录的窗口, 供子版本复算
 
@@ -143,16 +151,26 @@ def extract(data_dir):
     return df
 
 
-def shallow(v):
-    return (v > BAND[0]) & (v < BAND[1])
+def shallow(v, band=BAND):
+    return (v > band[0]) & (v < band[1])
 
 
 def rules(df):
-    """两个规则 → 布尔掩码。m_45 缺失(NaN)/dist 缺失 → 不入选。"""
+    """四规则 → 布尔掩码。m_45 缺失(NaN)/dist 缺失 → 不入选。
+    前两条 = R1 基准（双侧 BAND, 口径与历史一致）; 后两条 = no 侧放宽变体
+    （no 用 BAND_NO=(−1,0), yes 用 BAND, dist_t 层同理）。"""
     crash = df["m_45"] >= CRASH_MIN
-    pure = crash & shallow(df["dist_s"]) & (df["rem"] > REM_MIN)
+    rem_ok = df["rem"] > REM_MIN
+    yes_s = df["side"] == "yes"
+    # R1 基准: 双侧 (−0.5, 0)
+    pure = crash & rem_ok & shallow(df["dist_s"])
     dual = pure & shallow(df["dist_t"])
-    return pure, dual
+    # no 侧放宽变体: no → (−1, 0), yes → (−0.5, 0)
+    ds_ok = (yes_s & shallow(df["dist_s"])) | (~yes_s & shallow(df["dist_s"], BAND_NO))
+    dt_ok = (yes_s & shallow(df["dist_t"])) | (~yes_s & shallow(df["dist_t"], BAND_NO))
+    pureR = crash & rem_ok & ds_ok
+    dualR = pureR & dt_ok
+    return pure, dual, pureR, dualR
 
 
 def wilson(k, n, z=1.96):
@@ -205,25 +223,37 @@ def main():
         BASE.parent.parent / "data" / "btc"), help="data/btc 事件目录")
     ap.add_argument("--stake", type=float, default=STAKE)
     ap.add_argument("--csv", default=str(BASE / "data" / "trades_r1.csv"),
-                    help="明细 CSV 输出路径")
+                    help="明细 CSV 输出路径（R1 基准两条）")
+    ap.add_argument("--csv-norelax", default=str(BASE / "data" / "trades_r1_noR.csv"),
+                    help="no 侧放宽变体明细 CSV 输出路径")
     args = ap.parse_args()
     STAKE = args.stake
 
     df = extract(args.data)
     print(f"数据 {args.data}: 事件 → 0.2 首触 {len(df)}\n")
-    pure, dual = rules(df)
+    pure, dual, pureR, dualR = rules(df)
     ndays = df["date"].nunique()
-    for name, mask in (("R1 m_45 纯现货", pure), ("R1 m_45 双层", dual)):
+    for name, mask in (("R1 m_45 纯现货", pure), ("R1 m_45 双层", dual),
+                       ("R1 m_45 no侧放宽(−1,0) 纯现货", pureR),
+                       ("R1 m_45 no侧放宽(−1,0) 双层", dualR)):
         report(name, df[mask], ndays)
 
-    # 导出逐笔明细（双规则用 in_pure/in_dual 标记, 供 OOS/子版本复算）
-    out = df[pure | dual].copy()
-    out["in_pure"] = pure[pure | dual]
-    out["in_dual"] = dual[pure | dual]
+    # 导出逐笔明细（基准文件: in_pure/in_dual = 基准两条; noR 文件: 同列名指放宽版两条,
+    # 勿与 trades_r1.csv 混读）。供 OOS/子版本复算。
     cols = ["date", "event_start", "side", "rem", "fill", "m_20", "m_30", "m_45",
             "dist_s", "dist_t", "in_pure", "in_dual", "settle_won"]
+    m = pure | dual
+    out = df[m].copy()
+    out["in_pure"] = pure[m]
+    out["in_dual"] = dual[m]
     out[cols].to_csv(args.csv, index=False)
     print(f"已导出逐笔明细 {args.csv}（{len(out)} 行）")
+    mR = pureR | dualR
+    outR = df[mR].copy()
+    outR["in_pure"] = pureR[mR]
+    outR["in_dual"] = dualR[mR]
+    outR[cols].to_csv(args.csv_norelax, index=False)
+    print(f"已导出 no侧放宽明细 {args.csv_norelax}（{len(outR)} 行）")
 
 
 if __name__ == "__main__":
