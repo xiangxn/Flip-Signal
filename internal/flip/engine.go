@@ -18,8 +18,8 @@ const lookMax = 45
 // 与回测「每事件仅首个观测、无重试」口径刻意一致。
 //
 // 判定输入全部经 Tick / BeginWindow 注入，本包零外部依赖、无副作用可测：
-//   - 有效 tick = BookLatMs ≤ 300 且 UP(=yes) 侧 bid/ask > 0（镜像回测 :79，
-//     不要求 DOWN 报价）
+//   - 有效 tick = BookLatMs ≤ 300 且 UP(=yes)/DOWN(=no) 双侧 bid/ask 报价齐全
+//     （整簿快照门控，镜像回测 :79；实测缺失为整行全空，只挡无快照行）
 //   - 急跌窗 = 索引槽位 ring（先判后插：触发 tick 不进窗；无效 tick 压 0 占槽，
 //     窗头自然截断——窗口未满取现有值，与回测合法短窗一致）
 //   - dist = sgn·(price − anchor)/anchor·1e4 / histBps，sgn: dog=yes +1 / no −1
@@ -87,8 +87,10 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 		e.pushSlots(t)
 		return nil
 	}
-	// 有效 tick 需 UP(=yes) 报价齐全（镜像回测 :79；DOWN 报价缺失不影响触发）。
-	if !(t.UpBid > 0 && t.UpAsk > 0) {
+	// 整簿快照门控：UP/DOWN 四字段报价齐全才算有效 tick（镜像回测 :79）。
+	// 实测报价缺失是整行全空（两侧同秒为 0），本检查只挡无快照行；
+	// 任一侧报价不全 → 不参与触发（ask=0 本就无法触底）。
+	if !(t.UpBid > 0 && t.UpAsk > 0 && t.DownBid > 0 && t.DownAsk > 0) {
 		e.pushSlots(t)
 		return nil
 	}

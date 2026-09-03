@@ -59,20 +59,23 @@ func TestTrigger(t *testing.T) {
 		latency   int64 // 触发 tick 盘口延迟（>300 = 无效）
 		upBid     float64
 		upAsk     float64
+		downBid0  bool // 覆写 DownBid=0（整簿门控用例）
 		downAsk   float64
 		wantSide  string
 		wantFill  float64
 		wantNoObs bool // 期望不产出观测
 	}{
-		{"首个有效 tick 触底 yes", 0, 0, 0.8, 0.19, 0.9, SideYes, 0.19, false},
-		{"触底发生在 no 侧", 0, 0, 0.8, 0.55, 0.12, SideNo, 0.12, false},
-		{"双 ask≤0.2 取 yes", 0, 0, 0.8, 0.19, 0.15, SideYes, 0.19, false},
-		{"ask 恰为 0.20 触发", 0, 0, 0.8, 0.20, 0.9, SideYes, 0.20, false},
-		{"延迟>300ms tick 不检不触发", 0, 400, 0.8, 0.19, 0.9, "", 0, true},
-		{"UP 报价缺失不触发（bid=0）", 0, 0, 0, 0.19, 0.15, "", 0, true},
-		{"UP ask=0 不触发", 0, 0, 0.8, 0, 0.15, "", 0, true},
-		{"Down ask=0 不触发", 0, 0, 0.8, 0.55, 0, "", 0, true},
-		{"两侧均不触底无观测", 0, 0, 0.8, 0.55, 0.6, "", 0, true},
+		{"首个有效 tick 触底 yes", 0, 0, 0.8, 0.19, false, 0.9, SideYes, 0.19, false},
+		{"触底发生在 no 侧", 0, 0, 0.8, 0.55, false, 0.12, SideNo, 0.12, false},
+		{"双 ask≤0.2 取 yes", 0, 0, 0.8, 0.19, false, 0.15, SideYes, 0.19, false},
+		{"ask 恰为 0.20 触发", 0, 0, 0.8, 0.20, false, 0.9, SideYes, 0.20, false},
+		{"延迟>300ms tick 不检不触发", 0, 400, 0.8, 0.19, false, 0.9, "", 0, true},
+		{"UP 报价缺失不触发（bid=0）", 0, 0, 0, 0.19, false, 0.15, "", 0, true},
+		{"UP ask=0 不触发", 0, 0, 0.8, 0, false, 0.15, "", 0, true},
+		{"Down ask=0 不触发", 0, 0, 0.8, 0.55, false, 0, "", 0, true},
+		{"DOWN 簿缺失压制 yes 触底（bid=0）", 0, 0, 0.8, 0.19, true, 0.9, "", 0, true},
+		{"DOWN bid=0 压制 no 触底", 0, 0, 0.8, 0.55, true, 0.12, "", 0, true},
+		{"两侧均不触底无观测", 0, 0, 0.8, 0.55, false, 0.6, "", 0, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
@@ -80,6 +83,9 @@ func TestTrigger(t *testing.T) {
 			feed(t, e, c.feedN, 260, 0.5, 0.5)
 			tick := stdTick(250, c.upAsk, c.downAsk)
 			tick.UpBid = c.upBid
+			if c.downBid0 {
+				tick.DownBid = 0
+			}
 			tick.BookLatMs = c.latency
 			o := e.ProcessTick(tick)
 			if c.wantNoObs {

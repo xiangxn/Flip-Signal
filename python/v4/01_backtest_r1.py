@@ -76,7 +76,11 @@ def extract(data_dir):
             pm = t.get("pm") or {}
             if not pm or (pm.get("book_latency_ms") or 0) > MAX_LAT:
                 continue
-            if not ((pm.get("yes_bid") or 0) > 0 and (pm.get("yes_ask") or 0) > 0):
+            # 整簿快照门控（镜像 Go 引擎，2026-09-03 由 UP-only 扩为对称四字段）：
+            # UP/DOWN 两侧 bid/ask 报价齐全才有效。实测报价缺失为整行全空（两侧
+            # 同秒为 0，14 天 3.04%），无单侧缺失态 → 该门控与旧版历史结果全等。
+            if not all((pm.get(k) or 0) > 0
+                       for k in ("yes_bid", "yes_ask", "no_bid", "no_ask")):
                 continue
             if (pm.get("yes_ask") or 1) <= 0.20 or (pm.get("no_ask") or 1) <= 0.20:
                 trig = (i, t, pm)

@@ -126,8 +126,8 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
    └────────── 窗口结束(rem==0) ◀───────────┘
 ```
 
-- **Watching**: 1s tick 更新两侧状态；有效 tick（latency≤300 且 UP 报价齐全）上
-  检查 up/down ask 是否 ≤0.20
+- **Watching**: 1s tick 更新两侧状态；有效 tick（latency≤300 且 UP/DOWN 双侧报价齐全
+  ——整簿快照门控，实测缺失为整行全空）上检查 up/down ask 是否 ≤0.20
 - **判定顺序**（一次完成）：rem_low → no_hist → missing_spot → missing_anchor →
   no_crash → dist_out；全过 → ok（shares = stake/fill）
 - **Done**: 事件内不再检测（与回测每事件仅首个观测一致，无 fallback 重试）
