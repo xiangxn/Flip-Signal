@@ -217,6 +217,53 @@ func TestRejectReasons(t *testing.T) {
 	}
 }
 
+// TestSideBand 侧别浅洞带（2026-09-03 组合版默认: yes (−0.6, 0) / no (−1, 0)）:
+// no 因 spot 领先 TWAP 天然深一档 → 放宽到 −1.0; yes 破位下行中继 → 只到 −0.6。
+func TestSideBand(t *testing.T) {
+	cases := []struct {
+		name    string
+		upAsk   float64 // 触底侧（ask ≤ 0.2 的一侧为狗）
+		downAsk float64
+		spot    float64 // BinPrice（σ=7bps: dist = Δ/70）
+		wantOK  bool
+		expDist float64
+	}{
+		// no 深坑 −0.7σ（Binance 超锚 +0.7σ, sgn=−1）: no 带内 → ok
+		//（旧双侧 (−0.5,0) 会 dist_out——引擎侧别放宽即此新增行为）
+		{"no 深坑 −0.7σ 带内 ok", 0.9, 0.19, 100_049, true, -0.7},
+		// no 恰 −1.0σ 边界: 开区间不含下界 → dist_out
+		{"no 恰 −1.0σ 边界带外", 0.9, 0.19, 100_070, false, -1.0},
+		// yes −0.55σ: 在 yes 带 (−0.6,0) 内（旧 (−0.5,0) 会拒——yes 加深段生效）
+		{"yes −0.55σ 加深段带内 ok", 0.19, 0.9, 99_961.5, true, -0.55},
+		// yes −0.7σ 深坑: yes 带外 → dist_out（no 深带不适用于 yes 侧）
+		{"yes −0.7σ 深坑带外", 0.19, 0.9, 99_951, false, -0.7},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			e := newEng(cfgOK())
+			feed(t, e, 5, 260, 0.5, 0.5) // 急跌历史（ask 曾 ≥0.40 已构造）
+			tick := stdTick(250, c.upAsk, c.downAsk)
+			tick.BinPrice = c.spot
+			o := e.ProcessTick(tick)
+			if o == nil {
+				t.Fatal("触底应产出观测")
+			}
+			if !approx(o.DistS, c.expDist) {
+				t.Fatalf("dist_s = %v, 期望 %v", o.DistS, c.expDist)
+			}
+			if c.wantOK && (!o.OK || o.RejectReason != "") {
+				t.Fatalf("应 ok, 得到 reason=%q ok=%v", o.RejectReason, o.OK)
+			}
+			if !c.wantOK && o.OK {
+				t.Fatal("应 dist_out, 得到 ok")
+			}
+			if !c.wantOK && o.RejectReason != RejectDistOut {
+				t.Fatalf("reason = %q, 期望 dist_out", o.RejectReason)
+			}
+		})
+	}
+}
+
 // TestMWindow 急跌窗（索引槽位）语义。
 func TestMWindow(t *testing.T) {
 	t.Run("无效 tick 占槽但不贡献", func(t *testing.T) {

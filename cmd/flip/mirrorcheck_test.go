@@ -232,6 +232,6 @@ func TestMirrorBacktest(t *testing.T) {
 	if misSide > 0 || misOK > 0 || noObs > 0 {
 		t.Errorf("🔴 引擎与回测存在方向/判定差异（差异数: side=%d ok=%d 无观测=%d）", misSide, misOK, noObs)
 	} else {
-		t.Logf("🟢 引擎与回测逐笔一致: side/ok 全部镜像（含 38 个 no 侧 pure 信号）")
+		t.Logf("🟢 引擎与回测逐笔一致: side/ok 全部镜像（参考表 = 01 组合版 pureC 单层）")
 	}
 }

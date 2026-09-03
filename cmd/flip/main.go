@@ -146,7 +146,8 @@ func main() {
 	triggerAskMax := flag.Float64("trigger-ask-max", 0.20, "触发阈值: 某侧 ask ≤ 此值 即触底观测")
 	crashMinAsk := flag.Float64("crash-min-ask", 0.40, "急跌腿: m_45 窗内同侧 ask 曾 ≥ 此值")
 	crashWindow := flag.Int("crash-window", 45, "急跌窗: 触发前 N 个 tick 槽位内求 max")
-	distLo := flag.Float64("dist-lo", -0.5, "浅洞带下界: dist_s 必须 > 此值（开区间）")
+	distLoYes := flag.Float64("dist-lo-yes", -0.6, "yes 浅洞带下界: dist_s 必须 > 此值（组合版 BAND_YC）")
+	distLoNo := flag.Float64("dist-lo-no", -1.0, "no 浅洞带下界: dist_s 必须 > 此值（组合版 BAND_NO）")
 	distHi := flag.Float64("dist-hi", 0.0, "浅洞带上界: dist_s 必须 < 此值（开区间）")
 	remMin := flag.Int("rem-min", 180, "时间腿: 仅 rem > 此值的触发有效")
 	stake := flag.Float64("stake", 2, "每信号投入 USDC")
@@ -160,7 +161,8 @@ func main() {
 		TriggerAskMax: *triggerAskMax,
 		CrashMinAsk:   *crashMinAsk,
 		CrashWindow:   *crashWindow,
-		DistLo:        *distLo,
+		DistLoYes:     *distLoYes,
+		DistLoNo:      *distLoNo,
 		DistHi:        *distHi,
 		RemMin:        *remMin,
 		Stake:         *stake,
@@ -334,9 +336,9 @@ func main() {
 	log.Println("========================================")
 	log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", *mode)
 	log.Printf(" 输出: %s  |  Slug: %s", *outputDir, *slugPrefix)
-	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
+	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞 yes(%.2f,%.2f)/no(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
 		cfg.TriggerAskMax, cfg.CrashWindow, cfg.CrashMinAsk,
-		cfg.DistLo, cfg.DistHi, cfg.RemMin, cfg.Stake)
+		cfg.DistLoYes, cfg.DistHi, cfg.DistLoNo, cfg.DistHi, cfg.RemMin, cfg.Stake)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 浅洞]")
 	log.Println("========================================")
 

@@ -185,8 +185,10 @@ func (e *Engine) decide(t Tick, side string) *Observation {
 	case ringMax(ring, cfg.CrashWindow) < cfg.CrashMinAsk:
 		// 急跌腿：窗口内曾 ≥ CrashMinAsk
 		o.RejectReason = RejectNoCrash
-	case !(o.DistS > cfg.DistLo && o.DistS < cfg.DistHi):
-		// 浅洞腿：dist_s ∈ (DistLo, DistHi) 开区间
+	case !(o.DistS > loSide(cfg, side) && o.DistS < cfg.DistHi):
+		// 浅洞腿：dist_s ∈ (lo(side), DistHi) 开区间——侧别带
+		//（no=顶部恐慌族 spot 领先 TWAP → −1.0 深一档; yes=破位中继 → −0.6;
+		// 见 DefaultConfig 注释）
 		o.RejectReason = RejectDistOut
 	default:
 		o.OK = true
@@ -227,4 +229,12 @@ func ringMax(ring []float64, n int) float64 {
 		}
 	}
 	return m
+}
+
+// loSide 返回该狗侧的浅洞带下界（侧别带: yes 窄 −0.6 / no 宽 −1.0）。
+func loSide(cfg Config, side string) float64 {
+	if side == SideNo {
+		return cfg.DistLoNo
+	}
+	return cfg.DistLoYes
 }

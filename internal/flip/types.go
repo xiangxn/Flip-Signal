@@ -4,7 +4,8 @@
 // 一次性判定三腿（急跌 × 浅洞 × 时间，docs/engine_plan_dog020_2026-09-02.md）:
 //
 //	急跌   m_45: 触发前 45 tick 内同侧 ask 曾 ≥ 0.40（窗口 max）
-//	浅洞   dist_s ∈ (-0.5, 0): spot 在狗败侧、向狗败方向偏锚 ≤0.5σ（浅坑未走深）
+//	浅洞   dist_s ∈ (lo(side), 0): spot 在狗败侧浅坑——侧别带 lo: yes −0.6 / no −1.0
+//	       （2026-09-03 组合版定带, 见 01_backtest_r1.py BAND_YC/BAND_NO）
 //	时间   rem > 180
 //
 // dist 定义: dist = sgn·(price − anchor)/anchor·1e4 / hist_bps
@@ -38,12 +39,14 @@ const (
 	RejectMissingAnchor = "missing_anchor"
 	// RejectNoCrash 急跌腿不过: m_45 窗口内 ask 从未 ≥ CrashMinAsk。
 	RejectNoCrash = "no_crash"
-	// RejectDistOut 浅洞腿不过: dist_s 不在 (DistLo, DistHi) 开区间。
+	// RejectDistOut 浅洞腿不过: dist_s 不在 (lo(side), DistHi) 开区间
+	//（侧别带: yes DistLoYes / no DistLoNo）。
 	RejectDistOut = "dist_out"
 )
 
 // Config 包含策略的全部可调参数。
-// 默认值与回测标定一致（python/v4/01_backtest_r1.py 常量，2026-09-02 定稿）。
+// 默认值与回测标定一致（python/v4/01_backtest_r1.py 常量，2026-09-02 定稿 R1、
+// 2026-09-03 引擎切组合版侧别带——BAND_YC/BAND_NO，观察头条，09-15 双样本复验后评估）。
 type Config struct {
 	// 触发阈值: 某侧 ask 满足 0 < ask ≤ 此值 即触底观测（0.20）
 	TriggerAskMax float64
@@ -51,9 +54,13 @@ type Config struct {
 	CrashMinAsk float64
 	// 急跌窗口: 触发前 N 个 tick 槽位内求 max（45, CRASH_WINDOW）
 	CrashWindow int
-	// 浅洞带: dist_s 必须 ∈ (DistLo, DistHi) 开区间（-0.5, 0, BAND）
-	DistLo float64
-	DistHi float64
+	// 浅洞带: dist_s 必须 ∈ (lo(side), DistHi) 开区间——侧别带（组合版 2026-09-03）:
+	//   DistLoYes: yes 带下界（-0.6, BAND_YC; 破位下行中继族, 稍深）
+	//   DistLoNo:  no 带下界（-1.0, BAND_NO; 顶部恐慌族, spot 领先 TWAP → 带深一档）
+	// 旧双侧 (−0.5,0)（BAND）退居回测对照（R1），引擎不再使用。
+	DistLoYes float64
+	DistLoNo  float64
+	DistHi    float64
 	// 时间腿: 仅 rem > 此值 的触发有效（180, REM_MIN）
 	RemMin int
 	// 每信号投入 USDC（2）
@@ -61,13 +68,15 @@ type Config struct {
 }
 
 // DefaultConfig 返回回测标定的默认参数（python/v4/01_backtest_r1.py）:
-// m_45 纯现货 n=245, WR 29.0%, EV +1.078U/注, +264U/14 天。
+// 组合版侧别带 yes(−0.6,0)+no(−1,0) 纯现货 n=625, WR 24.6%, EV +0.633U/注,
+// +396U/14 天（2026-09-03 分桶扫描定带, 纸面引擎现行口径）。
 func DefaultConfig() Config {
 	return Config{
 		TriggerAskMax: 0.20, // 0.2 触底（dog@0.2 规则族核心）
 		CrashMinAsk:   0.40, // 急跌: 45s 窗口内曾 ≥ 0.40
 		CrashWindow:   45,   // 急跌窗（tick 槽位）
-		DistLo:        -0.5, // 浅洞带下界: 坑深 ≤0.5σ（坑过深 = 砸盘被现货确认）
+		DistLoYes:     -0.6, // yes 浅洞带下界（BAND_YC, 破位下行中继族）
+		DistLoNo:      -1.0, // no 浅洞带下界（BAND_NO, 顶部恐慌族, spot 领先 TWAP）
 		DistHi:        0.0,  // 浅洞带上界: dist_s<0 = 现货须在狗败侧（方向约束）
 		RemMin:        180,  // 窗口前 2 分钟内才观测
 		Stake:         2,    // 每笔 2 USDC
