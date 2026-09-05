@@ -74,6 +74,25 @@ type recordResponse struct {
 	ResolvedAt   string  `json:"resolved_at,omitempty"`
 }
 
+// dailyRow 是 /api/daily 的一行（按 UTC 日切分，与回测 CSV date/记录文件同日口径；
+// 逐日明细弹窗用，列与 02_paper_compare.py 逐日输出对齐）。
+type dailyRow struct {
+	Date     string  `json:"date"` // YYYY-MM-DD（UTC）；total 行为空
+	Obs      int     `json:"obs"`  // 触底观测（含失败）
+	Signals  int     `json:"signals"`
+	Pending  int     `json:"pending"` // 未结算信号
+	Won      int     `json:"won"`
+	Lost     int     `json:"lost"`
+	WinRate  float64 `json:"win_rate"` // 已结算口径（won/(won+lost)；无结算 = 0）
+	PnL      float64 `json:"pnl"`
+}
+
+// dailyResp 是 /api/daily 的响应体（rows 时间正序 + 合计行）。
+type dailyResp struct {
+	Days  []dailyRow `json:"days"`
+	Total dailyRow   `json:"total"`
+}
+
 // ── Handlers ──
 
 // handleState 返回运行状态与统计汇总。
@@ -132,6 +151,62 @@ func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
 		records = records[:limit]
 	}
 	writeJSON(w, mapRecords(records))
+}
+
+// handleDaily 返回逐日盈利明细（UTC 日粒度，供前端弹窗表格）。
+func (s *State) handleDaily(w http.ResponseWriter, r *http.Request) {
+	days := collectDaily(s.recorder.Observations())
+	var total dailyRow
+	for i := range days {
+		d := &days[i]
+		total.Obs += d.Obs
+		total.Signals += d.Signals
+		total.Pending += d.Pending
+		total.Won += d.Won
+		total.Lost += d.Lost
+		total.PnL += d.PnL
+	}
+	if total.Won+total.Lost > 0 {
+		total.WinRate = float64(total.Won) / float64(total.Won+total.Lost)
+	}
+	writeJSON(w, dailyResp{Days: days, Total: total})
+}
+
+// collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（时间正序输入）。
+// 胜率与 P&L 只统计已结算信号（与 /api/state 统计口径一致）。
+func collectDaily(recs []*flip.Record) []dailyRow {
+	byDay := map[string]*dailyRow{}
+	for _, rec := range recs {
+		d := byDay[rec.Date]
+		if d == nil {
+			d = &dailyRow{Date: rec.Date}
+			byDay[rec.Date] = d
+		}
+		d.Obs++
+		if !rec.OK {
+			continue
+		}
+		d.Signals++
+		switch {
+		case rec.Won == nil:
+			d.Pending++
+		case *rec.Won:
+			d.Won++
+			d.PnL += rec.PnL
+		default:
+			d.Lost++
+			d.PnL += rec.PnL
+		}
+	}
+	out := make([]dailyRow, 0, len(byDay))
+	for _, d := range byDay {
+		if d.Won+d.Lost > 0 {
+			d.WinRate = float64(d.Won) / float64(d.Won+d.Lost)
+		}
+		out = append(out, *d)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
+	return out
 }
 
 // handleConfig 返回当前策略配置（前端展示标定参数）。

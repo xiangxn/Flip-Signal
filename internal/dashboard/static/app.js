@@ -154,6 +154,50 @@
     });
   }
 
+  // 逐日盈利弹窗（/api/daily，UTC 日聚合）— 日行进 tbody，合计行放 tfoot 吸底
+  function dailyRowHtml(r, isTotal) {
+    var wr = (r.won + r.lost) > 0 ? (r.win_rate * 100).toFixed(1) + '%' : '—';
+    var pnlCls = r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '');
+    var tag = isTotal ? '合计' : r.date;
+    return '<tr>' +
+      '<td class="' + (isTotal ? 'muted' : '') + '">' + tag + '</td>' +
+      '<td>' + r.obs + '</td>' +
+      '<td>' + r.signals + '</td>' +
+      '<td>' + r.pending + '</td>' +
+      '<td>' + wr + '</td>' +
+      '<td class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td></tr>';
+  }
+
+  function renderDaily(d) {
+    var tb = document.querySelector('#dailyTable tbody');
+    var tf = document.querySelector('#dailyTable tfoot');
+    tb.innerHTML = '';
+    tf.innerHTML = '';
+    $('dailyEmpty').hidden = d.days.length > 0;
+    // 倒序渲染（最新日在顶，打开即见今天，无需滚到底）
+    d.days.slice().reverse().forEach(function (r) { tb.insertAdjacentHTML('beforeend', dailyRowHtml(r, false)); });
+    // 合计吸底：仅在有数据时填 tfoot（CSS 负责 sticky bottom）
+    if (d.days.length > 0) tf.insertAdjacentHTML('beforeend', dailyRowHtml(d.total, true));
+  }
+
+  function openDaily() {
+    $('dailyMask').hidden = false;
+    fetchJSON('/api/daily', renderDaily);
+  }
+  function closeDaily() {
+    $('dailyMask').hidden = true;
+  }
+  $('statDayCard').addEventListener('click', openDaily);
+  $('dailyClose').addEventListener('click', closeDaily);
+  // 点击遮罩空白处关闭
+  $('dailyMask').addEventListener('click', function (e) {
+    if (e.target === this) closeDaily();
+  });
+  // Esc 关闭
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape') closeDaily();
+  });
+
   function fetchJSON(url, cb, timeoutMs) {
     // 超时兜底: 服务器卡死/断网时中止请求，避免 setInterval 堆积挂起连接
     timeoutMs = timeoutMs || 8000;

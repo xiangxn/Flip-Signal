@@ -14,7 +14,8 @@
 
 ### 当前策略状态（2026-09-02 定稿，v4 分支）
 - 完整方案见 `docs/engine_plan_dog020_2026-09-02.md`，口径映射/运行说明见
-  `docs/dog020_mapping_2026-09-02.md`，分析/回测脚本 `python/v4/`（权威 =
+  `docs/dog020_mapping_2026-09-02.md`，**09-15 双样本复验计划（预设判据/决策表）见
+  `docs/dog020_oos_review_2026-09-15.md`**，分析/回测脚本 `python/v4/`（权威 =
   `python/v4/01_backtest_r1.py`）。
 - **信号条件（触发与急跌腿来自 PM 订单簿；浅洞腿输入 Binance spot）**：
   - 触发：每事件首个有效 tick 上某侧 ask 满足 `0 < ask ≤ 0.20`（唯一触底侧即狗侧；

@@ -27,7 +27,7 @@
       <div class="card stat"><div class="stat-val" id="statWr">—</div><div class="stat-lbl">胜率</div></div>
       <div class="card stat"><div class="stat-val" id="statPnl">—</div><div class="stat-lbl">累计 P&amp;L</div></div>
       <div class="card stat"><div class="stat-val" id="statDd">—</div><div class="stat-lbl">最大回撤</div></div>
-      <div class="card stat"><div class="stat-val" id="statDay">—</div><div class="stat-lbl">逐日盈利</div></div>
+      <div class="card stat clickable" id="statDayCard" title="点击查看逐日盈利明细（UTC 日）"><div class="stat-val" id="statDay">—</div><div class="stat-lbl">逐日盈利 ▾</div></div>
     </section>
 
     <!-- 当前窗口 -->
@@ -88,6 +88,30 @@
       <div class="empty" id="obsEmpty" hidden>暂无观测</div>
     </section>
   </main>
+
+  <!-- 逐日盈利弹窗（点击「逐日盈利」卡片打开；UTC 日切分，与回测 CSV date 同口径） -->
+  <div class="modal-mask" id="dailyMask" hidden>
+    <div class="modal" role="dialog" aria-label="逐日盈利">
+      <div class="modal-head">
+        <div class="modal-title">
+          <h2>逐日盈利</h2>
+          <div class="modal-sub">按 UTC 日切分 · 胜率/P&amp;L 仅计已结算信号</div>
+        </div>
+        <button class="modal-close" id="dailyClose" aria-label="关闭">✕</button>
+      </div>
+      <!-- 滚动区: 行多时内部纵向滚动, 表头吸顶 / 合计吸底 -->
+      <div class="modal-body">
+        <table id="dailyTable">
+          <thead><tr>
+            <th>日期 (UTC)</th><th>观测</th><th>信号</th><th>待结算</th><th>胜率</th><th>P&amp;L</th>
+          </tr></thead>
+          <tfoot></tfoot>
+          <tbody></tbody>
+        </table>
+        <div class="empty" id="dailyEmpty" hidden>暂无已结算数据</div>
+      </div>
+    </div>
+  </div>
 
   <footer class="foot" id="foot">—</footer>
   <script src="/static/app.js"></script>
