@@ -176,6 +176,15 @@ func (t *TwapAdapter) spawnRun(ctx context.Context) {
 		log.Printf("[Twap] ⚠️ 未配置重建能力（client=nil），跳过 monitor 启动")
 		return
 	}
+	// 重建时先取消上一会话：SDK 的 ctx cancel 会关闭旧 WS 连接并停止推流。
+	// 否则旧 monitor 的推送通道已无人消费（consume 已热替换到新通道），
+	// 旧连接持续推流会把旧通道堆满，SDK 侧随后逐条打印
+	// "fill channel full, dropping fill"（drop 速率 = 旧连接推送速率）。
+	// 注：mCancel 2026-09-02 引入重建看门狗时即存在但从未被调用（遗漏实现），
+	// 2026-09-06 修复；首次启动 t.lc 为 nil 无需取消。
+	if t.lc != nil {
+		t.lc.mCancel()
+	}
 	lc := &twapLifecycle{}
 	lc.mCtx, lc.mCancel = context.WithCancel(ctx)
 	lc.monitor = sdk.NewCryptoPriceMonitor(t.client, sdk.MonitorChainlinkTwap, t.symbols...)
