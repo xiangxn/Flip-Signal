@@ -71,6 +71,14 @@
           <tbody></tbody>
         </table>
       </div>
+      <!-- 分页条: 第 1 页为最新; 翻历史页时暂停该表自动轮询（避免正在看的行被顶走），回到第 1 页恢复 -->
+      <div class="pager" id="signalsPager" hidden>
+        <button class="pg" data-act="first" title="首页">«</button>
+        <button class="pg" data-act="prev" title="上一页">‹</button>
+        <span class="pg-info" id="signalsPgInfo"></span>
+        <button class="pg" data-act="next" title="下一页">›</button>
+        <button class="pg" data-act="last" title="末页">»</button>
+      </div>
       <div class="empty" id="signalsEmpty" hidden>暂无信号</div>
     </section>
 
@@ -84,6 +92,13 @@
           </tr></thead>
           <tbody></tbody>
         </table>
+      </div>
+      <div class="pager" id="obsPager" hidden>
+        <button class="pg" data-act="first" title="首页">«</button>
+        <button class="pg" data-act="prev" title="上一页">‹</button>
+        <span class="pg-info" id="obsPgInfo"></span>
+        <button class="pg" data-act="next" title="下一页">›</button>
+        <button class="pg" data-act="last" title="末页">»</button>
       </div>
       <div class="empty" id="obsEmpty" hidden>暂无观测</div>
     </section>

@@ -157,6 +157,23 @@ tbody tr:last-child td { border-bottom: none; }
 
 .empty { text-align: center; color: var(--muted); font-size: 13px; padding: 16px 0; }
 
+/* ── 分页条 ── */
+.pager {
+  display: flex; align-items: center; justify-content: center;
+  flex-wrap: wrap; gap: 6px; padding-top: 10px;
+}
+/* display:flex 会覆盖 [hidden] 的默认 display:none——必须显式补回（同 modal-mask） */
+.pager[hidden] { display: none; }
+.pg {
+  min-width: 32px; height: 28px; padding: 0 8px;
+  background: #21262d; color: var(--text);
+  border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; line-height: 1; cursor: pointer;
+}
+.pg:active { background: #30363d; }
+.pg:disabled { opacity: 0.35; cursor: default; }
+.pg-info { font-size: 12px; color: var(--muted); padding: 0 6px; }
+
 /* ── 底部 ── */
 .foot {
   position: fixed; bottom: 0; left: 0; right: 0;

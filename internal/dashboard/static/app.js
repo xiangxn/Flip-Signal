@@ -110,12 +110,22 @@
     $('foot').textContent = 'TS ' + s.ts + ' · 触底观测 ' + s.observation_count + ' 条';
   }
 
+  // ── 信号/观测列表（服务端分页）──
+  // 50 条/页，第 1 页 = 最新。自动轮询只刷第 1 页；翻历史页后暂停该表轮询
+  // （避免正在看的行被新数据顶走），回到第 1 页自动恢复。翻页时如遇数据被清
+  // （重启清零），fetchList 内兜底收敛页码重拉。
+  var PAGE_SIZE = 50;
+  var LISTS = {
+    signals: { url: '/api/signals', pagerId: 'signalsPager', infoId: 'signalsPgInfo', page: 1, pages: 1, total: 0, auto: true },
+    obs: { url: '/api/observations', pagerId: 'obsPager', infoId: 'obsPgInfo', page: 1, pages: 1, total: 0, auto: true }
+  };
+
   // 信号行: 时间 侧 rem fill m45 dist_s 份额 结果 P&L
-  function renderSignals(list) {
+  function renderSignals(resp) {
     var tb = document.querySelector('#signalsTable tbody');
     tb.innerHTML = '';
-    $('signalsEmpty').hidden = list.length > 0;
-    list.forEach(function (r) {
+    $('signalsEmpty').hidden = resp.items.length > 0;
+    resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
       var pnlCls = r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '');
       tr.innerHTML =
@@ -133,11 +143,11 @@
   }
 
   // 观测行: 时间 侧 rem fill m45 dist_s 判定
-  function renderObservations(list) {
+  function renderObservations(resp) {
     var tb = document.querySelector('#obsTable tbody');
     tb.innerHTML = '';
-    $('obsEmpty').hidden = list.length > 0;
-    list.forEach(function (r) {
+    $('obsEmpty').hidden = resp.items.length > 0;
+    resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
       var status;
       if (r.ok) status = '<span class="won">信号</span>';
@@ -152,6 +162,59 @@
         '<td>' + status + '</td>';
       tb.appendChild(tr);
     });
+  }
+
+  // 拉取指定列表当前页，刷新表格与分页条
+  function fetchList(name) {
+    var L = LISTS[name];
+    fetchJSON(L.url + '?page=' + L.page + '&limit=' + PAGE_SIZE, function (resp) {
+      var pages = resp.total > 0 ? Math.ceil(resp.total / PAGE_SIZE) : 1;
+      L.total = resp.total;
+      if (L.page > pages) { // 重启清零等兜底: 页码收敛到末页后重拉
+        L.page = pages;
+        fetchList(name);
+        return;
+      }
+      L.pages = pages;
+      if (name === 'signals') renderSignals(resp); else renderObservations(resp);
+      updatePager(name);
+    });
+  }
+
+  // 分页条: 页码/总数文案 + 首末页/上下页禁用态（total=0 时整条隐藏）
+  function updatePager(name) {
+    var L = LISTS[name];
+    var pager = $(L.pagerId);
+    pager.hidden = L.total === 0;
+    var paused = L.auto ? '' : ' · 暂停自动刷新';
+    $(L.infoId).textContent = '第 ' + L.page + '/' + L.pages + ' 页 · 共 ' + L.total + ' 条' + paused;
+    var btns = pager.querySelectorAll('button.pg');
+    for (var i = 0; i < btns.length; i++) {
+      var a = btns[i].getAttribute('data-act');
+      var atEnd = (a === 'first' || a === 'prev') ? L.page <= 1 : L.page >= L.pages;
+      btns[i].disabled = atEnd;
+    }
+  }
+
+  // 翻页; 目标非第 1 页时暂停该表自动轮询，回第 1 页恢复
+  function gotoPage(name, act) {
+    var L = LISTS[name];
+    var p = L.page;
+    if (act === 'first') p = 1;
+    else if (act === 'prev') p = Math.max(1, p - 1);
+    else if (act === 'next') p = Math.min(L.pages, p + 1);
+    else if (act === 'last') p = L.pages;
+    if (p === L.page) return;
+    L.page = p;
+    L.auto = p === 1;
+    fetchList(name);
+  }
+
+  function bindPager(name) {
+    var btns = $(LISTS[name].pagerId).querySelectorAll('button.pg');
+    for (var i = 0; i < btns.length; i++) {
+      btns[i].addEventListener('click', gotoPage.bind(null, name, btns[i].getAttribute('data-act')));
+    }
   }
 
   // 逐日盈利弹窗（/api/daily，UTC 日聚合）— 日行进 tbody，合计行放 tfoot 吸底
@@ -221,13 +284,16 @@
   function tick() {
     fetchJSON('/api/state', renderState);
   }
+  // 自动轮询只刷第 1 页（最新）; 用户翻历史页期间暂停对应表
   function tickLists() {
-    fetchJSON('/api/signals', renderSignals);
-    fetchJSON('/api/observations?limit=50', renderObservations);
+    if (LISTS.signals.auto) fetchList('signals');
+    if (LISTS.obs.auto) fetchList('obs');
   }
 
-  $('btnSignals').addEventListener('click', function () { fetchJSON('/api/signals', renderSignals); });
-  $('btnObs').addEventListener('click', function () { fetchJSON('/api/observations?limit=50', renderObservations); });
+  $('btnSignals').addEventListener('click', function () { fetchList('signals'); });
+  $('btnObs').addEventListener('click', function () { fetchList('obs'); });
+  bindPager('signals');
+  bindPager('obs');
 
   setInterval(tick, stateInterval);
   setInterval(tickLists, listInterval);

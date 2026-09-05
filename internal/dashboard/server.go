@@ -21,8 +21,8 @@ var static, _ = fs.Sub(staticFiles, "static")
 //	/                 单页前端（手机浏览器兼容）
 //	/static/*         静态资源
 //	/api/state        运行状态
-//	/api/observations 触底观测（成功+失败）
-//	/api/signals      信号列表
+//	/api/observations 触底观测（成功+失败，时间倒序分页 ?page=&limit=）
+//	/api/signals      信号列表（含 P//	/api/signals      信号列表L，时间倒序分页 ?page=&limit=）
 //	/api/daily        逐日盈利明细（UTC 日，弹窗表）
 //	/api/config       策略配置
 func (s *State) ListenAndServe(addr string) {

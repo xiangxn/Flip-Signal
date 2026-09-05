@@ -74,6 +74,15 @@ type recordResponse struct {
 	ResolvedAt   string  `json:"resolved_at,omitempty"`
 }
 
+// listResp 是 /api/observations 与 /api/signals 的分页响应
+// （items 为时间倒序的当前页切片; total/page/size 供前端分页条渲染）。
+type listResp struct {
+	Items []recordResponse `json:"items"`
+	Total int              `json:"total"`
+	Page  int              `json:"page"` // 1-based 当前页（越界时服务端钳制到末页）
+	Size  int              `json:"size"` // 本页条数（?limit=，≤1000）
+}
+
 // dailyRow 是 /api/daily 的一行（按 UTC 日切分，与回测 CSV date/记录文件同日口径；
 // 逐日明细弹窗用，列与 02_paper_compare.py 逐日输出对齐）。
 type dailyRow struct {
@@ -131,26 +140,14 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleObservations 返回触底观测列表（成功+失败，时间倒序，?limit= 分页）。
+// handleObservations 返回触底观测列表（成功+失败，时间倒序分页）。
 func (s *State) handleObservations(w http.ResponseWriter, r *http.Request) {
-	limit := queryLimit(r, 50)
-	records := s.recorder.Observations()
-	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
-	if len(records) > limit {
-		records = records[:limit]
-	}
-	writeJSON(w, mapRecords(records))
+	s.writePage(w, r, s.recorder.Observations(), 50)
 }
 
-// handleSignals 返回信号列表（ok=true，含 P&L，时间倒序，?limit= 分页）。
+// handleSignals 返回信号列表（ok=true，含 P&L，时间倒序分页）。
 func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
-	limit := queryLimit(r, 200)
-	records := s.recorder.Signals()
-	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
-	if len(records) > limit {
-		records = records[:limit]
-	}
-	writeJSON(w, mapRecords(records))
+	s.writePage(w, r, s.recorder.Signals(), 200)
 }
 
 // handleDaily 返回逐日盈利明细（UTC 日粒度，供前端弹窗表格）。
@@ -292,6 +289,49 @@ func mapRecords(records []*flip.Record) []recordResponse {
 		})
 	}
 	return out
+}
+
+// writePage 输出时间倒序的分页列表: 先按 ts 降序排，再切 ?page=&limit= 窗口。
+// page 越界时钳制到末页；total=0 时恒为第 1 页 + 空 items。
+func (s *State) writePage(w http.ResponseWriter, r *http.Request, records []*flip.Record, defSize int) {
+	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
+	total := len(records)
+	size := queryLimit(r, defSize)
+	lastPage := 1
+	if total > 0 {
+		lastPage = (total + size - 1) / size
+	}
+	page := queryPage(r)
+	if page > lastPage {
+		page = lastPage
+	}
+	start := (page - 1) * size
+	end := start + size
+	if end > total {
+		end = total
+	}
+	writeJSON(w, listResp{
+		Items: mapRecords(records[start:end]),
+		Total: total,
+		Page:  page,
+		Size:  size,
+	})
+}
+
+// queryPage 解析 ?page= 参数（1-based，默认 1，最小 1）。
+func queryPage(r *http.Request) int {
+	v := r.URL.Query().Get("page")
+	if v == "" {
+		return 1
+	}
+	var n int
+	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+		return 1
+	}
+	if n < 1 {
+		return 1
+	}
+	return n
 }
 
 // queryLimit 解析 ?limit= 参数（1..1000，默认 def）。
