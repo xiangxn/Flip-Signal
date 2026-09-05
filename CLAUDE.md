@@ -219,10 +219,12 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
    指数退避重试、断线后 runReadLoop 自愈。
 8. **σ 启动预热本地优先**（2026-09-06）：每完成窗口落盘一行
    `windows_YYYY-MM-DD.jsonl`（|close−anchor| + anchor/close 流值，独立于
-   touches——结算重写只动 touches 当日文件）；重启时本地 ≥histMin 窗且最新窗
-   距现在 ≤localFreshMax(15min) 即直接 seed（「马上重启」毫秒级恢复、零上游
-   API 压力、与 live push 同源口径），否则回退官方 FetchTwapRanges 网络预热
-   （停机期窗口本地没有，只有官方接口能取）。
+   touches——结算重写只动 touches 当日文件）；重启时取最近 ≤histWindows 窗并
+   **截到最新一段连续块**（相邻结束缺口 >2 窗判断档，防停机前旧 regime 条目
+   混入），连续块 ≥histMin 窗且最新窗距现在 ≤localFreshMax(15min) 才本地
+   seed（「马上重启」毫秒级恢复、零上游 API 压力、与 live push 同源口径），
+   否则回退官方 FetchTwapRanges 网络预热（停机期窗口本地没有，只有官方接口
+   能取）。截断决策为纯函数 `recentBlock`（cmd/flip，table 测试）。
 
 ---
 

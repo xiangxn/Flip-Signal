@@ -20,7 +20,7 @@ const (
 )
 
 // 窗口振幅日志（σ 重启本地预热的数据源）: 文件名 windows_YYYY-MM-DD.jsonl，
-// 每行一个 windowEntry（每完成一个窗口落一行，5 分钟粒度）。
+// 每行一个 WindowEntry（每完成一个窗口落一行，5 分钟粒度）。
 // 独立于 touches_*.jsonl——结算 rewriteDay 只重写 touches 当日文件，
 // 窗口行无回填需求（追加即终稿），混入同一文件会被结算重写丢掉。
 const windowPrefix = "windows_"
@@ -43,7 +43,7 @@ type Recorder struct {
 	file *os.File
 	buf  *bufio.Writer
 
-	wins    []windowEntry // 已完成窗口振幅（时间正序：载入序 + 追加序）
+	wins    []WindowEntry // 已完成窗口振幅（时间正序：载入序 + 追加序）
 	winDay  string        // 窗口日志当前打开文件的 UTC 日
 	winFile *os.File
 	winBuf  *bufio.Writer
@@ -56,10 +56,10 @@ type DayPnl struct {
 	N    int     `json:"n"` // 当日已结算信号数
 }
 
-// windowEntry 是一个已完成窗口的 σ 贡献行（amp = |close − anchor|）。
+// WindowEntry 是一个已完成窗口的 σ 贡献行（amp = |close − anchor|）。
 // anchor/close 为 TWAP-60 流值（live 口径，与观测行/touches 同源），
 // 重启时供 σ 本地预热（语义对齐回测 |close−open|，见 cmd/flip 预热段）。
-type windowEntry struct {
+type WindowEntry struct {
 	Ts          int64   `json:"ts"` // 窗口结束时刻（unix 毫秒）
 	Date        string  `json:"date"`
 	ConditionID string  `json:"condition_id"`
@@ -129,7 +129,7 @@ func (r *Recorder) loadWindowFileLocked(path string) (int, error) {
 		if len(line) == 0 {
 			continue
 		}
-		var e windowEntry
+		var e WindowEntry
 		if err := json.Unmarshal(line, &e); err != nil {
 			log.Printf("⚠️ [Recorder] %s: 窗口行解析失败跳过: %v", path, err)
 			continue
@@ -342,7 +342,7 @@ func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end
 	if err := r.openWinDayLocked(date); err != nil {
 		return err
 	}
-	e := windowEntry{
+	e := WindowEntry{
 		Ts:          end.UnixMilli(),
 		Date:        date,
 		ConditionID: condID,
@@ -432,14 +432,14 @@ func (r *Recorder) Signals() []*Record {
 
 // RecentWindows 返回最近 n 个已完成窗口振幅行（时间正序；不足则返回全部）。
 // cmd/flip 启动时据此做 σ 本地预热（见其 histState 预热段）。
-func (r *Recorder) RecentWindows(n int) []windowEntry {
+func (r *Recorder) RecentWindows(n int) []WindowEntry {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	start := 0
 	if len(r.wins) > n {
 		start = len(r.wins) - n
 	}
-	return append([]windowEntry(nil), r.wins[start:]...)
+	return append([]WindowEntry(nil), r.wins[start:]...)
 }
 
 // PendingSignals 返回未结算的 ok 信号（重启后据此重新注册结算轮询）。

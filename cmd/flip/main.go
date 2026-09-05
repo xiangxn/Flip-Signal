@@ -102,6 +102,19 @@ type histState struct {
 
 func newHistState() *histState { return &histState{} }
 
+// recentBlock 从窗口振幅日志行（时间正序）截出最新一段连续块: 相邻条目结束
+// 时刻缺口 ≤ gapMs 视为连续（正常 300s；σ 新鲜度守卫缺一窗恰为 600s），首个
+// >gapMs 的缺口之前属更早的波动率 regime（停机/长期断档），整段丢弃。
+// 调用方以块长与块内最新窗新鲜度决定是否本地 seed。
+func recentBlock(wins []flip.WindowEntry, gapMs int64) []flip.WindowEntry {
+	for i := len(wins) - 1; i >= 1; i-- {
+		if wins[i].Ts-wins[i-1].Ts > gapMs {
+			return wins[i:]
+		}
+	}
+	return wins
+}
+
 // seed 预热: 官方范围整表替换（热启动段在 ~19s 内完成，先于任何 live push）。
 func (h *histState) seed(vals []float64) {
 	if len(vals) == 0 {
@@ -341,24 +354,38 @@ func main() {
 		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
-	// σ 启动预热: 优先本地 windows_*.jsonl（recorder 每窗落盘的 |close−anchor|，
-	// 「马上重启」场景毫秒级恢复，且与 live push 同源同口径、零上游 API 压力）。
-	// 本地不足 histMin 窗或最新窗已陈旧（超过 localFreshMax，停机期窗口本地
-	// 没有）时，回退官方历史范围网络预热（≤18 窗逐窗间隔 1s ≈ 19s，接口可能
-	// 429 限流丢窗——crypto-price 上游限速，见 FetchTwapRanges 注释）
+	// σ 启动预热: 优先本地 windows_*.jsonl（recorder 每窗落盘的 |close−anchor|）——
+	// 「马上重启」场景毫秒级恢复，且与 live push 同源同口径、零上游 API 压力。
+	//
+	// 本地可用条件（2026-09-06 review 收紧，防陈旧条目混入）:
+	// 1) 最近 ≤histWindows 窗截到最新一段连续块——窗口结束时刻对齐 5min 边界，
+	//    相邻条目正常差 300s；σ 新鲜度守卫缺一窗恰差 600s（仍连续）；停机/断档
+	//    的缺口 ≥3 窗。断档前的条目属更早的波动率 regime（如停机数小时后再跑
+	//    几窗即崩溃重启），混入会把 σ 尺度拉偏——只 seed 连续块，其余丢弃;
+	// 2) 连续块 ≥ histMin 窗（不足时本地意义小，走网络拿停机期窗口更接近回测）;
+	// 3) 块内最新窗结束距今 ≤ localFreshMax（引擎最近在跑）。
+	// 任一不满足即回退官方历史范围网络预热（≤18 窗逐窗间隔 1s ≈ 19s, 接口可能
+	// 429 限流丢窗——crypto-price 上游限速, 见 FetchTwapRanges 注释）
 	hist := newHistState()
-	if wins := recorder.RecentWindows(histWindows); len(wins) >= histMin &&
-		time.Since(time.UnixMilli(wins[len(wins)-1].Ts)) <= localFreshMax {
-		amps := make([]float64, len(wins))
-		for i := range wins {
-			amps[i] = wins[i].Amp
+	seeded := 0
+	if wins := recorder.RecentWindows(histWindows); len(wins) > 0 {
+		if block := recentBlock(wins, int64(2*windowSec*1000)); len(block) >= histMin &&
+			time.Since(time.UnixMilli(block[len(block)-1].Ts)) <= localFreshMax {
+			amps := make([]float64, len(block))
+			for i := range block {
+				amps[i] = block[i].Amp
+			}
+			hist.seed(amps)
+			seeded = len(block)
+			log.Printf("[Cycle] σ 本地预热: %d 窗（%s ~ %s）",
+				len(block),
+				time.UnixMilli(block[0].Ts).UTC().Format("15:04:05"),
+				time.UnixMilli(block[len(block)-1].Ts).UTC().Format("15:04:05"))
 		}
-		hist.seed(amps)
-		log.Printf("[Cycle] σ 本地预热: %d 窗（最新窗口结束 %s）",
-			len(wins), time.UnixMilli(wins[len(wins)-1].Ts).UTC().Format("15:04:05"))
-	} else {
+	}
+	if seeded == 0 {
 		go func() {
-			log.Printf("[Cycle] σ 网络预热: 本地窗口不足/陈旧，拉取官方 TWAP 历史范围（≤%d 窗）...", histWindows)
+			log.Printf("[Cycle] σ 网络预热: 本地窗口不足/断档/陈旧，拉取官方 TWAP 历史范围（≤%d 窗）...", histWindows)
 			vals := feed.FetchTwapRanges(client, histWindows, windowSec, twapLookbackSeconds)
 			hist.seed(vals)
 			log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
