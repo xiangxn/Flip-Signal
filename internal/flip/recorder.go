@@ -19,7 +19,15 @@ const (
 	recordEventType = "touch"
 )
 
-// Recorder 追加写 JSONL 观测记录（按 UTC 日切分文件）。
+// 窗口振幅日志（σ 重启本地预热的数据源）: 文件名 windows_YYYY-MM-DD.jsonl，
+// 每行一个 windowEntry（每完成一个窗口落一行，5 分钟粒度）。
+// 独立于 touches_*.jsonl——结算 rewriteDay 只重写 touches 当日文件，
+// 窗口行无回填需求（追加即终稿），混入同一文件会被结算重写丢掉。
+const windowPrefix = "windows_"
+
+// Recorder 追加写 JSONL 观测记录（按 UTC 日切分文件），外加每完成窗口
+// 一行的窗口振幅日志 windows_*.jsonl（σ 重启本地预热的数据源，见
+// LogWindowAmplitude —— 独立文件、独立句柄，与 touches 互不干扰）。
 //
 // 观测行在触底 tick 产生后立即落盘（bufio 行级 flush，崩溃不丢；重启用
 // 文件恢复内存态）。ok 信号同时进 pending；结算回填（Resolve）用
@@ -34,6 +42,11 @@ type Recorder struct {
 	day  string // 当前打开文件的 UTC 日
 	file *os.File
 	buf  *bufio.Writer
+
+	wins    []windowEntry // 已完成窗口振幅（时间正序：载入序 + 追加序）
+	winDay  string        // 窗口日志当前打开文件的 UTC 日
+	winFile *os.File
+	winBuf  *bufio.Writer
 }
 
 // DayPnl 单日已结算 P&L（Dashboard 用）。
@@ -43,9 +56,24 @@ type DayPnl struct {
 	N    int     `json:"n"` // 当日已结算信号数
 }
 
+// windowEntry 是一个已完成窗口的 σ 贡献行（amp = |close − anchor|）。
+// anchor/close 为 TWAP-60 流值（live 口径，与观测行/touches 同源），
+// 重启时供 σ 本地预热（语义对齐回测 |close−open|，见 cmd/flip 预热段）。
+type windowEntry struct {
+	Ts          int64   `json:"ts"` // 窗口结束时刻（unix 毫秒）
+	Date        string  `json:"date"`
+	ConditionID string  `json:"condition_id"`
+	Slug        string  `json:"slug"`
+	EventStart  int64   `json:"event_start"`
+	Anchor      float64 `json:"anchor"` // 边界 TWAP-60 流值
+	Close       float64 `json:"close"`  // 窗口结束 TWAP-60 流值
+	Amp         float64 `json:"amp"`    // |close − anchor|（USD）
+}
+
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
 // loadPending 校验行 schema：event_type 非 "touch" 的行跳过并告警——
 // -output 指错目录时旧格式（v3 crosses_* 等）不会静默污染统计。
+// 窗口振幅日志（windows_*.jsonl）一并载入内存（σ 本地预热数据源）。
 func NewRecorder(dir string) (*Recorder, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("NewRecorder: 创建目录: %w", err)
@@ -69,7 +97,54 @@ func NewRecorder(dir string) (*Recorder, error) {
 	if skipped > 0 {
 		log.Printf("⚠️ [Recorder] 跳过 %d 行不匹配 schema（event_type != %q）", skipped, recordEventType)
 	}
+
+	wMatches, err := filepath.Glob(filepath.Join(dir, windowPrefix+"*.jsonl"))
+	if err != nil {
+		return nil, fmt.Errorf("NewRecorder: glob 窗口日志: %w", err)
+	}
+	sort.Strings(wMatches)
+	for _, f := range wMatches {
+		n, err := r.loadWindowFileLocked(f)
+		if err != nil {
+			return nil, err
+		}
+		log.Printf("[Recorder] 载入 %s（%d 窗）", filepath.Base(f), n)
+	}
 	return r, nil
+}
+
+// loadWindowFileLocked 读入一个窗口日志日文件（调用方已持锁）。返回行数。
+func (r *Recorder) loadWindowFileLocked(path string) (int, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, fmt.Errorf("Recorder: 打开 %s: %w", path, err)
+	}
+	defer f.Close()
+
+	rows := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e windowEntry
+		if err := json.Unmarshal(line, &e); err != nil {
+			log.Printf("⚠️ [Recorder] %s: 窗口行解析失败跳过: %v", path, err)
+			continue
+		}
+		if e.Ts <= 0 || e.Date == "" {
+			log.Printf("⚠️ [Recorder] %s: 跳过异常窗口行（ts=%d）", path, e.Ts)
+			continue
+		}
+		r.wins = append(r.wins, e)
+		rows++
+	}
+	if err := sc.Err(); err != nil {
+		return 0, fmt.Errorf("Recorder: 读 %s: %w", path, err)
+	}
+	return rows, nil
 }
 
 // loadFileLocked 读入一个日文件的行（调用方已持锁）。返回行数/跳过数。
@@ -254,10 +329,82 @@ func (r *Recorder) closeCurrentLocked() error {
 	return nil
 }
 
-// Close flush 并关闭当前文件。
+// ── 窗口振幅日志（σ 本地预热数据源）──
+
+// LogWindowAmplitude 落盘一个已完成窗口的 σ 贡献行（行级 flush，崩溃不丢）。
+// 仅当窗口数据有效时调用（与 cmd/flip histState.push 同分支）；落盘失败返回
+// 错误由调用方告警继续——σ 内存窗不受影响，只是下次重启本地预热缺此窗。
+func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end time.Time, anchor, close_, amp float64) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	date := utcDate(end.UnixMilli())
+	if err := r.openWinDayLocked(date); err != nil {
+		return err
+	}
+	e := windowEntry{
+		Ts:          end.UnixMilli(),
+		Date:        date,
+		ConditionID: condID,
+		Slug:        slug,
+		EventStart:  eventStart,
+		Anchor:      anchor,
+		Close:       close_,
+		Amp:         amp,
+	}
+	r.wins = append(r.wins, e)
+	line, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("Recorder: marshal 窗口行: %w", err)
+	}
+	if _, err := r.winBuf.Write(line); err != nil {
+		return err
+	}
+	if err := r.winBuf.WriteByte('\n'); err != nil {
+		return err
+	}
+	return r.winBuf.Flush()
+}
+
+// openWinDayLocked 打开（必要时轮转）指定 UTC 日的窗口日志文件（调用方已持锁）。
+func (r *Recorder) openWinDayLocked(date string) error {
+	if r.winDay == date && r.winFile != nil {
+		return nil
+	}
+	if err := r.closeWinDayLocked(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(windowFilePath(r.dir, date), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("Recorder: 打开窗口日志 %s: %w", date, err)
+	}
+	r.winDay, r.winFile, r.winBuf = date, f, bufio.NewWriter(f)
+	return nil
+}
+
+// closeWinDayLocked flush 并关闭窗口日志文件（调用方已持锁）。
+func (r *Recorder) closeWinDayLocked() error {
+	if r.winFile == nil {
+		return nil
+	}
+	if err := r.winBuf.Flush(); err != nil {
+		r.winFile.Close()
+		return err
+	}
+	if err := r.winFile.Close(); err != nil {
+		return err
+	}
+	r.winDay, r.winFile, r.winBuf = "", nil, nil
+	return nil
+}
+
+// Close flush 并关闭当前文件（观测 + 窗口日志）。
 func (r *Recorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.closeWinDayLocked(); err != nil {
+		return err
+	}
 	return r.closeCurrentLocked()
 }
 
@@ -281,6 +428,18 @@ func (r *Recorder) Signals() []*Record {
 		}
 	}
 	return out
+}
+
+// RecentWindows 返回最近 n 个已完成窗口振幅行（时间正序；不足则返回全部）。
+// cmd/flip 启动时据此做 σ 本地预热（见其 histState 预热段）。
+func (r *Recorder) RecentWindows(n int) []windowEntry {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	start := 0
+	if len(r.wins) > n {
+		start = len(r.wins) - n
+	}
+	return append([]windowEntry(nil), r.wins[start:]...)
 }
 
 // PendingSignals 返回未结算的 ok 信号（重启后据此重新注册结算轮询）。
@@ -374,4 +533,9 @@ func utcDate(tsMs int64) string {
 // recordFilePath 生成日文件名（集中一处，rotate/rewrite/load 共用）。
 func recordFilePath(dir, date string) string {
 	return filepath.Join(dir, recordPrefix+date+".jsonl")
+}
+
+// windowFilePath 生成窗口日志日文件名（集中一处，rotate/load 共用）。
+func windowFilePath(dir, date string) string {
+	return filepath.Join(dir, windowPrefix+date+".jsonl")
 }

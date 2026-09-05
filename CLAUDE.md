@@ -68,7 +68,7 @@ FlipSignal/
 │   │   ├── types.go                  # Config + Tick/Observation/Record + 状态枚举
 │   │   ├── engine.go                 # 状态机: Watching → Done（触底观测/四腿判定）
 │   │   ├── exec.go                   # Executor 接口 + PaperExecutor（live 留接口）
-│   │   ├── recorder.go               # JSONL 记录（按日切分）+ P&L 结算回填
+│   │   ├── recorder.go               # JSONL 观测记录 + windows_* 窗口振幅日志（按日切分）+ P&L 回填
 │   │   └── engine_test.go / recorder_test.go
 │   ├── dashboard/
 │   │   ├── server.go                 # HTTP server（go:embed static/）
@@ -114,7 +114,7 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
              Executor (PaperExecutor 模拟成交)
                          │
                          ▼
-             Recorder (touches_*.jsonl 按日切分 + P&L)
+             Recorder (touches_* 观测 + windows_* 窗口振幅, 按日切分 + P&L)
                          │
                          ▼
              ResolutionPoller (gamma 结算轮询)
@@ -128,7 +128,9 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
 3. 每秒 1s tick：读 UP/DOWN 盘口 + Binance spot + TWAP → ProcessTick(状态机)
 4. 首个触底 tick（ask≤0.20）→ 四腿判定 → 观测落盘（ok 与失败都记，即时落盘）
 5. ok 信号 → PaperExecutor 执行 → Register 结算轮询（窗口内完成，无窗末补判）
-6. 窗口结束（rem=0）→ |close−anchor| 追加进 σ 滚动窗 → 下一窗口
+6. 窗口结束（rem=0）→ |close−anchor| 追加进 σ 滚动窗并落盘 windows_*.jsonl
+   （重启 σ 预热本地优先：windows_* 新鲜即毫秒级恢复，不足/过旧回退官方网络
+   预热 FetchTwapRanges——停机期窗口只有官方能取）→ 下一窗口
 ```
 
 ### 引擎状态机
@@ -215,6 +217,12 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
 7. **单 WS 订阅复用**：MarketMonitor 重启恢复模式沿用；TwapAdapter 内建新鲜度
    看门狗（推送停更超 2min 自动重建订阅）；BinanceAdapter 首拨失败由 main 侧
    指数退避重试、断线后 runReadLoop 自愈。
+8. **σ 启动预热本地优先**（2026-09-06）：每完成窗口落盘一行
+   `windows_YYYY-MM-DD.jsonl`（|close−anchor| + anchor/close 流值，独立于
+   touches——结算重写只动 touches 当日文件）；重启时本地 ≥histMin 窗且最新窗
+   距现在 ≤localFreshMax(15min) 即直接 seed（「马上重启」毫秒级恢复、零上游
+   API 压力、与 live push 同源口径），否则回退官方 FetchTwapRanges 网络预热
+   （停机期窗口本地没有，只有官方接口能取）。
 
 ---
 

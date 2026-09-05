@@ -75,6 +75,12 @@ const histWindows = 18
 // histMin 是 σ 可用所需最少窗口数: 不足则 no_hist（冷启动期）。
 const histMin = 3
 
+// localFreshMax 是 σ 本地预热的新鲜度上限: 最新已落盘窗口结束距今 ≤ 该值才可信
+// （= 引擎最近在跑，「马上重启」场景本地覆盖完整）；停机更久则本地缺停机期的
+// 窗口，回退官方网络预热（FetchTwapRanges 能取停机期间的窗口）。
+// 容差取 histMin 窗时长（σ 冷启动门槛本身）。
+const localFreshMax = time.Duration(histMin*windowSec) * time.Second
+
 // marketCache 缓存下一窗口的市场信息（稳态预取: 本窗 tick 尾部预取，loop 顶部复用）。
 type marketCache struct {
 	slug string
@@ -85,9 +91,10 @@ type marketCache struct {
 // |tw_close − tw_open| 的均值，换算成 bps = mean/anchor·1e4（与回测口径一致，
 // dist = Δ价/anchor·1e4/hist_bps）。
 //
-// 启动时用官方历史范围预热（feed.FetchTwapRanges，消除冷启动 no_hist 期）；
-// live 每窗口结束追加本窗 |close − anchor|。push 严格发生在窗口结束后——
-// σ 永远只用已结束窗口，不混入当前窗。
+// 启动预热: 优先本地 windows_*.jsonl（recorder 落盘的引擎自身窗口振幅，见
+// main 预热段），不足/陈旧时回退官方历史范围（feed.FetchTwapRanges）——
+// 消除冷启动 no_hist 期。live 每窗口结束追加本窗 |close − anchor|（并同步
+// 落盘一行）。push 严格发生在窗口结束后——σ 永远只用已结束窗口，不混入当前窗。
 type histState struct {
 	mu   sync.Mutex
 	vals []float64 // 振幅（$），时间正序
@@ -334,16 +341,29 @@ func main() {
 		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
-	// σ 冷启动预热: 官方历史 |close−open| 范围回填（≤18 窗，逐窗间隔 1s ≈ 19s，
-	// crypto-price 接口限速低）。预热完成后首窗即有 σ；全部缺失则回退冷启动
-	// （前 3 个完成窗口前 no_hist，与回测口径一致）
+	// σ 启动预热: 优先本地 windows_*.jsonl（recorder 每窗落盘的 |close−anchor|，
+	// 「马上重启」场景毫秒级恢复，且与 live push 同源同口径、零上游 API 压力）。
+	// 本地不足 histMin 窗或最新窗已陈旧（超过 localFreshMax，停机期窗口本地
+	// 没有）时，回退官方历史范围网络预热（≤18 窗逐窗间隔 1s ≈ 19s，接口可能
+	// 429 限流丢窗——crypto-price 上游限速，见 FetchTwapRanges 注释）
 	hist := newHistState()
-	go func() {
-		log.Printf("[Cycle] σ 预热: 拉取官方 TWAP 历史范围（≤%d 窗）...", histWindows)
-		vals := feed.FetchTwapRanges(client, histWindows, windowSec, twapLookbackSeconds)
-		hist.seed(vals)
-		log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
-	}()
+	if wins := recorder.RecentWindows(histWindows); len(wins) >= histMin &&
+		time.Since(time.UnixMilli(wins[len(wins)-1].Ts)) <= localFreshMax {
+		amps := make([]float64, len(wins))
+		for i := range wins {
+			amps[i] = wins[i].Amp
+		}
+		hist.seed(amps)
+		log.Printf("[Cycle] σ 本地预热: %d 窗（最新窗口结束 %s）",
+			len(wins), time.UnixMilli(wins[len(wins)-1].Ts).UTC().Format("15:04:05"))
+	} else {
+		go func() {
+			log.Printf("[Cycle] σ 网络预热: 本地窗口不足/陈旧，拉取官方 TWAP 历史范围（≤%d 窗）...", histWindows)
+			vals := feed.FetchTwapRanges(client, histWindows, windowSec, twapLookbackSeconds)
+			hist.seed(vals)
+			log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
+		}()
+	}
 
 	log.Println("========================================")
 	log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", *mode)
@@ -546,9 +566,16 @@ func main() {
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s TWAP 陈旧（龄 %dms），本窗不计入 σ",
 				conditionID, lastTick.TwapAgeMs)
 		default:
-			hist.push(math.Abs(lastTick.TwapPrice - anchor))
+			amp := math.Abs(lastTick.TwapPrice - anchor)
+			hist.push(amp)
+			// 落盘一行供下次重启 σ 本地预热（与 push 同分支同条件;
+			// 失败只告警——σ 内存窗不受影响，仅预热缺此窗）
+			if err := recorder.LogWindowAmplitude(conditionID, slug, nextStart.Unix(),
+				time.Now(), anchor, lastTick.TwapPrice, amp); err != nil {
+				log.Printf("[Cycle] ⚠️ 窗口振幅落盘失败: %v（重启本地预热将缺此窗）", err)
+			}
 			log.Printf("[Cycle] 窗口结束 %s: |close−anchor|=%.2f, σ 现 %d 窗",
-				conditionID, math.Abs(lastTick.TwapPrice-anchor), hist.count())
+				conditionID, amp, hist.count())
 		}
 	}
 }

@@ -244,3 +244,90 @@ func TestFileNaming(t *testing.T) {
 		t.Fatalf("文件名 = %s", got)
 	}
 }
+
+// 窗口振幅日志（σ 本地预热数据源）: 跨日切分写盘 + 重启后载入恢复。
+func TestWindowLogRoundtrip(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+
+	// 4 窗, 时间正序; 前两窗收在 09-02, 后两窗收在 09-03（验证跨日文件切分）
+	ends := []time.Time{
+		time.Date(2026, 9, 2, 23, 57, 0, 0, time.UTC),
+		time.Date(2026, 9, 2, 23, 59, 0, 0, time.UTC),
+		time.Date(2026, 9, 3, 0, 2, 0, 0, time.UTC),
+		time.Date(2026, 9, 3, 0, 4, 0, 0, time.UTC),
+	}
+	for i, end := range ends {
+		anchor := 100.0
+		close_ := 100.0 + float64(i+1)
+		err := r.LogWindowAmplitude("0x"+string(rune('a'+i)), "btc-updown-5m", end.Unix()-300,
+			end, anchor, close_, close_-anchor)
+		if err != nil {
+			t.Fatalf("LogWindowAmplitude[%d]: %v", i, err)
+		}
+	}
+
+	// 文件切分: 09-02 两行 / 09-03 两行（touches 文件不受影响）
+	for date, want := range map[string]int{"2026-09-02": 2, "2026-09-03": 2} {
+		n := countLines(t, windowFilePath(dir, date))
+		if n != want {
+			t.Fatalf("%s 窗口行数 = %d, 期望 %d", date, n, want)
+		}
+	}
+	if n := countLines(t, recordFilePath(dir, "2026-09-02")); n != 0 {
+		t.Fatalf("touches 文件不应被窗口日志写入, 行数 = %d", n)
+	}
+
+	wins := r.RecentWindows(18)
+	if len(wins) != 4 {
+		t.Fatalf("RecentWindows(18) = %d, 期望 4", len(wins))
+	}
+	for i, w := range wins {
+		if w.Amp != float64(i+1) || w.Date != utcDate(w.Ts) {
+			t.Fatalf("wins[%d].Amp = %v / date=%s, 期望 %v", i, w.Amp, w.Date, float64(i+1))
+		}
+	}
+
+	// 模拟重启: Close 后重新 NewRecorder, 窗口应从磁盘恢复
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatalf("重启 NewRecorder: %v", err)
+	}
+	defer r2.Close()
+	wins2 := r2.RecentWindows(18)
+	if len(wins2) != 4 {
+		t.Fatalf("重启后 RecentWindows = %d, 期望 4", len(wins2))
+	}
+	last := r2.RecentWindows(2)
+	if len(last) != 2 || last[0].Amp != 3 || last[1].Amp != 4 {
+		t.Fatalf("重启后最近 2 窗 = %+v, 期望 amp [3 4]", last)
+	}
+}
+
+// countLines 数一个文件的行数（不存在返回 0）。
+func countLines(t *testing.T, path string) int {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0
+		}
+		t.Fatalf("读 %s: %v", path, err)
+	}
+	if len(b) == 0 {
+		return 0
+	}
+	n := 0
+	for _, c := range b {
+		if c == '\n' {
+			n++
+		}
+	}
+	return n
+}
