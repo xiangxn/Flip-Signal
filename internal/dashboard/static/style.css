@@ -82,6 +82,19 @@ main {
 .stat-val.pos { color: var(--pos); }
 .stat-val.neg { color: var(--neg); }
 
+/* 实盘执行摘要条（mode=live 显示；paper 隐藏） */
+.livebar {
+  font-size: 13px;
+  padding: 8px 12px;
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+.livebar.pos { border-color: var(--pos); color: var(--pos); }
+.livebar.neg { border-color: var(--neg); color: var(--neg); }
+
 /* ── 当前窗口 ── */
 .win-head { display: flex; justify-content: space-between; align-items: center; }
 .engine-state { font-size: 13px; padding: 2px 10px; border-radius: 10px; background: #21262d; }

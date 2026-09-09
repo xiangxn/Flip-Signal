@@ -59,7 +59,7 @@ func TestTrigger(t *testing.T) {
 		latency   int64 // 触发 tick 盘口延迟（>300 = 无效）
 		upBid     float64
 		upAsk     float64
-		downBid0  bool   // 覆写 DownBid=0（整簿门控用例）
+		downBid0  bool // 覆写 DownBid=0（整簿门控用例）
 		downAsk   float64
 		spot      float64 // 覆写 BinPrice（0 = 保持 stdTick 默认 spot=anchor；交叉态选边用）
 		wantSide  string

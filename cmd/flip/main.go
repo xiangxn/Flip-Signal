@@ -3,15 +3,20 @@
 // 连接 Polymarket CLOB WebSocket（UP/DOWN 订单簿）、Chainlink TWAP-60（锚/σ）与
 // Binance BTCUSDT spot（浅洞腿），每秒驱动 flip.Engine 状态机检测「触底观测」——
 // 某侧 ask 首次砸到 ≤0.20 的下狗机会：急跌(m_45) × 浅洞(dist_s) × 时间(rem) 三腿
-// 全过即 ok 信号，纸面模拟成交（PaperExecutor），官方结算后回填完整 P&L 到 JSONL
-// （touches_YYYY-MM-DD.jsonl，按日切分）。成功与失败的观测都落盘（频率校准用）。
+// 全过即 ok 信号。成交按 -mode 分流（默认 paper 模拟全额成交; live = 真实 CLOB
+// FAK 限价单 @ 触发 ask, 两阶段落盘 + 风控闸, 见 handleObservation），官方结算后
+// 回填完整 P&L 到 JSONL（touches_YYYY-MM-DD.jsonl，按日切分）。成功与失败的观测
+// 都落盘（频率校准用）。
 //
-// 结算轮询只注册 ok 信号；崩溃后重启按磁盘 pending 恢复注册。
+// 结算轮询只注册实际成交信号（paper 恒成交; live 仅 filled/partial）；
+// 崩溃后重启按磁盘 pending 恢复注册, submitting/未知结果行打 ⚠️ 人工核对。
 //
 // 用法：
 //
 //	go run ./cmd/flip -output data/v4 -dashboard :8090
 //	go run ./cmd/flip --trigger-ask-max 0.2 --crash-min-ask 0.4 --stake 2
+//	# live 需 CLOB 凭证 env（见文末 defaultSDKConfig）+ 独立输出目录
+//	go run ./cmd/flip -mode live -output data/v4live --max-daily-loss -20
 package main
 
 import (
@@ -24,11 +29,14 @@ import (
 	"math"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/tidwall/gjson"
+	"github.com/xiangxn/go-polymarket-sdk/model"
+	"github.com/xiangxn/go-polymarket-sdk/orders"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/dashboard"
@@ -61,10 +69,11 @@ const twapMaxStale = 2 * time.Minute
 
 // twapCloseFreshMs 是 TWAP 采样的新鲜度上限（毫秒）: 超过判为断流陈旧。
 // 窗口起/止两处采样共用同一阈值（2026-09-09 review 起 anchor 也受守卫）:
-//  1) 窗口结束 σ push: 陈旧 close 会把假振幅污染进其后 18 窗的 σ 尺度，
+//  1. 窗口结束 σ push: 陈旧 close 会把假振幅污染进其后 18 窗的 σ 尺度，
 //     进而扭曲浅洞带判定（缺一窗可接受——本阈值原始依据，见下方注释）;
-//  2) 窗口起点 anchor（main 步骤 5 守卫）: 陈旧 anchor 会让整窗 dist_s 相对
+//  2. 窗口起点 anchor（main 步骤 5 守卫）: 陈旧 anchor 会让整窗 dist_s 相对
 //     错锚失真——超龄按锚缺失整窗跳过（镜像回测 :69 语义）。
+//
 // 2min 看门狗重建线太粗，够不到数秒~分钟的推送缺口（data/v4 实测曾现 55s 缺口）；
 // 正常推送龄 p99≈1.7s（119 行记录），10s 余量充足。
 const twapCloseFreshMs = 10_000
@@ -181,7 +190,7 @@ func main() {
 	outputDir := flag.String("output", "data/v4", "观测 JSONL 输出目录（按日切分）")
 	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（如 :8090）")
 	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug 前缀")
-	mode := flag.String("mode", "paper", "成交模式: paper|live（live 未实现）")
+	mode := flag.String("mode", "paper", "成交模式: paper|live（live 需 CLOB 凭证 env, 缺则降级 paper）")
 	triggerAskMax := flag.Float64("trigger-ask-max", 0.20, "触发阈值: 某侧 ask ≤ 此值 即触底观测")
 	crashMinAsk := flag.Float64("crash-min-ask", 0.40, "急跌腿: m_45 窗内同侧 ask 曾 ≥ 此值")
 	crashWindow := flag.Int("crash-window", 45, "急跌窗: 触发前 N 个 tick 槽位内求 max")
@@ -190,6 +199,7 @@ func main() {
 	distHi := flag.Float64("dist-hi", 0.0, "浅洞带上界: dist_s 必须 < 此值（开区间）")
 	remMin := flag.Int("rem-min", 180, "时间腿: 仅 rem > 此值的触发有效")
 	stake := flag.Float64("stake", 2, "每信号投入 USDC")
+	maxDailyLoss := flag.Float64("max-daily-loss", -20, "live 日亏熔断线: 当日已结算 P&L ≤ 此值 停单（无状态现算, paper 无效）")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -206,7 +216,10 @@ func main() {
 		RemMin:        *remMin,
 		Stake:         *stake,
 	}
-	executor := flip.NewExecutor(*mode)
+	// 成交执行器: 本执行器只服务 paper/降级路径（NewExecutor 恒纸面, 模拟全额
+	// 成交）; live 真实下单由 handleObservation 直调 trading.LiveTrader（两阶段
+	// 落盘 + 风控闸编排在 main 侧, 见下方分流段）。
+	executor := flip.NewExecutor("paper")
 
 	// ── Polymarket 客户端（未配置私钥则自动生成临时密钥，只读运行）──
 	cfgSDK := defaultSDKConfig()
@@ -222,6 +235,39 @@ func main() {
 	client := sdk.NewClient(&cfgSDK)
 	if readOnly {
 		log.Println("[Dog] ⚠️  未配置 POLYMARKET_OWNER_KEY —— 只读运行（纸面交易）")
+	}
+
+	// ── live 分流（-mode live 且凭证齐 → 真实 CLOB 下单; 缺任一即 ⚠️ 降级纸面）──
+	// live 依赖三段凭证（defaultSDKConfig 已读 env, 见文末）:
+	//   1) POLYMARKET_OWNER_KEY: 订单签名 EOA;
+	//   2) POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE: CLOB L2 headers;
+	//   3) POLYMARKET_FUNDER_ADDRESS: Safe 签名(POLY_GNOSIS_SAFE=2)下的 maker
+	//      地址——非可选: 缺失则 maker=裸 EOA, 以余额/授权不符被 CLOB 拒单。
+	effMode := "paper"
+	var liveTrader *trading.LiveTrader
+	if *mode == "live" {
+		creds := cfgSDK.Polymarket.CLOBCreds
+		var missing []string
+		if readOnly {
+			missing = append(missing, "POLYMARKET_OWNER_KEY")
+		}
+		if creds == nil || creds.Key == "" || creds.Secret == "" || creds.Passphrase == "" {
+			missing = append(missing, "POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE")
+		}
+		if cfgSDK.Polymarket.FunderAddress == "" {
+			missing = append(missing, "POLYMARKET_FUNDER_ADDRESS")
+		}
+		if len(missing) > 0 {
+			log.Printf("[Trading] ⚠️ -mode live 但凭证缺失（%s）—— 降级纸面执行", strings.Join(missing, ", "))
+		} else {
+			effMode = "live"
+			addr := cfgSDK.Polymarket.FunderAddress
+			if len(addr) > 12 {
+				addr = addr[:6] + "…" + addr[len(addr)-4:]
+			}
+			liveTrader = trading.NewLiveTrader(&trading.SdkClient{Client: client})
+			log.Printf("[Trading] 🔒 live 就绪: maker=%s（FAK 限价单 @ 触发 ask, 绝不超价; 首窗禁单）", addr)
+		}
 	}
 
 	// ── PM 订单簿订阅（SDK MarketMonitor）──
@@ -340,15 +386,39 @@ func main() {
 	}
 	go resolutionPoller.Run(ctx)
 
+	// ── live 启动告警（载入期逐条 ⚠️ 已打, 这里给总量与目录提示）──
+	if liveTrader != nil {
+		if n := recorder.NeedsReconcile(); n > 0 {
+			log.Printf("[Trading] ⚠️ %d 条执行中断记录待人工核对（submitting/未知结果, 见上方逐条告警）—— 勿自动补单, 按 maker+时间窗去 data-api 核对", n)
+		}
+		// 混合目录提示: 当日已有 paper 行（ExecStatus 空）混入会污染信号频率口径与
+		// 日亏现算线——live 建议独立 -output 目录（如 data/v4live）。同日 live 行
+		// （崩溃重启续跑）不算混合。
+		today := time.Now().UTC().Format("2006-01-02")
+		mixed := false
+		for _, rec := range recorder.Observations() {
+			if rec.Date == today && rec.ExecStatus == "" {
+				mixed = true
+				break
+			}
+		}
+		if mixed {
+			log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（touches_%s.jsonl）—— live 建议独立 -output 目录（如 data/v4live）, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
+		}
+	}
+
 	// ── 运行时状态（Dashboard 数据源）──
 	runtime := &runtimeState{
-		Executor:    executor,
-		Recorder:    recorder,
-		TwapAdapter: twapAdapter,
-		Binance:     binance,
-		Stake:       cfg.Stake,
-		Mode:        *mode,
-		StartedAt:   time.Now(),
+		Executor:     executor,
+		Recorder:     recorder,
+		TwapAdapter:  twapAdapter,
+		Binance:      binance,
+		Stake:        cfg.Stake,
+		Mode:         effMode,
+		StartedAt:    time.Now(),
+		Live:         liveTrader,
+		MaxDailyLoss: *maxDailyLoss,
+		FirstWindow:  liveTrader != nil, // live 首窗禁单（重启防双单缝隙）
 	}
 	runtime.books = func() (*sdk.OrderBook, *sdk.OrderBook) {
 		bookMu.RLock()
@@ -363,7 +433,7 @@ func main() {
 
 	// ── Dashboard（手机浏览器兼容的单页前端）──
 	if *dashboardAddr != "" {
-		dashState := dashboard.NewState(recorder, runtime, cfg, *mode)
+		dashState := dashboard.NewState(recorder, runtime, cfg, effMode)
 		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
@@ -406,7 +476,11 @@ func main() {
 	}
 
 	log.Println("========================================")
-	log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", *mode)
+	if liveTrader != nil {
+		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（FAK 限价单 @ 触发 ask, 日亏熔断 ≤%.1fU）", *maxDailyLoss)
+	} else {
+		log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", effMode)
+	}
 	log.Printf(" 输出: %s  |  Slug: %s", *outputDir, *slugPrefix)
 	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞 yes(%.2f,%.2f)/no(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
 		cfg.TriggerAskMax, cfg.CrashWindow, cfg.CrashMinAsk,
@@ -531,6 +605,12 @@ func main() {
 			}
 			continue
 		}
+		// live 每窗预热 tick size/negRisk/feeRate: SDK CreateOrder 恒走
+		// ResolveTickSize + GetNegRisk 网调——不预热则信号路径多 1-2 次串行网调;
+		// 用本窗 gamma 数据预热, 与下单同源、信号路径零额外网调（见 prefetch.go）。
+		if liveTrader != nil {
+			trading.PrefetchTokenInfo(client, marketData, []string{upTokenID, downTokenID})
+		}
 		log.Printf("[Cycle] conditionId=%s UP=%s DOWN=%s", conditionID, upTokenID, downTokenID)
 
 		// 步骤 4: 订阅切换（先退订旧 token，保留副本供 monitor 重启恢复）
@@ -589,8 +669,10 @@ func main() {
 				lastTick = sampleTick(tickTime, rem, runtime)
 
 				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
+				// 结算只注册实际成交（paper 行 ExecStatus 空恒成交; live 仅
+				// filled/partial; unfilled/rejected/风控停单不注册——无持仓无结算）
 				if o := engine.ProcessTick(lastTick); o != nil {
-					if rec := handleObservation(o, runtime, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK {
+					if rec := handleObservation(o, runtime, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK && rec.IsFilled() {
 						resolutionPoller.Register(conditionID, slug)
 					}
 				}
@@ -643,6 +725,14 @@ func main() {
 			log.Printf("[Cycle] 窗口结束 %s: |close−anchor|=%.2f, σ 现 %d 窗",
 				conditionID, amp, hist.count())
 		}
+
+		// live 首窗禁单解除: 首个完整跑完的窗口结束后置 false。窗口被跳过
+		// （continue）则顺延——保守多禁一窗, 防重启残留窗双单的缝隙优先于
+		// 交易频率; 解除后 handleObservation 的 FirstWindow 闸恒放行。
+		if runtime.FirstWindow {
+			runtime.FirstWindow = false
+			log.Println("[Trading] 重启后首窗结束, 禁单解除")
+		}
 	}
 }
 
@@ -652,17 +742,22 @@ func main() {
 type runtimeState struct {
 	mu sync.RWMutex
 
-	Engine      *flip.Engine
-	Executor    flip.Executor
-	Recorder    *flip.Recorder
-	TwapAdapter *feed.TwapAdapter
-	Binance     *feed.BinanceAdapter
-	ConditionID string
-	Slug        string
-	EventStart  int64
-	Stake       float64   // 每信号投入（构造后不变）
-	Mode        string    // 成交模式: paper/live（构造后不变）
-	StartedAt   time.Time // 进程启动时刻（构造后不变）
+	Engine       *flip.Engine
+	Executor     flip.Executor
+	Recorder     *flip.Recorder
+	TwapAdapter  *feed.TwapAdapter
+	Binance      *feed.BinanceAdapter
+	ConditionID  string
+	Slug         string
+	EventStart   int64
+	Stake        float64             // 每信号投入（构造后不变）
+	Mode         string              // 成交模式: paper/live（构造后不变, live 缺凭证降级为 paper）
+	StartedAt    time.Time           // 进程启动时刻（构造后不变）
+	Live         *trading.LiveTrader // live 执行器; nil = paper/降级（构造后不变）
+	MaxDailyLoss float64             // live 日亏熔断线（构造后不变; paper 下无意义）
+	// FirstWindow 重启后首窗禁单: 主循环在首个完整跑完的窗口结束后置 false。
+	// 只被主循环写、handleObservation 读（同一 goroutine）, Dashboard 快照不读。
+	FirstWindow bool
 	books       func() (*sdk.OrderBook, *sdk.OrderBook)
 	tokens      func() (string, string)
 }
@@ -707,9 +802,35 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 		TwapAgeMs:   twAge,
 		SpotPrice:   spotPrice,
 		SpotAgeMs:   spotAgeMs,
+		Live:        rt.liveExec(),
 	}
 	rt.mu.RUnlock()
 	return snap
+}
+
+// liveExec 构造 live 执行摘要（paper/降级恒 nil）。今日口径 = UTC 日——
+// 与 handleObservation 日亏熔断闸同源（今日已结算 P&L 现算 + 同一熔断线）;
+// 待核对行用重启扫描同语义的全量计数（submitting/未知结果, 跨日残留仍计）。
+// 由 Snapshot（Dashboard goroutine）调用, 只读字段 + recorder 内部锁, 无竞态。
+func (rt *runtimeState) liveExec() *dashboard.LiveExec {
+	if rt.Live == nil {
+		return nil
+	}
+	ex := &dashboard.LiveExec{MaxDailyLoss: rt.MaxDailyLoss, Reconciling: rt.Recorder.NeedsReconcile()}
+	today := time.Now().UTC().Format("2006-01-02")
+	for _, rec := range rt.Recorder.Observations() {
+		switch rec.ExecStatus {
+		case flip.ExecStatusFilled, flip.ExecStatusPartial:
+			if rec.Date == today {
+				ex.TodayFilled++
+			}
+		}
+		if rec.Date == today && rec.OK && rec.Won != nil {
+			ex.TodayPnl += rec.PnL
+		}
+	}
+	ex.BreakerOpen = ex.TodayPnl > ex.MaxDailyLoss
+	return ex
 }
 
 // setWindow 在窗口起点换装引擎与元字段（主循环持有）。
@@ -752,28 +873,102 @@ func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 	}
 }
 
-// handleObservation 处理引擎产出的触底观测（成功与失败都落盘，频率校准用）:
-// ok 信号先纸面执行（PaperExecutor 校验 fill>0），随后 RecordObservation 立即
-// 落盘（行级 flush，崩溃不丢）。返回落盘记录（落盘失败返回 nil）——ok 信号的
-// 结算轮询注册由调用方按 rec.OK 决定。
+// handleObservation 处理引擎产出的触底观测（成功与失败都落盘，频率校准用）。
+//
+// ok 信号按模式分流（判定后立即落盘，行级 flush，崩溃不丢）:
+//   - paper（默认/降级）: PaperExecutor 模拟成交（恒 filled）→ RecordObservation
+//     落盘——paper 行无 exec 字段，行为与接入 live 前逐字节一致;
+//   - live: 风控闸（重启首窗禁单 + 日亏熔断现算，拦截记 rejected 行）→
+//     SubmitLiveObservation 先写 exec_status=submitting 行（下单前落盘）→
+//     trading.LiveTrader.Execute 同步 FAK 下单 → CompleteExecution 回填终态
+//     （filled/partial/unfilled/rejected + 实际 fill/cost/order_id，原子重写
+//     当日文件）。拦截/未成交/失败均不重试（引擎已 Done，事件内不再检测）。
+//
+// 返回落盘记录（落盘失败返回 nil）。结算轮询注册由调用方按
+// rec.OK && rec.IsFilled() 决定——live 未成交/被拒行不注册（无持仓无结算）。
 func handleObservation(o *flip.Observation, rt *runtimeState, conditionID, slug string, eventStart int64) *flip.Record {
-	if o.OK {
-		// 信号 → 纸面执行（PaperExecutor 恒 filled；live 模式后续接入）
+	// done 包装落盘: 失败记日志并返回 nil（调用方按 nil 不注册结算）
+	done := func(rec *flip.Record, err error) *flip.Record {
+		if err != nil {
+			log.Printf("[Dog] 观测落盘失败: %v", err)
+			return nil
+		}
+		return rec
+	}
+
+	if !o.OK {
+		log.Printf("[Event] 触底否决 side=%s rem=%ds fill=%.3f m45=%.2f dist_s=%.2f reason=%s anchor=%.2f σ=%.2f spot=%.2f",
+			o.Side, o.Rem, o.Fill, o.M45, o.DistS, o.RejectReason, o.Anchor, o.HistBps, o.Spot)
+		return done(rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake))
+	}
+	log.Printf("[Event] 🎯 触底信号 side=%s rem=%ds fill=%.3f m20=%.2f m30=%.2f m45=%.2f dist_s=%.2f dist_t=%.2f shares=%.1f anchor=%.2f σ=%.2f spot=%.2f",
+		o.Side, o.Rem, o.Fill, o.M20, o.M30, o.M45, o.DistS, o.DistT, o.Shares, o.Anchor, o.HistBps, o.Spot)
+
+	// ── paper / live 降级: 纸面模拟成交（恒 filled）──
+	if rt.Live == nil {
 		if err := rt.Executor.Execute(o); err != nil {
 			log.Printf("[Trading] ⚠️ 信号未执行: %v（仍记录观测）", err)
 		}
-		log.Printf("[Event] 🎯 触底信号 side=%s rem=%ds fill=%.3f m20=%.2f m30=%.2f m45=%.2f dist_s=%.2f dist_t=%.2f shares=%.1f anchor=%.2f σ=%.2f spot=%.2f",
-			o.Side, o.Rem, o.Fill, o.M20, o.M30, o.M45, o.DistS, o.DistT, o.Shares, o.Anchor, o.HistBps, o.Spot)
-	} else {
-		log.Printf("[Event] 触底否决 side=%s rem=%ds fill=%.3f m45=%.2f dist_s=%.2f reason=%s anchor=%.2f σ=%.2f spot=%.2f",
-			o.Side, o.Rem, o.Fill, o.M45, o.DistS, o.RejectReason, o.Anchor, o.HistBps, o.Spot)
+		return done(rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake))
 	}
-	rec, err := rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake)
+
+	// ── live: 风控闸 → 两阶段落盘 → 真实下单回填 ──
+	gate := func(note string) *flip.Record {
+		rec, err := rt.Recorder.RecordLiveRejected(conditionID, slug, eventStart, o, rt.Stake, note)
+		if err != nil {
+			return done(rec, err)
+		}
+		log.Printf("[Trading] ⚠️ 信号被风控闸拦截未下单: %s（rejected 行落盘）", note)
+		return rec
+	}
+	if rt.FirstWindow {
+		return gate("重启后首窗禁单")
+	}
+	if today := todaySettledPnl(rt.Recorder); !trading.CanTrade(today, rt.MaxDailyLoss) {
+		return gate(fmt.Sprintf("日亏熔断: 今日已结算 %.2fU ≤ %.2fU", today, rt.MaxDailyLoss))
+	}
+
+	// 阶段 1: submitting 行先落盘（POST 后崩溃 → 重启扫描告警人工核对, 不自动补单）
+	sub, err := rt.Recorder.SubmitLiveObservation(conditionID, slug, eventStart, o, rt.Stake)
 	if err != nil {
-		log.Printf("[Dog] 观测落盘失败: %v", err)
+		return done(sub, err)
+	}
+	// 买狗侧 token（UP=yes / DOWN=no; 窗口内必有 token, 极端缺失由 Execute 拒单兜底）
+	upTok, downTok := rt.tokens()
+	tokenID := downTok
+	if o.Side == flip.SideYes {
+		tokenID = upTok
+	}
+	start := time.Now()
+	res := rt.Live.Execute(o, tokenID, rt.Stake)
+	// 阶段 2: 回填终态（filled/partial 入 pending → 调用方按 IsFilled 注册结算）
+	rec, _, err := rt.Recorder.CompleteExecution(conditionID, *res)
+	if err != nil {
+		log.Printf("[Trading] ⚠️ 执行回填失败: %v —— submitting 行残留, 重启扫描会告警人工核对", err)
 		return nil
 	}
+	note := ""
+	if res.Note != "" {
+		note = " note=" + res.Note
+	}
+	log.Printf("[Trading] 🎯 live 订单终态: exec=%s order=%s fill=%.3f shares=%.1f cost=%.2f%s（%dms）",
+		res.Status, res.OrderID, res.FillPrice, res.Shares, res.Cost, note, time.Since(start).Milliseconds())
+	if strings.HasPrefix(res.Note, flip.ExecNoteUnknown) {
+		log.Printf("[Trading] ⚠️ 订单结果未知（POST 可能已受理）—— 请按 maker+order=%s 时间窗去 data-api 核对, 勿重复下单", res.OrderID)
+	}
 	return rec
+}
+
+// todaySettledPnl 返回今日（UTC）已结算 P&L（USDC）——日亏熔断的无状态输入:
+// 每次从 recorder 磁盘真相现算，重启安全、跨 UTC 日自动归零（今日无结算行 = 0）。
+func todaySettledPnl(r *flip.Recorder) float64 {
+	today := time.Now().UTC().Format("2006-01-02")
+	for _, d := range r.DailyPnl() {
+		if d.Date == today {
+			return d.PnL
+		}
+	}
+	return 0
 }
 
 // defaultSDKConfig 构造 SDK 配置（环境变量覆盖）。
@@ -795,5 +990,20 @@ func defaultSDKConfig() sdk.Config {
 	if v := os.Getenv("POLYMARKET_PROXY"); v != "" {
 		cfg.SocksProxy = v
 	}
+	if v := os.Getenv("POLYMARKET_CLOB_KEY"); v != "" {
+		cfg.Polymarket.CLOBCreds = &model.ApiKeyCreds{
+			Key:        v,
+			Secret:     os.Getenv("POLYMARKET_CLOB_SECRET"),
+			Passphrase: os.Getenv("POLYMARKET_CLOB_PASSPHRASE"),
+		}
+	}
+	if v := os.Getenv("POLYMARKET_FUNDER_ADDRESS"); v != "" {
+		cfg.Polymarket.FunderAddress = v
+	}
+	// live 签名形态恒为 Gnosis Safe（POLY_GNOSIS_SAFE=2, maker=FunderAddress,
+	// 签名=OwnerKey EOA）——与 eth 分支生产配置同款; 显式赋值（本文件不用
+	// sdk.DefaultConfig, 零值=EOA=0, live 下会被 CLOB 拒单）; paper 路径不
+	// 参与签名, 赋值无副作用。
+	cfg.Polymarket.SignatureType = orders.POLY_GNOSIS_SAFE
 	return cfg
 }

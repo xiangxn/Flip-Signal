@@ -5,8 +5,10 @@ import (
 	"log"
 )
 
-// Executor 负责信号成交（纸面/实盘同接口）。当前仅纸面实现；
-// live（FAK）接口预留——纸面验证通过后从 eth 分支历史恢复实盘路径。
+// Executor 负责信号成交（纸面/实盘同接口）。本包只实现纸面路径；
+// live 真实下单由 cmd/flip 直调 trading.LiveTrader（两阶段落盘/风控闸编排在
+// main 侧, 见 cmd/flip/main.go handleObservation）——trading 依赖 SDK, flip
+// 保持零外部依赖, 故 live 实现不入本包。
 type Executor interface {
 	Execute(obs *Observation) error
 }
@@ -24,11 +26,13 @@ func (PaperExecutor) Execute(obs *Observation) error {
 	return nil
 }
 
-// NewExecutor 按模式返回执行器；live 未实现时回退纸面并告警。
+// NewExecutor 按模式返回执行器。live 语义已在 cmd/flip 分流（trading.LiveTrader,
+// 不经本接口）——此处仅作防线: 收到 live 时告警并回退纸面（防止跳过 main 分流
+// 的调用方在 live 意图下静默纸面）。
 func NewExecutor(mode string) Executor {
 	switch mode {
 	case "live":
-		log.Printf("⚠️ live 模式尚未实现（FAK 接口预留），回退纸面执行")
+		log.Printf("⚠️ [Executor] live 须由 cmd/flip 构建 trading.LiveTrader——此处回退纸面执行")
 		return PaperExecutor{}
 	default:
 		return PaperExecutor{}

@@ -55,6 +55,20 @@
     $('modeBadge').textContent = s.mode === 'live' ? '实盘' : '纸面';
     $('uptime').textContent = '运行 ' + Math.floor(s.uptime_sec / 60) + 'm';
 
+    // 实盘执行摘要（paper 恒空 → 隐藏）
+    var lb = $('liveBar');
+    if (s.live) {
+      lb.style.display = '';
+      var l = s.live;
+      var bits = ['今日实盘 成交 ' + l.today_filled + ' 笔', 'P&L ' + fmtPnl(l.today_pnl)];
+      if (!l.breaker_open) bits.push('⛔ 熔断停单（≤' + fmtPnl(l.max_daily_loss) + '）');
+      if (l.reconciling > 0) bits.push('⚠️ 待人工核对 ' + l.reconciling + ' 行');
+      lb.textContent = bits.join(' · ');
+      lb.className = 'livebar ' + (l.today_pnl < 0 ? 'neg' : l.today_pnl > 0 ? 'pos' : '');
+    } else {
+      lb.style.display = 'none';
+    }
+
     $('statSignal').textContent = s.signal_count;
     $('statWon').textContent = s.won_count;
     $('statLost').textContent = s.lost_count;

@@ -348,6 +348,185 @@ func TestWindowLogRoundtrip(t *testing.T) {
 	}
 }
 
+// ── live 两阶段落盘（2026-09-10 实盘接入）──
+
+func TestLiveTwoPhaseFill(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, _, _ := testTs(t)
+
+	// 阶段 1: submitting 行落盘, 不入 pending
+	sub, err := r.SubmitLiveObservation("cond-live", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.ExecStatus != ExecStatusSubmitting || sub.IsFilled() {
+		t.Fatalf("submitting 行状态: %+v", sub)
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatal("submitting 行不应入 pending")
+	}
+
+	// 阶段 2: 回填 filled（部分成交口径: 实际 10.20 股 @0.19 → cost 1.938）
+	res := ExecResult{Status: ExecStatusPartial, OrderID: "ord-1", FillPrice: 0.19, Shares: 10.20, Cost: 1.938}
+	rec, filled, err := r.CompleteExecution("cond-live", res)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filled || rec.ExecStatus != ExecStatusPartial || rec.OrderID != "ord-1" {
+		t.Fatalf("回填结果: %+v", rec)
+	}
+	if !approxEq(rec.Shares, 10.20) || !approxEq(rec.Cost, 1.938) || !approxEq(rec.FillPrice, 0.19) {
+		t.Fatalf("实际成交字段: %+v", rec)
+	}
+	if len(r.PendingSignals()) != 1 {
+		t.Fatal("filled 行应入 pending")
+	}
+
+	// 磁盘回填: 当日文件行已含 exec 字段
+	day := readDay(t, dir, "2026-09-02")
+	onDisk := day["cond-live"]
+	if onDisk.ExecStatus != ExecStatusPartial || onDisk.OrderID != "ord-1" || !approxEq(onDisk.Cost, 1.938) {
+		t.Fatalf("磁盘行未回填: %+v", onDisk)
+	}
+	if onDisk.Won != nil {
+		t.Fatal("磁盘行不应已结算")
+	}
+
+	// 结算按真实 cost: 赢 → shares − cost（每股兑 1U）
+	if !r.Resolve("cond-live", OutcomeUp, ts2time(ts)) {
+		t.Fatal("应能结算")
+	}
+	if rec.Won == nil || !*rec.Won || !approxEq(rec.PnL, 10.20-1.938) {
+		t.Fatalf("cost 口径结算: %+v", rec)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestLiveUnfilledNoPending(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := NewRecorder(dir)
+	ts, _, _ := testTs(t)
+
+	// unfilled（0 成交）: 不入 pending, 不注册结算; 目标股数保留
+	r.SubmitLiveObservation("cond-u", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2)
+	rec, filled, err := r.CompleteExecution("cond-u", ExecResult{Status: ExecStatusUnfilled, OrderID: "ord-u", Note: "no liquidity"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if filled || rec.IsFilled() {
+		t.Fatal("unfilled 不应成交")
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatal("unfilled 不应入 pending")
+	}
+	if r.Resolve("cond-u", OutcomeUp, ts2time(ts)) {
+		t.Fatal("unfilled 不应能结算")
+	}
+
+	// rejected（HTTP 拒单）同理
+	r.SubmitLiveObservation("cond-r", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2)
+	rec, _, err = r.CompleteExecution("cond-r", ExecResult{Status: ExecStatusRejected, OrderID: "", Note: "balance insufficient"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.IsFilled() || len(r.PendingSignals()) != 0 {
+		t.Fatalf("rejected 不应成交/入 pending: %+v", rec)
+	}
+	// 目标股数保留（stake/fill = 2/0.19）
+	if !approxEq(rec.Shares, 2/0.19) {
+		t.Fatalf("非成交行应保留目标股数: %v", rec.Shares)
+	}
+
+	// 重复回填 / 行缺失 → error
+	if _, _, err := r.CompleteExecution("cond-u", ExecResult{Status: ExecStatusFilled, Shares: 1}); err == nil {
+		t.Fatal("重复回填应 error")
+	}
+	if _, _, err := r.CompleteExecution("cond-none", ExecResult{Status: ExecStatusFilled, Shares: 1}); err == nil {
+		t.Fatal("行缺失应 error")
+	}
+}
+
+func TestLiveRiskGateRejectedRow(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := NewRecorder(dir)
+	ts, _, _ := testTs(t)
+
+	// 风控闸拒绝（未发起下单）: 直接落 rejected 行, 不入 pending
+	rec, err := r.RecordLiveRejected("cond-g", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2, "日亏熔断")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rec.OK || rec.ExecStatus != ExecStatusRejected || rec.IsFilled() {
+		t.Fatalf("闸拒行: %+v", rec)
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatal("闸拒行不应入 pending")
+	}
+	obs, sig, _ := r.Counts()
+	if obs != 1 || sig != 1 {
+		t.Fatalf("闸拒行仍应计入观测/信号口径（09-15 频率对照）: %d/%d", obs, sig)
+	}
+}
+
+func TestRestartReconcileScan(t *testing.T) {
+	dir := t.TempDir()
+	ts, _, _ := testTs(t)
+	mk := func(condID string, status, note string, ok bool, won *bool) *Record {
+		rec := newRecord(condID, "slug", ts/1000, mkObs(ts, SideYes, ok, 0.19), 2)
+		rec.ExecStatus = status
+		rec.ExecNote = note
+		rec.Won = won
+		rec.OrderID = "ord-" + condID
+		return rec
+	}
+	wonTrue := true
+	lines := []*Record{
+		mk("c-sub", ExecStatusSubmitting, "", true, nil),                        // 下单后崩溃 → 核对
+		mk("c-unk", ExecStatusRejected, ExecNoteUnknown+": POST 超时", true, nil), // 结果不明 → 核对
+		mk("c-rej", ExecStatusRejected, "balance insufficient", true, nil),      // 明确拒单 → 不核对
+		mk("c-ok", "", "", true, nil),                                           // paper 待结算 → pending
+		mk("c-fill", ExecStatusFilled, "", true, nil),                           // live 成交待结算 → pending
+		mk("c-done", ExecStatusFilled, "", true, &wonTrue),                      // 已结算 → 不挂
+	}
+	var buf []byte
+	for _, rec := range lines {
+		b, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		buf = append(buf, b...)
+		buf = append(buf, '\n')
+	}
+	if err := os.WriteFile(recordFilePath(dir, "2026-09-02"), buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+
+	if got := r.NeedsReconcile(); got != 2 {
+		t.Fatalf("NeedsReconcile = %d, 期望 2（submitting + unknown-rejected）", got)
+	}
+	pending := r.PendingSignals()
+	if len(pending) != 2 {
+		t.Fatalf("pending = %d, 期望 2（paper + live filled）", len(pending))
+	}
+	for _, p := range pending {
+		if p.ConditionID != "c-ok" && p.ConditionID != "c-fill" {
+			t.Fatalf("pending 意外含 %s", p.ConditionID)
+		}
+	}
+}
+
 // countLines 数一个文件的行数（不存在返回 0）。
 func countLines(t *testing.T, path string) int {
 	t.Helper()

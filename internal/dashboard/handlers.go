@@ -48,6 +48,9 @@ type stateResponse struct {
 	DayPnlPos        int     `json:"day_pnl_pos"`  // 逐日盈利天数（已结算）
 	DayTotal         int     `json:"day_total"`    // 有结算信号的天数
 	MaxDrawdown      float64 `json:"max_drawdown"` // 累计 P&L 最大回撤（USDC）
+
+	// live 执行摘要（mode=paper 恒 nil, 前端判空隐藏）
+	LiveExec *LiveExec `json:"live,omitempty"`
 }
 
 // recordResponse 是 /api/observations 与 /api/signals 的元素。
@@ -86,14 +89,14 @@ type listResp struct {
 // dailyRow 是 /api/daily 的一行（按 UTC 日切分，与回测 CSV date/记录文件同日口径；
 // 逐日明细弹窗用，列与 02_paper_compare.py 逐日输出对齐）。
 type dailyRow struct {
-	Date     string  `json:"date"` // YYYY-MM-DD（UTC）；total 行为空
-	Obs      int     `json:"obs"`  // 触底观测（含失败）
-	Signals  int     `json:"signals"`
-	Pending  int     `json:"pending"` // 未结算信号
-	Won      int     `json:"won"`
-	Lost     int     `json:"lost"`
-	WinRate  float64 `json:"win_rate"` // 已结算口径（won/(won+lost)；无结算 = 0）
-	PnL      float64 `json:"pnl"`
+	Date    string  `json:"date"` // YYYY-MM-DD（UTC）；total 行为空
+	Obs     int     `json:"obs"`  // 触底观测（含失败）
+	Signals int     `json:"signals"`
+	Pending int     `json:"pending"` // 未结算信号
+	Won     int     `json:"won"`
+	Lost    int     `json:"lost"`
+	WinRate float64 `json:"win_rate"` // 已结算口径（won/(won+lost)；无结算 = 0）
+	PnL     float64 `json:"pnl"`
 }
 
 // dailyResp 是 /api/daily 的响应体（rows 时间正序 + 合计行）。
@@ -137,6 +140,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		DayPnlPos:        dayPos,
 		DayTotal:         len(daily),
 		MaxDrawdown:      s.recorder.MaxDrawdown(),
+		LiveExec:         live.Live,
 	})
 }
 

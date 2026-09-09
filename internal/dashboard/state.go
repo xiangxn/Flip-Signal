@@ -37,6 +37,19 @@ type LiveSnapshot struct {
 	// 有推送时 SpotAgeMs 为本地接收龄（毫秒，>2000 = 引擎已判现货缺失）
 	SpotPrice float64
 	SpotAgeMs int64
+
+	// Live 为 live 执行摘要（Mode=="live" 时填充; paper 恒 nil）
+	Live *LiveExec
+}
+
+// LiveExec 是 live 执行的只读摘要（Mode=="live" 时由 main 填充; paper 恒 nil）。
+// 今日口径 = UTC 日（与记录文件切分、handleObservation 熔断现算同口径）。
+type LiveExec struct {
+	TodayFilled  int     `json:"today_filled"`   // 今日实际成交笔数（filled/partial）
+	TodayPnl     float64 `json:"today_pnl"`      // 今日已结算 P&L（USDC; 熔断判定输入）
+	MaxDailyLoss float64 `json:"max_daily_loss"` // 熔断线（--max-daily-loss）
+	BreakerOpen  bool    `json:"breaker_open"`   // 熔断未触发: 今日 P&L > MaxDailyLoss（可下单）
+	Reconciling  int     `json:"reconciling"`    // 待人工核对执行行（submitting/未知结果, 重启扫描语义）
 }
 
 // Snapshotter 由 main 包实现，返回当前运行快照（handler 每 5s 轮询）。

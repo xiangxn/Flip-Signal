@@ -120,6 +120,38 @@ type Tick struct {
 	TwapAgeMs int64   // TWAP 距上次推送毫秒数（诊断）
 }
 
+// ── 实盘执行 ──
+
+// ExecStatus* 是 live 执行状态（Record.ExecStatus 取值; paper 行无 exec 字段,
+// 空串 = 纸面模拟成交）。
+// 两阶段生命周期（2026-09-10 实盘接入）: 下单前落 submitting 行 → POST 同步响应
+// 后回填 filled/partial/unfilled/rejected。filled/partial 为真实持仓, 才注册结算。
+const (
+	ExecStatusSubmitting = "submitting" // 已写行、POST 未回填（崩溃缝隙, 重启人工核对）
+	ExecStatusFilled     = "filled"     // 全额成交（实际 shares == 目标）
+	ExecStatusPartial    = "partial"    // 部分成交（深度不足, 实际 shares < 目标）
+	ExecStatusUnfilled   = "unfilled"   // 0 成交（引擎已 Done, 不重试）
+	ExecStatusRejected   = "rejected"   // 未下单（风控闸/CLOB 拒绝/网络错误）
+)
+
+// ExecNoteUnknown 是 rejected Note 的「POST 结果不明」标记前缀: 网络错误/超时
+// 不等同于未受理, 订单可能已成交——该行与 submitting 同属重启人工核对类
+// （Recorder 载入扫描判据, 勿自动补单）。HTTP ≥400 拒单有服务端明确失败响应,
+// 不属此类。
+const ExecNoteUnknown = "未知结果"
+
+// ExecResult 是一次实盘下单的终态结果（internal/trading LiveTrader.Execute 产出,
+// Recorder.CompleteExecution 消费回填）。纯数据类型放 flip: recorder 侧引用无需
+// 反向依赖 trading（trading→flip 单向, 无环）。
+type ExecResult struct {
+	Status    string  // ExecStatus*: filled/partial/unfilled/rejected
+	OrderID   string  // CLOB 订单 id（POST 响应回填; 网络错误时不可得）
+	FillPrice float64 // 实际成交均价 = Cost/Shares（0 = 未成交）
+	Shares    float64 // 实际成交股数（0 = 未成交）
+	Cost      float64 // 实际花费 USDC（0 = 未成交/拒绝）
+	Note      string  // 拒绝原因; ExecNoteUnknown 开头 = POST 结果不明
+}
+
 // ── 输出 ──
 
 // Observation 是一次触底观测（成功与失败都产出，诊断/校准信号频率用）。
@@ -143,14 +175,16 @@ type Observation struct {
 
 	// 浅洞腿决策原始输入（2026-09-03 起落盘，诊断 anchor/σ/spot 口径差与
 	// yes/no 进带率漂移用；0 = 该输入当时缺失，与 reject_reason 呼应）
-	Anchor    float64 `json:"anchor"`    // 本窗 anchor = 边界 TWAP-60 流值（USD）
-	HistBps   float64 `json:"hist_bps"`  // σ（bps）: 前 ≤18 已完窗 |close−open| 均值（0 = 不足 3 窗）
-	Spot      float64 `json:"spot"`      // 触底 tick Binance BTCUSDT 价（0 = 缺失/陈旧 >2s）
+	Anchor    float64 `json:"anchor"`     // 本窗 anchor = 边界 TWAP-60 流值（USD）
+	HistBps   float64 `json:"hist_bps"`   // σ（bps）: 前 ≤18 已完窗 |close−open| 均值（0 = 不足 3 窗）
+	Spot      float64 `json:"spot"`       // 触底 tick Binance BTCUSDT 价（0 = 缺失/陈旧 >2s）
 	TwapPrice float64 `json:"twap_price"` // 触底 tick TWAP-60 流值（dist_t 观察腿输入）
 }
 
 // Record 是一条触底观测的完整落盘记录（成功与失败都记）。
-// 字段 = Observation 全部 + 记录元信息（结算后回填 won/pnl/resolved_at）。
+// 字段 = Observation 全部 + 记录元信息（结算后回填 won/pnl/resolved_at;
+// live 行回填 exec_status/order_id/avg_fill_price/cost/exec_note——paper 行
+// 无这些字段, omitempty 对旧日文件与 python 脚本零影响）。
 type Record struct {
 	Observation
 	EventType   string  `json:"event_type"` // 恒为 "touch"
@@ -162,4 +196,21 @@ type Record struct {
 	Won         *bool   `json:"won,omitempty"`         // 结算后填充（狗侧是否赢）
 	PnL         float64 `json:"pnl,omitempty"`         // 结算后填充（USDC）
 	ResolvedAt  string  `json:"resolved_at,omitempty"` // 结算时间（RFC3339）
+
+	// ── live 执行回填（paper 行恒空）──
+	ExecStatus string  `json:"exec_status,omitempty"`    // 空=paper; 取值见 ExecStatus*
+	OrderID    string  `json:"order_id,omitempty"`       // CLOB 订单 id
+	FillPrice  float64 `json:"avg_fill_price,omitempty"` // 实际成交均价（≤ 观测 fill; 吃单可价格改善）
+	Cost       float64 `json:"cost,omitempty"`           // 实际花费 USDC（结算 P&L 基准; paper 无 → Resolve 用 Stake 兜底）
+	ExecNote   string  `json:"exec_note,omitempty"`      // rejected/unknown 原因
+}
+
+// IsFilled 判断记录是否实际成交（须注册结算轮询）: paper 行（ExecStatus 空 =
+// 恒模拟全额成交）与 live filled/partial 为真; unfilled/rejected/submitting 为假。
+func (r *Record) IsFilled() bool {
+	switch r.ExecStatus {
+	case "", ExecStatusFilled, ExecStatusPartial:
+		return true
+	}
+	return false
 }

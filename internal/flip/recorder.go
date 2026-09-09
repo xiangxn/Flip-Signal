@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -175,8 +176,20 @@ func (r *Recorder) loadFileLocked(path string) (int, int, error) {
 			continue
 		}
 		r.recs = append(r.recs, &rec)
+		// 崩溃恢复: pending 重建只收「真实持仓待结算」行（ok 信号 && 未结算 &&
+		// paper 或 live filled/partial——unfilled/rejected/submitting 无真实持仓,
+		// 不注册结算轮询; submitting/unknown-rejected 行打 ⚠️ 人工核对）
 		if rec.OK && rec.Won == nil && rec.ConditionID != "" {
-			r.pending[rec.ConditionID] = &rec // 崩溃恢复：重启后重新注册结算轮询
+			if isSettlable(&rec) {
+				r.pending[rec.ConditionID] = &rec // 重启后重新注册结算轮询
+			} else if rec.ExecStatus == ExecStatusSubmitting ||
+				(rec.ExecStatus == ExecStatusRejected && strings.HasPrefix(rec.ExecNote, ExecNoteUnknown)) {
+				// 执行中断（下单后崩溃/POST 结果不明）: order_id 大概率不可得,
+				// 不自动补单——按 maker+时间窗去 data-api 核对该窗是否真成交
+				log.Printf("⚠️ [Recorder] %s: condition=%s exec=%s 执行中断需人工核对——勿自动补单, 按 maker+时间窗去 data-api 核对。slug=%s event_start=%d ts=%d side=%s fill=%.3f stake=%.1f note=%q",
+					filepath.Base(path), rec.ConditionID, rec.ExecStatus,
+					rec.Slug, rec.EventStart, rec.Ts, rec.Side, rec.Fill, rec.Stake, rec.ExecNote)
+			}
 		}
 		rows++
 	}
@@ -186,13 +199,9 @@ func (r *Recorder) loadFileLocked(path string) (int, int, error) {
 	return rows, skipped, nil
 }
 
-// RecordObservation 将一次触底观测立即落盘（ok 与失败观测都记录）。
-// 返回生成的记录行（已入内存 + flush 到当日文件）。
-func (r *Recorder) RecordObservation(condID, slug string, eventStart int64, obs *Observation, stake float64) (*Record, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	rec := &Record{
+// newRecord 构造记录行（时间/日期从观测快照派生）。
+func newRecord(condID, slug string, eventStart int64, obs *Observation, stake float64) *Record {
+	return &Record{
 		Observation: *obs, // 值拷贝：观测判定后即快照
 		EventType:   recordEventType,
 		Date:        utcDate(obs.Ts),
@@ -201,13 +210,102 @@ func (r *Recorder) RecordObservation(condID, slug string, eventStart int64, obs 
 		EventStart:  eventStart,
 		Stake:       stake,
 	}
+}
+
+// RecordObservation 将一次触底观测立即落盘（paper 模拟成交: ok 与失败观测都记录,
+// ExecStatus 空串）。返回生成的记录行（已入内存 + flush 到当日文件）。
+func (r *Recorder) RecordObservation(condID, slug string, eventStart int64, obs *Observation, stake float64) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec := newRecord(condID, slug, eventStart, obs, stake)
 	if err := r.writeLocked(rec); err != nil {
 		return nil, err
 	}
-	if rec.OK && rec.ConditionID != "" {
+	if isSettlable(rec) {
 		r.pending[rec.ConditionID] = rec
 	}
 	return rec, nil
+}
+
+// ── live 两阶段落盘（2026-09-10 实盘接入）──
+
+// SubmitLiveObservation 落盘 live 下单的 submitting 行（两阶段第一步, POST 发起
+// 前立即写, 行级 flush 崩溃不丢）。不入 pending、不注册结算——成交结果由
+// CompleteExecution 回填后按 isSettlable 决定。返回记录行。
+func (r *Recorder) SubmitLiveObservation(condID, slug string, eventStart int64, obs *Observation, stake float64) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec := newRecord(condID, slug, eventStart, obs, stake)
+	rec.ExecStatus = ExecStatusSubmitting
+	if err := r.writeLocked(rec); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// RecordLiveRejected 落盘 live 风控闸拒绝行（熔断/首窗禁单等: 未发起下单, 无
+// submitting 中间态）。OK=true（策略信号本身成立）但 ExecStatus=rejected →
+// IsFilled=false 不注册结算; 观测保留供 live 信号频率口径。
+func (r *Recorder) RecordLiveRejected(condID, slug string, eventStart int64, obs *Observation, stake float64, note string) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec := newRecord(condID, slug, eventStart, obs, stake)
+	rec.ExecStatus = ExecStatusRejected
+	rec.ExecNote = note
+	if err := r.writeLocked(rec); err != nil {
+		return nil, err
+	}
+	return rec, nil
+}
+
+// CompleteExecution 回填一个 submitting 行的执行结果（两阶段第二步, POST 同步
+// 响应后立即调用）: 更新 ExecStatus/OrderID/FillPrice/Shares/Cost/ExecNote,
+// filled/partial（真实持仓）且 ok 时入 pending; rewriteDayLocked 原子回填当日
+// 文件（temp+rename, 崩溃不产生半行）。Shares 仅成交时覆盖为实际股数
+// （unfilled/rejected 保留目标股数供分析）。返回更新后记录与是否已成交。
+// submitting 行不存在或状态不符 → error（重启缝隙/重复回填, 告警不静默）。
+func (r *Recorder) CompleteExecution(conditionID string, res ExecResult) (*Record, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	switch res.Status {
+	case ExecStatusFilled, ExecStatusPartial, ExecStatusUnfilled, ExecStatusRejected:
+	default:
+		return nil, false, fmt.Errorf("CompleteExecution: %s 非法状态 %q", conditionID, res.Status)
+	}
+	var rec *Record
+	for _, x := range r.recs {
+		if x.ConditionID == conditionID {
+			rec = x
+			break
+		}
+	}
+	if rec == nil {
+		return nil, false, fmt.Errorf("CompleteExecution: %s 无落盘行（重启缝隙?）", conditionID)
+	}
+	if rec.ExecStatus != ExecStatusSubmitting {
+		return nil, false, fmt.Errorf("CompleteExecution: %s 行状态 %q 非 submitting（重复回填或行损坏）", conditionID, rec.ExecStatus)
+	}
+
+	rec.ExecStatus = res.Status
+	rec.OrderID = res.OrderID
+	rec.ExecNote = res.Note
+	if res.Status == ExecStatusFilled || res.Status == ExecStatusPartial {
+		rec.FillPrice = res.FillPrice
+		rec.Shares = res.Shares // 目标股数 → 实际成交股数
+		rec.Cost = res.Cost
+	}
+	filled := rec.IsFilled()
+	if isSettlable(rec) {
+		r.pending[conditionID] = rec
+	}
+	if err := r.rewriteDayLocked(rec.Date); err != nil {
+		log.Printf("⚠️ [Recorder] 执行回填重写失败: %v", err)
+	}
+	return rec, filled, nil
 }
 
 // Resolve 结算一个 ok 信号：按官方 outcome 判定狗侧输赢并回填记录，
@@ -221,9 +319,15 @@ func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time) bool {
 		return false
 	}
 	won := WonFor(rec.Side, outcome)
-	pnl := -rec.Stake
+	// cost 口径（2026-09-10 live 接入）: 实际成交花费 Cost（live filled/partial
+	// 回填）; paper 行无 Cost → Stake 兜底, 公式与旧版恒等
+	cost := rec.Cost
+	if cost <= 0 {
+		cost = rec.Stake
+	}
+	pnl := -cost
 	if won {
-		pnl = rec.Shares - rec.Stake // 每股兑 1U
+		pnl = rec.Shares - cost // 每股兑 1U（Shares = 实际成交股数）
 	}
 	rec.Won = &won
 	rec.PnL = pnl
@@ -442,10 +546,24 @@ func (r *Recorder) RecentWindows(n int) []WindowEntry {
 	return append([]WindowEntry(nil), r.wins[start:]...)
 }
 
+// isSettlable 判断记录是否应挂结算（真实持仓 + 未结算）: ok 信号 && 未结算 &&
+// paper 行（ExecStatus 空, 模拟成交）或 live filled/partial。unfilled/rejected/
+// submitting 行无真实持仓——不入 pending、不注册结算轮询。
+func isSettlable(rec *Record) bool {
+	if !rec.OK || rec.Won != nil || rec.ConditionID == "" {
+		return false
+	}
+	switch rec.ExecStatus {
+	case "", ExecStatusFilled, ExecStatusPartial:
+		return true
+	}
+	return false
+}
+
 // HasRecord 判断某 conditionID（窗口市场）是否已有落盘记录（观测 ok/否决都算）。
 // cmd/flip 快速重启防重入用: 崩溃后 ≤15s 内重启会按「迟到准入」重入上一进程
 // 未跑完的同一窗口——已触发落盘的窗口不允许二次运行（防同窗双记录 + pending
-// 覆盖致一笔悬空不结算）。
+// 覆盖致一笔悬空不结算）。live submitting 行同样算已触发（双单防护）。
 func (r *Recorder) HasRecord(conditionID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -455,6 +573,26 @@ func (r *Recorder) HasRecord(conditionID string) bool {
 		}
 	}
 	return false
+}
+
+// NeedsReconcile 返回执行中断待人工核对的行数（live: submitting = 下单后崩溃;
+// rejected 且 note 以 ExecNoteUnknown 开头 = POST 结果不明, 可能已成交）。
+// 重启后 cmd/flip 据此汇总告警——不自动补单、不自动注册。
+func (r *Recorder) NeedsReconcile() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	n := 0
+	for _, rec := range r.recs {
+		switch rec.ExecStatus {
+		case ExecStatusSubmitting:
+			n++
+		case ExecStatusRejected:
+			if strings.HasPrefix(rec.ExecNote, ExecNoteUnknown) {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // PendingSignals 返回未结算的 ok 信号（重启后据此重新注册结算轮询）。
