@@ -82,6 +82,44 @@ func TestRecordObservation(t *testing.T) {
 	}
 }
 
+func TestHasRecord(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, _, _ := testTs(t)
+
+	if r.HasRecord("cond-a") {
+		t.Fatal("空记录时应 false")
+	}
+	// ok 与否决观测都算「已有记录」（快速重启防重入判据: 只要该窗触发过即跳窗）
+	if _, err := r.RecordObservation("cond-a", "btc-updown-5m-0", ts, mkObs(ts, SideYes, true, 0.19), 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RecordObservation("cond-b", "btc-updown-5m-1", ts+1000, mkObs(ts+1000, SideNo, false, 0.15), 2); err != nil {
+		t.Fatal(err)
+	}
+	if !r.HasRecord("cond-a") || !r.HasRecord("cond-b") {
+		t.Fatal("已记录窗口应 true")
+	}
+	if r.HasRecord("cond-c") {
+		t.Fatal("未记录窗口应 false")
+	}
+
+	// 重启（磁盘恢复）后判据保持
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !r2.HasRecord("cond-a") || r2.HasRecord("cond-c") {
+		t.Fatal("重启后 HasRecord 应与磁盘一致")
+	}
+}
+
 func TestResolveMapping(t *testing.T) {
 	dir := t.TempDir()
 	r, _ := NewRecorder(dir)

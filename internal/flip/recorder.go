@@ -442,6 +442,21 @@ func (r *Recorder) RecentWindows(n int) []WindowEntry {
 	return append([]WindowEntry(nil), r.wins[start:]...)
 }
 
+// HasRecord 判断某 conditionID（窗口市场）是否已有落盘记录（观测 ok/否决都算）。
+// cmd/flip 快速重启防重入用: 崩溃后 ≤15s 内重启会按「迟到准入」重入上一进程
+// 未跑完的同一窗口——已触发落盘的窗口不允许二次运行（防同窗双记录 + pending
+// 覆盖致一笔悬空不结算）。
+func (r *Recorder) HasRecord(conditionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rec := range r.recs {
+		if rec.ConditionID == conditionID {
+			return true
+		}
+	}
+	return false
+}
+
 // PendingSignals 返回未结算的 ok 信号（重启后据此重新注册结算轮询）。
 func (r *Recorder) PendingSignals() []*Record {
 	r.mu.Lock()

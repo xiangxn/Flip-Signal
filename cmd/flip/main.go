@@ -59,10 +59,14 @@ const spotFreshMs = 2000
 // （2026-09-01 服务器实测断流事件，TwapAdapter 内建看门狗，见其注释）。
 const twapMaxStale = 2 * time.Minute
 
-// twapCloseFreshMs 是窗口结束 σ push 的 TWAP 新鲜度上限: 超过判为断流陈旧，
-// 本窗振幅不 push（缺一窗可接受——陈旧 close 会把假振幅污染进其后 18 窗的 σ
-// 尺度，进而扭曲浅洞带判定）。2min 看门狗重建线太粗，够不到数秒~分钟的推送
-// 缺口（data/v4 实测曾现 55s 缺口）；正常推送龄 p99≈1.7s（119 行记录），10s 余量充足。
+// twapCloseFreshMs 是 TWAP 采样的新鲜度上限（毫秒）: 超过判为断流陈旧。
+// 窗口起/止两处采样共用同一阈值（2026-09-09 review 起 anchor 也受守卫）:
+//  1) 窗口结束 σ push: 陈旧 close 会把假振幅污染进其后 18 窗的 σ 尺度，
+//     进而扭曲浅洞带判定（缺一窗可接受——本阈值原始依据，见下方注释）;
+//  2) 窗口起点 anchor（main 步骤 5 守卫）: 陈旧 anchor 会让整窗 dist_s 相对
+//     错锚失真——超龄按锚缺失整窗跳过（镜像回测 :69 语义）。
+// 2min 看门狗重建线太粗，够不到数秒~分钟的推送缺口（data/v4 实测曾现 55s 缺口）；
+// 正常推送龄 p99≈1.7s（119 行记录），10s 余量充足。
 const twapCloseFreshMs = 10_000
 
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
@@ -113,6 +117,15 @@ func recentBlock(wins []flip.WindowEntry, gapMs int64) []flip.WindowEntry {
 		}
 	}
 	return wins
+}
+
+// anchorUsableAtBoundary 判定窗口边界 anchor 采样是否可用:
+// TWAP 尚未收到推送（price≤0）或推送陈旧（龄 > twapCloseFreshMs——与窗口
+// 结束 σ 采样同一阈值，正常推送龄 p99≈1.7s，10s 余量充足）判不可用。
+// 不可用时调用方把 anchor 置 0 → 引擎按锚缺失整窗跳过（镜像回测 :69），
+// σ 亦不计入（既有 anchor≤0 分支，零额外路径）。
+func anchorUsableAtBoundary(price float64, ageMs int64) bool {
+	return price > 0 && ageMs <= twapCloseFreshMs
 }
 
 // seed 预热: 官方范围整表替换（热启动段在 ~19s 内完成，先于任何 live push）。
@@ -503,6 +516,21 @@ func main() {
 			}
 			continue
 		}
+		// 快速重启防重入（2026-09-09 review）: 崩溃后 ≤15s 内重启会按「迟到准入」
+		// 重入上一进程未跑完的同一窗口——若崩溃前该窗已触发落盘, 重跑会产出同
+		// conditionID 双记录（Recorder.pending 以 conditionID 为键, 后记覆盖先记
+		// → 先记的一笔永不结算回填）且可能同窗二次触发。已有记录即整窗跳过
+		// （每窗至多一次首触观测; σ 缺此窗由 recentBlock 600s 缺口容差吸收,
+		// 与 >15s 迟跳同效; 未触发即崩溃的窗口无记录, 仍按原准入续跑）。
+		if recorder.HasRecord(conditionID) {
+			log.Printf("[Cycle] ⚠️ 窗口 %s 已有落盘记录（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Until(nextStart.Add(windowSec * time.Second))):
+			}
+			continue
+		}
 		log.Printf("[Cycle] conditionId=%s UP=%s DOWN=%s", conditionID, upTokenID, downTokenID)
 
 		// 步骤 4: 订阅切换（先退订旧 token，保留副本供 monitor 重启恢复）
@@ -523,8 +551,19 @@ func main() {
 
 		// 步骤 5: 注入窗口上下文（anchor/σ），启动 1s tick 采集
 		// anchor = 边界瞬间的 TWAP-60 流值（官方开盘价 p50 偏差 0.08bps / p99
-		// 1.14bps，口径文档已量化——记录在案，复验按分布对比不做逐笔对账）
-		anchor, _ := twapAdapter.Latest()
+		// 1.14bps，口径文档已量化——记录在案，复验按分布对比不做逐笔对账）。
+		// 新鲜度守卫（2026-09-09 review）: 边界采样时刻 TWAP 断流会把陈旧流值
+		// 当锚, 整窗 dist_s/触发相对错锚失真——与窗口结束 σ 同一阈值
+		// twapCloseFreshMs, 超龄把 anchor 置 0 → 引擎整窗不观测 + 窗口结束
+		// 不计入 σ（既有 anchor≤0 分支, 镜像回测 :69 锚缺失事件跳过）。
+		anchor, anchorAgeMs := twapAdapter.Latest()
+		if !anchorUsableAtBoundary(anchor, anchorAgeMs) {
+			if anchor > 0 {
+				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms），整窗按锚缺失跳过",
+					conditionID, anchorAgeMs, twapCloseFreshMs)
+			}
+			anchor = 0
+		}
 		engine := flip.NewEngine(cfg)
 		engine.BeginWindow(anchor, hist.bps(anchor))
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
