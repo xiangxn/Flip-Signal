@@ -343,6 +343,7 @@ func main() {
 			log.Printf("[Cycle] ⚠️ 已落后窗口边界 %v（>%v），跳过本窗口 %s",
 				elapsed.Round(time.Second), lateLimit,
 				nextStart.UTC().Format(time.RFC3339))
+			runtime.clearWindow() // 本窗被跳过: 快照不留上一窗陈旧状态（跳到下一窗, 等待最长 ~5min）
 			nextStart = nextStart.Add(windowSec * time.Second)
 		}
 		slug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
@@ -405,6 +406,7 @@ func main() {
 			marketData, err = client.FetchMarketBySlug(slug)
 			if err != nil {
 				log.Printf("[Cycle] 获取市场失败: %v —— 跳过本窗口", err)
+				runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
 				select {
 				case <-ctx.Done():
 					return
@@ -417,6 +419,7 @@ func main() {
 		upTokenID, downTokenID := feed.ParseMarketTokens(marketData)
 		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
+			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
 			select {
 			case <-ctx.Done():
 				return
@@ -432,6 +435,7 @@ func main() {
 		// 与 >15s 迟跳同效; 未触发即崩溃的窗口无记录, 仍按原准入续跑）。
 		if recorder.HasRecord(conditionID) {
 			log.Printf("[Cycle] ⚠️ 窗口 %s 已有落盘记录（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
+			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
 			select {
 			case <-ctx.Done():
 				return
@@ -574,7 +578,9 @@ func main() {
 // 什么样」（引擎/适配器/窗口元/盘口闭包）; 成交编排（执行器/闸/两阶段落盘/风控）
 // 收敛在 Exec（flip.ExecState, 见 internal/flip exec_state.go——paper/live 同形态, 唯一差异 =
 // 是否真实 POST, 不散落在本类型）。mu 保护每窗口换装的字段（Engine/ConditionID/
-// Slug/EventStart）: 主循环写（窗口起点），Dashboard goroutine 经 Snapshot 读。
+// Slug/EventStart）: 主循环写（窗口起点 setWindow 换装, 跳窗路径 clearWindow 清空——
+// 清空后 Dashboard 显示「等待下一窗口…」而非上一窗陈旧状态），Dashboard goroutine
+// 经 Snapshot 读。
 type runtimeState struct {
 	mu sync.RWMutex
 
@@ -593,9 +599,9 @@ type runtimeState struct {
 // Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照）。
 // Engine 指针在锁内读取；指针自身稳定（主循环只换不释放），
 // Engine.State() 内部另有锁，读后调用安全。
-// ⚠️ 首个窗口边界前 Engine 为 nil（启动空窗：Dashboard 先于窗口循环开服，
-// 最长等 ~5 分钟才 setWindow）——判空，nil 时状态留空（前端此时显示
-// 「等待下一个窗口…」，口径一致）。
+// ⚠️ Engine 为 nil 的场景: 启动空窗（Dashboard 先于窗口循环开服, 最长等 ~5 分钟
+// 才 setWindow）与跳窗路径（clearWindow: 迟到/市场获取失败/token 缺失/防重入跳过
+// 整个窗口）——判空, nil 时状态留空（前端此时显示「等待下一个窗口…」, 口径一致）。
 func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 	yb, nb := rt.books()
 	pm := feed.NewPMTick(yb, nb)
@@ -630,9 +636,13 @@ func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 		TwapAgeMs:   twAge,
 		SpotPrice:   spotPrice,
 		SpotAgeMs:   spotAgeMs,
-		Live:        rt.Exec.LiveSummary(), // paper 恒 nil（live 摘要逻辑在 flip.ExecState.LiveSummary）
 	}
 	rt.mu.RUnlock()
+
+	// live 摘要放锁外: Exec 构造后不变且方法内部自锁（Recorder 域, 与窗口快照无关）
+	// ——全量观测遍历不阻塞 setWindow/clearWindow 的窗口换装写锁（paper 恒 nil,
+	// 逻辑见 flip.ExecState.LiveSummary）
+	snap.Live = rt.Exec.LiveSummary()
 	return snap
 }
 
@@ -643,6 +653,19 @@ func (rt *runtimeState) setWindow(engine *flip.Engine, conditionID, slug string,
 	rt.ConditionID = conditionID
 	rt.Slug = slug
 	rt.EventStart = eventStart
+	rt.mu.Unlock()
+}
+
+// clearWindow 清空当前窗口快照（语义 = 无窗口进行中），跳窗 continue 路径调用:
+// 否则 Dashboard 在最长一个完整窗口周期内停留在上一窗的陈旧引擎/conditionID
+// （上一窗早已结束, 引擎已不再被 tick——清空零副作用）。Snapshot 判 nil Engine,
+// 前端显示「等待下一窗口…」, 与启动空窗同口径。
+func (rt *runtimeState) clearWindow() {
+	rt.mu.Lock()
+	rt.Engine = nil
+	rt.ConditionID = ""
+	rt.Slug = ""
+	rt.EventStart = 0
 	rt.mu.Unlock()
 }
 
