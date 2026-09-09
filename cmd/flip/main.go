@@ -4,7 +4,7 @@
 // Binance BTCUSDT spot（浅洞腿），每秒驱动 flip.Engine 状态机检测「触底观测」——
 // 某侧 ask 首次砸到 ≤0.20 的下狗机会：急跌(m_45) × 浅洞(dist_s) × 时间(rem) 三腿
 // 全过即 ok 信号。成交按 -mode 分流（默认 paper 模拟全额成交; live = 真实 CLOB
-// FAK 限价单 @ 触发 ask, 两阶段落盘 + 风控闸, 见 handleObservation），官方结算后
+// FAK 限价单 @ 触发 ask, 两阶段落盘 + 风控闸, 编排见 internal/flip ExecState), 官方结算后
 // 回填完整 P&L 到 JSONL（touches_YYYY-MM-DD.jsonl，按日切分）。成功与失败的观测
 // 都落盘（频率校准用）。
 //
@@ -81,104 +81,17 @@ const twapCloseFreshMs = 10_000
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
 const twapLookbackSeconds = 60
 
-// histWindows 是 σ 滚动窗容量（前 ≤18 个已完成窗口的振幅均值）——
-// 与回测 hist 窗口数一致（python/v4/01_backtest_r1.py）。
-const histWindows = 18
-
-// histMin 是 σ 可用所需最少窗口数: 不足则 no_hist（冷启动期）。
-const histMin = 3
-
 // localFreshMax 是 σ 本地预热的新鲜度上限: 最新已落盘窗口结束距今 ≤ 该值才可信
 // （= 引擎最近在跑，「马上重启」场景本地覆盖完整）；停机更久则本地缺停机期的
 // 窗口，回退官方网络预热（FetchTwapRanges 能取停机期间的窗口）。
-// 容差取 histMin 窗时长（σ 冷启动门槛本身）。
-const localFreshMax = time.Duration(histMin*windowSec) * time.Second
+// 容差取 σ 冷启动门槛本身（σ 容量/下限常量 flip.HistWindows/HistMin 随滚动窗
+// 实现在 internal/flip sigma.go——与回测 hist 窗口数一致）。
+const localFreshMax = time.Duration(flip.HistMin*windowSec) * time.Second
 
 // marketCache 缓存下一窗口的市场信息（稳态预取: 本窗 tick 尾部预取，loop 顶部复用）。
 type marketCache struct {
 	slug string
 	res  *gjson.Result
-}
-
-// histState 维护 σ 的滚动窗口: hist_bps = 前 ≤histWindows 个已完成窗口
-// |tw_close − tw_open| 的均值，换算成 bps = mean/anchor·1e4（与回测口径一致，
-// dist = Δ价/anchor·1e4/hist_bps）。
-//
-// 启动预热: 优先本地 windows_*.jsonl（recorder 落盘的引擎自身窗口振幅，见
-// main 预热段），不足/陈旧时回退官方历史范围（feed.FetchTwapRanges）——
-// 消除冷启动 no_hist 期。live 每窗口结束追加本窗 |close − anchor|（并同步
-// 落盘一行）。push 严格发生在窗口结束后——σ 永远只用已结束窗口，不混入当前窗。
-type histState struct {
-	mu   sync.Mutex
-	vals []float64 // 振幅（$），时间正序
-}
-
-func newHistState() *histState { return &histState{} }
-
-// recentBlock 从窗口振幅日志行（时间正序）截出最新一段连续块: 相邻条目结束
-// 时刻缺口 ≤ gapMs 视为连续（正常 300s；σ 新鲜度守卫缺一窗恰为 600s），首个
-// >gapMs 的缺口之前属更早的波动率 regime（停机/长期断档），整段丢弃。
-// 调用方以块长与块内最新窗新鲜度决定是否本地 seed。
-func recentBlock(wins []flip.WindowEntry, gapMs int64) []flip.WindowEntry {
-	for i := len(wins) - 1; i >= 1; i-- {
-		if wins[i].Ts-wins[i-1].Ts > gapMs {
-			return wins[i:]
-		}
-	}
-	return wins
-}
-
-// anchorUsableAtBoundary 判定窗口边界 anchor 采样是否可用:
-// TWAP 尚未收到推送（price≤0）或推送陈旧（龄 > twapCloseFreshMs——与窗口
-// 结束 σ 采样同一阈值，正常推送龄 p99≈1.7s，10s 余量充足）判不可用。
-// 不可用时调用方把 anchor 置 0 → 引擎按锚缺失整窗跳过（镜像回测 :69），
-// σ 亦不计入（既有 anchor≤0 分支，零额外路径）。
-func anchorUsableAtBoundary(price float64, ageMs int64) bool {
-	return price > 0 && ageMs <= twapCloseFreshMs
-}
-
-// seed 预热: 官方范围整表替换（热启动段在 ~19s 内完成，先于任何 live push）。
-func (h *histState) seed(vals []float64) {
-	if len(vals) == 0 {
-		return
-	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(vals) > histWindows {
-		vals = vals[len(vals)-histWindows:] // 只留最近的
-	}
-	h.vals = append(h.vals[:0], vals...)
-}
-
-// push 窗口结束后追加一个振幅（$）。
-func (h *histState) push(amp float64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.vals = append(h.vals, amp)
-	if len(h.vals) > histWindows {
-		h.vals = append(h.vals[:0], h.vals[len(h.vals)-histWindows:]...)
-	}
-}
-
-// bps 返回当前可用 σ（bps 口径）；不足 histMin 窗返回 0（不可用）。anchor ≤0 恒不可用。
-func (h *histState) bps(anchor float64) float64 {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.vals) < histMin || anchor <= 0 {
-		return 0
-	}
-	var sum float64
-	for _, v := range h.vals {
-		sum += v
-	}
-	return sum / float64(len(h.vals)) / anchor * 1e4
-}
-
-// count 返回已收集窗口数（日志用）。
-func (h *histState) count() int {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return len(h.vals)
 }
 
 func init() {
@@ -216,11 +129,6 @@ func main() {
 		RemMin:        *remMin,
 		Stake:         *stake,
 	}
-	// 成交执行器: 本执行器只服务 paper/降级路径（NewExecutor 恒纸面, 模拟全额
-	// 成交）; live 真实下单由 handleObservation 直调 trading.LiveTrader（两阶段
-	// 落盘 + 风控闸编排在 main 侧, 见下方分流段）。
-	executor := flip.NewExecutor("paper")
-
 	// ── Polymarket 客户端（未配置私钥则自动生成临时密钥，只读运行）──
 	cfgSDK := defaultSDKConfig()
 	readOnly := false
@@ -237,38 +145,8 @@ func main() {
 		log.Println("[Dog] ⚠️  未配置 POLYMARKET_OWNER_KEY —— 只读运行（纸面交易）")
 	}
 
-	// ── live 分流（-mode live 且凭证齐 → 真实 CLOB 下单; 缺任一即 ⚠️ 降级纸面）──
-	// live 依赖三段凭证（defaultSDKConfig 已读 env, 见文末）:
-	//   1) POLYMARKET_OWNER_KEY: 订单签名 EOA;
-	//   2) POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE: CLOB L2 headers;
-	//   3) POLYMARKET_FUNDER_ADDRESS: Safe 签名(POLY_GNOSIS_SAFE=2)下的 maker
-	//      地址——非可选: 缺失则 maker=裸 EOA, 以余额/授权不符被 CLOB 拒单。
-	effMode := "paper"
-	var liveTrader *trading.LiveTrader
-	if *mode == "live" {
-		creds := cfgSDK.Polymarket.CLOBCreds
-		var missing []string
-		if readOnly {
-			missing = append(missing, "POLYMARKET_OWNER_KEY")
-		}
-		if creds == nil || creds.Key == "" || creds.Secret == "" || creds.Passphrase == "" {
-			missing = append(missing, "POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE")
-		}
-		if cfgSDK.Polymarket.FunderAddress == "" {
-			missing = append(missing, "POLYMARKET_FUNDER_ADDRESS")
-		}
-		if len(missing) > 0 {
-			log.Printf("[Trading] ⚠️ -mode live 但凭证缺失（%s）—— 降级纸面执行", strings.Join(missing, ", "))
-		} else {
-			effMode = "live"
-			addr := cfgSDK.Polymarket.FunderAddress
-			if len(addr) > 12 {
-				addr = addr[:6] + "…" + addr[len(addr)-4:]
-			}
-			liveTrader = trading.NewLiveTrader(&trading.SdkClient{Client: client})
-			log.Printf("[Trading] 🔒 live 就绪: maker=%s（FAK 限价单 @ 触发 ask, 绝不超价; 首窗禁单）", addr)
-		}
-	}
+	// ── 成交执行器 + live 分流（一个函数: 默认纸面; -mode live 且凭证齐 → 真单）──
+	effMode, executor := resolveLiveMode(*mode, cfgSDK, readOnly, client)
 
 	// ── PM 订单簿订阅（SDK MarketMonitor）──
 	monitor := sdk.NewMarketMonitor(cfgSDK.Polymarket.ClobWSBaseURL, false, client, false)
@@ -386,49 +264,39 @@ func main() {
 	}
 	go resolutionPoller.Run(ctx)
 
-	// ── live 启动告警（载入期逐条 ⚠️ 已打, 这里给总量与目录提示）──
-	if liveTrader != nil {
-		if n := recorder.NeedsReconcile(); n > 0 {
-			log.Printf("[Trading] ⚠️ %d 条执行中断记录待人工核对（submitting/未知结果, 见上方逐条告警）—— 勿自动补单, 按 maker+时间窗去 data-api 核对", n)
-		}
-		// 混合目录提示: 当日已有 paper 行（ExecStatus 空）混入会污染信号频率口径与
-		// 日亏现算线——live 建议独立 -output 目录（如 data/v4live）。同日 live 行
-		// （崩溃重启续跑）不算混合。
-		today := time.Now().UTC().Format("2006-01-02")
-		mixed := false
-		for _, rec := range recorder.Observations() {
-			if rec.Date == today && rec.ExecStatus == "" {
-				mixed = true
-				break
-			}
-		}
-		if mixed {
-			log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（touches_%s.jsonl）—— live 建议独立 -output 目录（如 data/v4live）, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
-		}
+	// ── live 启动告警（载入期逐条 ⚠️ 已打, 这里给总量与目录提示; paper 无此语义）──
+	if effMode == "live" {
+		warnLiveStartup(recorder)
 	}
 
-	// ── 运行时状态（Dashboard 数据源）──
+	// ── 运行时状态（Dashboard 数据源 + 信号执行编排）──
+	// runtimeState 只背窗口/数据源快照; 执行编排（executor/闸/两阶段/风控）收敛在
+	// flip.ExecState——paper/live 同一形态, 差异仅在 Ex 实现是否真实 POST
+	// （编排实现 internal/flip exec_state.go; live 时 Ex 为本函数刚构造的
+	// trading.LiveExecutor）。
 	runtime := &runtimeState{
-		Executor:     executor,
-		Recorder:     recorder,
-		TwapAdapter:  twapAdapter,
-		Binance:      binance,
-		Stake:        cfg.Stake,
-		Mode:         effMode,
-		StartedAt:    time.Now(),
-		Live:         liveTrader,
-		MaxDailyLoss: *maxDailyLoss,
-		FirstWindow:  liveTrader != nil, // live 首窗禁单（重启防双单缝隙）
+		TwapAdapter: twapAdapter,
+		Binance:     binance,
+		Mode:        effMode,
+		StartedAt:   time.Now(),
+		Exec: &flip.ExecState{
+			Rec:          recorder,
+			Ex:           executor,
+			Live:         effMode == "live",
+			Stake:        cfg.Stake,
+			MaxDailyLoss: *maxDailyLoss,
+			FirstWindow:  effMode == "live", // live 首窗禁单（重启防双单缝隙）
+			Tokens: func() (string, string) {
+				tokMu.RLock()
+				defer tokMu.RUnlock()
+				return upTok, downTok
+			},
+		},
 	}
 	runtime.books = func() (*sdk.OrderBook, *sdk.OrderBook) {
 		bookMu.RLock()
 		defer bookMu.RUnlock()
 		return upBook, downBook
-	}
-	runtime.tokens = func() (string, string) {
-		tokMu.RLock()
-		defer tokMu.RUnlock()
-		return upTok, downTok
 	}
 
 	// ── Dashboard（手机浏览器兼容的单页前端）──
@@ -437,46 +305,12 @@ func main() {
 		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
-	// σ 启动预热: 优先本地 windows_*.jsonl（recorder 每窗落盘的 |close−anchor|）——
-	// 「马上重启」场景毫秒级恢复，且与 live push 同源同口径、零上游 API 压力。
-	//
-	// 本地可用条件（2026-09-06 review 收紧，防陈旧条目混入）:
-	// 1) 最近 ≤histWindows 窗截到最新一段连续块——窗口结束时刻对齐 5min 边界，
-	//    相邻条目正常差 300s；σ 新鲜度守卫缺一窗恰差 600s（仍连续）；停机/断档
-	//    的缺口 ≥3 窗。断档前的条目属更早的波动率 regime（如停机数小时后再跑
-	//    几窗即崩溃重启），混入会把 σ 尺度拉偏——只 seed 连续块，其余丢弃;
-	// 2) 连续块 ≥ histMin 窗（不足时本地意义小，走网络拿停机期窗口更接近回测）;
-	// 3) 块内最新窗结束距今 ≤ localFreshMax（引擎最近在跑）。
-	// 任一不满足即回退官方历史范围网络预热（≤18 窗逐窗间隔 1s ≈ 19s, 接口可能
-	// 429 限流丢窗——crypto-price 上游限速, 见 FetchTwapRanges 注释）
-	hist := newHistState()
-	seeded := 0
-	if wins := recorder.RecentWindows(histWindows); len(wins) > 0 {
-		if block := recentBlock(wins, int64(2*windowSec*1000)); len(block) >= histMin &&
-			time.Since(time.UnixMilli(block[len(block)-1].Ts)) <= localFreshMax {
-			amps := make([]float64, len(block))
-			for i := range block {
-				amps[i] = block[i].Amp
-			}
-			hist.seed(amps)
-			seeded = len(block)
-			log.Printf("[Cycle] σ 本地预热: %d 窗（%s ~ %s）",
-				len(block),
-				time.UnixMilli(block[0].Ts).UTC().Format("15:04:05"),
-				time.UnixMilli(block[len(block)-1].Ts).UTC().Format("15:04:05"))
-		}
-	}
-	if seeded == 0 {
-		go func() {
-			log.Printf("[Cycle] σ 网络预热: 本地窗口不足/断档/陈旧，拉取官方 TWAP 历史范围（≤%d 窗）...", histWindows)
-			vals := feed.FetchTwapRanges(client, histWindows, windowSec, twapLookbackSeconds)
-			hist.seed(vals)
-			log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
-		}()
-	}
+	// σ 启动预热（本地 windows_*.jsonl 优先, 不足/陈旧回退官方网络预热——见 warmupSigma）
+	hist := flip.NewHistState()
+	warmupSigma(hist, recorder, client)
 
 	log.Println("========================================")
-	if liveTrader != nil {
+	if effMode == "live" {
 		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（FAK 限价单 @ 触发 ask, 日亏熔断 ≤%.1fU）", *maxDailyLoss)
 	} else {
 		log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", effMode)
@@ -580,7 +414,7 @@ func main() {
 			}
 		}
 		conditionID := marketData.Get("conditionId").String()
-		upTokenID, downTokenID := parseMarketTokens(marketData)
+		upTokenID, downTokenID := feed.ParseMarketTokens(marketData)
 		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
 			select {
@@ -608,7 +442,7 @@ func main() {
 		// live 每窗预热 tick size/negRisk/feeRate: SDK CreateOrder 恒走
 		// ResolveTickSize + GetNegRisk 网调——不预热则信号路径多 1-2 次串行网调;
 		// 用本窗 gamma 数据预热, 与下单同源、信号路径零额外网调（见 prefetch.go）。
-		if liveTrader != nil {
+		if effMode == "live" {
 			trading.PrefetchTokenInfo(client, marketData, []string{upTokenID, downTokenID})
 		}
 		log.Printf("[Cycle] conditionId=%s UP=%s DOWN=%s", conditionID, upTokenID, downTokenID)
@@ -637,7 +471,7 @@ func main() {
 		// twapCloseFreshMs, 超龄把 anchor 置 0 → 引擎整窗不观测 + 窗口结束
 		// 不计入 σ（既有 anchor≤0 分支, 镜像回测 :69 锚缺失事件跳过）。
 		anchor, anchorAgeMs := twapAdapter.Latest()
-		if !anchorUsableAtBoundary(anchor, anchorAgeMs) {
+		if !flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, twapCloseFreshMs) {
 			if anchor > 0 {
 				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms），整窗按锚缺失跳过",
 					conditionID, anchorAgeMs, twapCloseFreshMs)
@@ -645,12 +479,12 @@ func main() {
 			anchor = 0
 		}
 		engine := flip.NewEngine(cfg)
-		engine.BeginWindow(anchor, hist.bps(anchor))
+		engine.BeginWindow(anchor, hist.Bps(anchor))
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
 		endTime := nextStart.Add(windowSec * time.Second)
 
 		log.Printf("[Cycle] event=%s 窗口开始 anchor=%.2f hist_bps=%.2f（%d 窗）",
-			conditionID, anchor, hist.bps(anchor), hist.count())
+			conditionID, anchor, hist.Bps(anchor), hist.Count())
 
 		ticker := time.NewTicker(time.Second)
 		lastTick := flip.Tick{}
@@ -672,7 +506,7 @@ func main() {
 				// 结算只注册实际成交（paper 行 ExecStatus 空恒成交; live 仅
 				// filled/partial; unfilled/rejected/风控停单不注册——无持仓无结算）
 				if o := engine.ProcessTick(lastTick); o != nil {
-					if rec := handleObservation(o, runtime, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK && rec.IsFilled() {
+					if rec := runtime.Exec.HandleObservation(o, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK && rec.IsFilled() {
 						resolutionPoller.Register(conditionID, slug)
 					}
 				}
@@ -715,7 +549,7 @@ func main() {
 				conditionID, lastTick.TwapAgeMs)
 		default:
 			amp := math.Abs(lastTick.TwapPrice - anchor)
-			hist.push(amp)
+			hist.Push(amp)
 			// 落盘一行供下次重启 σ 本地预热（与 push 同分支同条件;
 			// 失败只告警——σ 内存窗不受影响，仅预热缺此窗）
 			if err := recorder.LogWindowAmplitude(conditionID, slug, nextStart.Unix(),
@@ -723,43 +557,37 @@ func main() {
 				log.Printf("[Cycle] ⚠️ 窗口振幅落盘失败: %v（重启本地预热将缺此窗）", err)
 			}
 			log.Printf("[Cycle] 窗口结束 %s: |close−anchor|=%.2f, σ 现 %d 窗",
-				conditionID, amp, hist.count())
+				conditionID, amp, hist.Count())
 		}
 
 		// live 首窗禁单解除: 首个完整跑完的窗口结束后置 false。窗口被跳过
 		// （continue）则顺延——保守多禁一窗, 防重启残留窗双单的缝隙优先于
-		// 交易频率; 解除后 handleObservation 的 FirstWindow 闸恒放行。
-		if runtime.FirstWindow {
-			runtime.FirstWindow = false
+		// 交易频率; 解除后 HandleObservation 的 FirstWindow 闸恒放行。
+		if runtime.Exec.FirstWindow {
+			runtime.Exec.FirstWindow = false
 			log.Println("[Trading] 重启后首窗结束, 禁单解除")
 		}
 	}
 }
 
-// runtimeState 聚合主循环需要共享的组件引用（Dashboard 数据源）。
-// mu 保护每窗口换装的字段（Engine/ConditionID/Slug/EventStart）:
-// 主循环写（窗口起点），Dashboard goroutine 经 Snapshot 读。
+// runtimeState 是主循环/Dashboard 共用的窗口现场快照载体——只背「当前窗口长
+// 什么样」（引擎/适配器/窗口元/盘口闭包）; 成交编排（执行器/闸/两阶段落盘/风控）
+// 收敛在 Exec（flip.ExecState, 见 internal/flip exec_state.go——paper/live 同形态, 唯一差异 =
+// 是否真实 POST, 不散落在本类型）。mu 保护每窗口换装的字段（Engine/ConditionID/
+// Slug/EventStart）: 主循环写（窗口起点），Dashboard goroutine 经 Snapshot 读。
 type runtimeState struct {
 	mu sync.RWMutex
 
-	Engine       *flip.Engine
-	Executor     flip.Executor
-	Recorder     *flip.Recorder
-	TwapAdapter  *feed.TwapAdapter
-	Binance      *feed.BinanceAdapter
-	ConditionID  string
-	Slug         string
-	EventStart   int64
-	Stake        float64             // 每信号投入（构造后不变）
-	Mode         string              // 成交模式: paper/live（构造后不变, live 缺凭证降级为 paper）
-	StartedAt    time.Time           // 进程启动时刻（构造后不变）
-	Live         *trading.LiveTrader // live 执行器; nil = paper/降级（构造后不变）
-	MaxDailyLoss float64             // live 日亏熔断线（构造后不变; paper 下无意义）
-	// FirstWindow 重启后首窗禁单: 主循环在首个完整跑完的窗口结束后置 false。
-	// 只被主循环写、handleObservation 读（同一 goroutine）, Dashboard 快照不读。
-	FirstWindow bool
-	books       func() (*sdk.OrderBook, *sdk.OrderBook)
-	tokens      func() (string, string)
+	Engine      *flip.Engine                            // 当前窗口引擎（首个窗口边界前 nil, Snapshot 判空）
+	TwapAdapter *feed.TwapAdapter                       // 锚/σ 数据源
+	Binance     *feed.BinanceAdapter                    // 浅洞腿 spot 数据源
+	ConditionID string                                  // 当前窗口 conditionId（窗口起点换装）
+	Slug        string                                  // 当前窗口 slug
+	EventStart  int64                                   // 当前窗口起点（unix 秒）
+	Mode        string                                  // 成交模式: paper/live（构造后不变, live 缺凭证降级为 paper）
+	StartedAt   time.Time                               // 进程启动时刻（构造后不变）
+	Exec        *flip.ExecState                         // 信号执行编排（HandleObservation 方法 + LiveSummary; 构造后不变）
+	books       func() (*sdk.OrderBook, *sdk.OrderBook) // 当前窗口 UP/DOWN 盘口闭包
 }
 
 // Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照）。
@@ -768,9 +596,9 @@ type runtimeState struct {
 // ⚠️ 首个窗口边界前 Engine 为 nil（启动空窗：Dashboard 先于窗口循环开服，
 // 最长等 ~5 分钟才 setWindow）——判空，nil 时状态留空（前端此时显示
 // 「等待下一个窗口…」，口径一致）。
-func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
+func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 	yb, nb := rt.books()
-	pm := makePMTick(yb, nb)
+	pm := feed.NewPMTick(yb, nb)
 	_, twAge := rt.TwapAdapter.Latest()
 	bin := rt.Binance.LatestData()
 
@@ -787,7 +615,7 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 	if rt.Engine != nil {
 		engineState = rt.Engine.State().String()
 	}
-	snap := dashboard.LiveSnapshot{
+	snap := flip.LiveSnapshot{
 		Mode:        rt.Mode,
 		StartedAt:   rt.StartedAt,
 		ConditionID: rt.ConditionID,
@@ -802,35 +630,10 @@ func (rt *runtimeState) Snapshot() dashboard.LiveSnapshot {
 		TwapAgeMs:   twAge,
 		SpotPrice:   spotPrice,
 		SpotAgeMs:   spotAgeMs,
-		Live:        rt.liveExec(),
+		Live:        rt.Exec.LiveSummary(), // paper 恒 nil（live 摘要逻辑在 flip.ExecState.LiveSummary）
 	}
 	rt.mu.RUnlock()
 	return snap
-}
-
-// liveExec 构造 live 执行摘要（paper/降级恒 nil）。今日口径 = UTC 日——
-// 与 handleObservation 日亏熔断闸同源（今日已结算 P&L 现算 + 同一熔断线）;
-// 待核对行用重启扫描同语义的全量计数（submitting/未知结果, 跨日残留仍计）。
-// 由 Snapshot（Dashboard goroutine）调用, 只读字段 + recorder 内部锁, 无竞态。
-func (rt *runtimeState) liveExec() *dashboard.LiveExec {
-	if rt.Live == nil {
-		return nil
-	}
-	ex := &dashboard.LiveExec{MaxDailyLoss: rt.MaxDailyLoss, Reconciling: rt.Recorder.NeedsReconcile()}
-	today := time.Now().UTC().Format("2006-01-02")
-	for _, rec := range rt.Recorder.Observations() {
-		switch rec.ExecStatus {
-		case flip.ExecStatusFilled, flip.ExecStatusPartial:
-			if rec.Date == today {
-				ex.TodayFilled++
-			}
-		}
-		if rec.Date == today && rec.OK && rec.Won != nil {
-			ex.TodayPnl += rec.PnL
-		}
-	}
-	ex.BreakerOpen = ex.TodayPnl > ex.MaxDailyLoss
-	return ex
 }
 
 // setWindow 在窗口起点换装引擎与元字段（主循环持有）。
@@ -848,7 +651,7 @@ func (rt *runtimeState) setWindow(engine *flip.Engine, conditionID, slug string,
 // （= missing_spot）；TWAP 现值随身携带（dist_t 观察腿 + 窗口 close 采样）。
 func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 	yb, nb := rt.books()
-	pm := makePMTick(yb, nb)
+	pm := feed.NewPMTick(yb, nb)
 
 	// Binance spot（浅洞腿输入）: 本地接收新鲜度 ≤spotFreshMs 才有效——
 	// 断流后保留的最后价必须判 stale（交易所时间戳不可作新鲜度判据）
@@ -873,102 +676,104 @@ func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 	}
 }
 
-// handleObservation 处理引擎产出的触底观测（成功与失败都落盘，频率校准用）。
-//
-// ok 信号按模式分流（判定后立即落盘，行级 flush，崩溃不丢）:
-//   - paper（默认/降级）: PaperExecutor 模拟成交（恒 filled）→ RecordObservation
-//     落盘——paper 行无 exec 字段，行为与接入 live 前逐字节一致;
-//   - live: 风控闸（重启首窗禁单 + 日亏熔断现算，拦截记 rejected 行）→
-//     SubmitLiveObservation 先写 exec_status=submitting 行（下单前落盘）→
-//     trading.LiveTrader.Execute 同步 FAK 下单 → CompleteExecution 回填终态
-//     （filled/partial/unfilled/rejected + 实际 fill/cost/order_id，原子重写
-//     当日文件）。拦截/未成交/失败均不重试（引擎已 Done，事件内不再检测）。
-//
-// 返回落盘记录（落盘失败返回 nil）。结算轮询注册由调用方按
-// rec.OK && rec.IsFilled() 决定——live 未成交/被拒行不注册（无持仓无结算）。
-func handleObservation(o *flip.Observation, rt *runtimeState, conditionID, slug string, eventStart int64) *flip.Record {
-	// done 包装落盘: 失败记日志并返回 nil（调用方按 nil 不注册结算）
-	done := func(rec *flip.Record, err error) *flip.Record {
-		if err != nil {
-			log.Printf("[Dog] 观测落盘失败: %v", err)
-			return nil
-		}
-		return rec
+// resolveLiveMode 决定成交模式与执行器（默认纸面; -mode live 且凭证齐 → 真实下单）。
+// 两种实现同一 flip.Executor 契约——差异只在是否真实 POST（见 internal/flip exec_state.go）;
+// PaperExecutor 恒为兜底（NewExecutor 内部防线的 "live" 分支不会被走到, main 只
+// 在这里分流, 不散落第二处模式判断）。
+func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.PolymarketClient) (string, flip.Executor) {
+	if mode != "live" {
+		return "paper", flip.NewExecutor("paper")
 	}
-
-	if !o.OK {
-		log.Printf("[Event] 触底否决 side=%s rem=%ds fill=%.3f m45=%.2f dist_s=%.2f reason=%s anchor=%.2f σ=%.2f spot=%.2f",
-			o.Side, o.Rem, o.Fill, o.M45, o.DistS, o.RejectReason, o.Anchor, o.HistBps, o.Spot)
-		return done(rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake))
+	// live 依赖三段凭证（defaultSDKConfig 已读 env, 见下）:
+	//   1) POLYMARKET_OWNER_KEY: 订单签名 EOA;
+	//   2) POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE: CLOB L2 headers;
+	//   3) POLYMARKET_FUNDER_ADDRESS: Safe 签名(POLY_GNOSIS_SAFE=2)下的 maker
+	//      地址——非可选: 缺失则 maker=裸 EOA, 以余额/授权不符被 CLOB 拒单。
+	creds := cfgSDK.Polymarket.CLOBCreds
+	var missing []string
+	if readOnly {
+		missing = append(missing, "POLYMARKET_OWNER_KEY")
 	}
-	log.Printf("[Event] 🎯 触底信号 side=%s rem=%ds fill=%.3f m20=%.2f m30=%.2f m45=%.2f dist_s=%.2f dist_t=%.2f shares=%.1f anchor=%.2f σ=%.2f spot=%.2f",
-		o.Side, o.Rem, o.Fill, o.M20, o.M30, o.M45, o.DistS, o.DistT, o.Shares, o.Anchor, o.HistBps, o.Spot)
-
-	// ── paper / live 降级: 纸面模拟成交（恒 filled）──
-	if rt.Live == nil {
-		if err := rt.Executor.Execute(o); err != nil {
-			log.Printf("[Trading] ⚠️ 信号未执行: %v（仍记录观测）", err)
-		}
-		return done(rt.Recorder.RecordObservation(conditionID, slug, eventStart, o, rt.Stake))
+	if creds == nil || creds.Key == "" || creds.Secret == "" || creds.Passphrase == "" {
+		missing = append(missing, "POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE")
 	}
-
-	// ── live: 风控闸 → 两阶段落盘 → 真实下单回填 ──
-	gate := func(note string) *flip.Record {
-		rec, err := rt.Recorder.RecordLiveRejected(conditionID, slug, eventStart, o, rt.Stake, note)
-		if err != nil {
-			return done(rec, err)
-		}
-		log.Printf("[Trading] ⚠️ 信号被风控闸拦截未下单: %s（rejected 行落盘）", note)
-		return rec
+	if cfgSDK.Polymarket.FunderAddress == "" {
+		missing = append(missing, "POLYMARKET_FUNDER_ADDRESS")
 	}
-	if rt.FirstWindow {
-		return gate("重启后首窗禁单")
+	if len(missing) > 0 {
+		log.Printf("[Trading] ⚠️ -mode live 但凭证缺失（%s）—— 降级纸面执行", strings.Join(missing, ", "))
+		return "paper", flip.NewExecutor("paper")
 	}
-	if today := todaySettledPnl(rt.Recorder); !trading.CanTrade(today, rt.MaxDailyLoss) {
-		return gate(fmt.Sprintf("日亏熔断: 今日已结算 %.2fU ≤ %.2fU", today, rt.MaxDailyLoss))
+	addr := cfgSDK.Polymarket.FunderAddress
+	if len(addr) > 12 {
+		addr = addr[:6] + "…" + addr[len(addr)-4:]
 	}
-
-	// 阶段 1: submitting 行先落盘（POST 后崩溃 → 重启扫描告警人工核对, 不自动补单）
-	sub, err := rt.Recorder.SubmitLiveObservation(conditionID, slug, eventStart, o, rt.Stake)
-	if err != nil {
-		return done(sub, err)
-	}
-	// 买狗侧 token（UP=yes / DOWN=no; 窗口内必有 token, 极端缺失由 Execute 拒单兜底）
-	upTok, downTok := rt.tokens()
-	tokenID := downTok
-	if o.Side == flip.SideYes {
-		tokenID = upTok
-	}
-	start := time.Now()
-	res := rt.Live.Execute(o, tokenID, rt.Stake)
-	// 阶段 2: 回填终态（filled/partial 入 pending → 调用方按 IsFilled 注册结算）
-	rec, _, err := rt.Recorder.CompleteExecution(conditionID, *res)
-	if err != nil {
-		log.Printf("[Trading] ⚠️ 执行回填失败: %v —— submitting 行残留, 重启扫描会告警人工核对", err)
-		return nil
-	}
-	note := ""
-	if res.Note != "" {
-		note = " note=" + res.Note
-	}
-	log.Printf("[Trading] 🎯 live 订单终态: exec=%s order=%s fill=%.3f shares=%.1f cost=%.2f%s（%dms）",
-		res.Status, res.OrderID, res.FillPrice, res.Shares, res.Cost, note, time.Since(start).Milliseconds())
-	if strings.HasPrefix(res.Note, flip.ExecNoteUnknown) {
-		log.Printf("[Trading] ⚠️ 订单结果未知（POST 可能已受理）—— 请按 maker+order=%s 时间窗去 data-api 核对, 勿重复下单", res.OrderID)
-	}
-	return rec
+	log.Printf("[Trading] 🔒 live 就绪: maker=%s（FAK 限价单 @ 触发 ask, 绝不超价; 首窗禁单）", addr)
+	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client})
 }
 
-// todaySettledPnl 返回今日（UTC）已结算 P&L（USDC）——日亏熔断的无状态输入:
-// 每次从 recorder 磁盘真相现算，重启安全、跨 UTC 日自动归零（今日无结算行 = 0）。
-func todaySettledPnl(r *flip.Recorder) float64 {
+// warnLiveStartup 打印 live 启动告警（载入期逐条 ⚠️ 已打, 这里给总量与目录提示;
+// paper 无此语义, 调用点已按 effMode 门控）。
+func warnLiveStartup(r *flip.Recorder) {
+	if n := r.NeedsReconcile(); n > 0 {
+		log.Printf("[Trading] ⚠️ %d 条执行中断记录待人工核对（submitting/未知结果, 见上方逐条告警）—— 勿自动补单, 按 maker+时间窗去 data-api 核对", n)
+	}
+	// 混合目录提示: 当日已有 paper 行（ExecStatus 空）混入会污染信号频率口径与
+	// 日亏现算线——live 建议独立 -output 目录（如 data/v4live）。同日 live 行
+	// （崩溃重启续跑）不算混合。
 	today := time.Now().UTC().Format("2006-01-02")
-	for _, d := range r.DailyPnl() {
-		if d.Date == today {
-			return d.PnL
+	mixed := false
+	for _, rec := range r.Observations() {
+		if rec.Date == today && rec.ExecStatus == "" {
+			mixed = true
+			break
 		}
 	}
-	return 0
+	if mixed {
+		log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（touches_%s.jsonl）—— live 建议独立 -output 目录（如 data/v4live）, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
+	}
+}
+
+// warmupSigma 做 σ 启动预热: 优先本地 windows_*.jsonl（recorder 每窗落盘的
+// |close−anchor|）——「马上重启」场景毫秒级恢复，且与 live push 同源同口径、
+// 零上游 API 压力。
+//
+// 本地可用条件（2026-09-06 review 收紧，防陈旧条目混入）:
+//  1. 最近 ≤flip.HistWindows 窗截到最新一段连续块（flip.RecentBlock）——窗口
+//     结束时刻对齐 5min 边界，相邻条目正常差 300s；σ 新鲜度守卫缺一窗恰差
+//     600s（仍连续）；停机/断档的缺口 ≥3 窗。断档前的条目属更早的波动率
+//     regime（如停机数小时后再跑几窗即崩溃重启），混入会把 σ 尺度拉偏——
+//     只 seed 连续块，其余丢弃;
+//  2. 连续块 ≥ flip.HistMin 窗（不足时本地意义小，走网络拿停机期窗口更接近回测）;
+//  3. 块内最新窗结束距今 ≤ localFreshMax（引擎最近在跑）。
+//
+// 任一不满足即回退官方历史范围网络预热（≤18 窗逐窗间隔 1s ≈ 19s, 接口可能
+// 429 限流丢窗——crypto-price 上游限速, 见 FetchTwapRanges 注释）。
+func warmupSigma(hist *flip.HistState, r *flip.Recorder, client *sdk.PolymarketClient) {
+	seeded := 0
+	if wins := r.RecentWindows(flip.HistWindows); len(wins) > 0 {
+		if block := flip.RecentBlock(wins, int64(2*windowSec*1000)); len(block) >= flip.HistMin &&
+			time.Since(time.UnixMilli(block[len(block)-1].Ts)) <= localFreshMax {
+			amps := make([]float64, len(block))
+			for i := range block {
+				amps[i] = block[i].Amp
+			}
+			hist.Seed(amps)
+			seeded = len(block)
+			log.Printf("[Cycle] σ 本地预热: %d 窗（%s ~ %s）",
+				len(block),
+				time.UnixMilli(block[0].Ts).UTC().Format("15:04:05"),
+				time.UnixMilli(block[len(block)-1].Ts).UTC().Format("15:04:05"))
+		}
+	}
+	if seeded == 0 {
+		go func() {
+			log.Printf("[Cycle] σ 网络预热: 本地窗口不足/断档/陈旧，拉取官方 TWAP 历史范围（≤%d 窗）...", flip.HistWindows)
+			vals := feed.FetchTwapRanges(client, flip.HistWindows, windowSec, twapLookbackSeconds)
+			hist.Seed(vals)
+			log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
+		}()
+	}
 }
 
 // defaultSDKConfig 构造 SDK 配置（环境变量覆盖）。

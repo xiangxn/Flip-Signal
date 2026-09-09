@@ -60,16 +60,18 @@
 ```
 FlipSignal/
 ├── cmd/flip/                         # 策略引擎主入口（纸面/实盘同源，-mode 切换）
-│   ├── main.go                       # 窗口循环/数据源接线/anchor σ/触发即执行记录
-│   ├── pmtick.go                     # PM 盘口采样 + token 解析（main 私有 helper）
-│   └── pmtick_test.go
+│   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件, 其余下沉 internal）
 ├── internal/
-│   ├── flip/
+│   ├── flip/                         # 引擎核心层（零外部依赖, 可独立测试）
 │   │   ├── types.go                  # Config + Tick/Observation/Record + 状态枚举
 │   │   ├── engine.go                 # 状态机: Watching → Done（触底观测/四腿判定）
-│   │   ├── exec.go                   # Executor 接口 + PaperExecutor（live 留接口）
+│   │   ├── exec.go                   # Executor 接口 + PaperExecutor（live 实现由 trading 注入）
+│   │   ├── exec_state.go             # ExecState 编排: paper 单步 / live 闸+submitting 两阶段 → 统一 Execute
 │   │   ├── recorder.go               # JSONL 观测记录 + windows_* 窗口振幅日志（按日切分）+ P&L 回填
-│   │   └── engine_test.go / recorder_test.go
+│   │   ├── risk.go                   # CanTrade 日亏熔断判定
+│   │   ├── sigma.go                  # HistState（σ 滚动窗）+ RecentBlock 截断纯函数 + AnchorUsableAtBoundary
+│   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
+│   │   └── *_test.go                 # engine/recorder/exec_state/risk/anchor/preheat + mirrorcheck 镜像回归
 │   ├── dashboard/
 │   │   ├── server.go                 # HTTP server（go:embed static/）
 │   │   ├── handlers.go               # /api/state, /api/observations, /api/signals, /api/config
@@ -77,8 +79,10 @@ FlipSignal/
 │   │   └── static/                   # index.html, app.js, style.css（兼容手机浏览器）
 │   ├── feed/
 │   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
+│   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
 │   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热
-│   └── trading/
+│   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 构造注入）
+│       ├── live_executor.go          # LiveExecutor 真实 FAK 下单（实现 flip.Executor, 唯一 POST 点）
 │       └── resolution_poller.go      # 官方结算轮询（gamma umaResolutionStatus）
 ├── docs/                             # 策略文档（v4 方案/口径映射）
 ├── python/
@@ -89,7 +93,8 @@ FlipSignal/
 ```
 
 **已删除（v4 清理，v3 分支保留可复活）**：cmd/collect、cmd/compact、internal/collect
-（数据采集管线——引擎所需盘口工具已内置 pmtick.go）；internal/feed/orderbook_adapter.go；
+（数据采集管线整体移除——引擎所需盘口采样/token 解析见 internal/feed/pmtick.go）；
+internal/feed/orderbook_adapter.go；
 twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-31 flip 文档。
 
 ---
@@ -188,7 +193,7 @@ replace (
 
 ### 测试
 ```bash
-go test ./internal/flip/ ./internal/trading/ ./cmd/flip/ -v   # 引擎/记录器/盘口工具
+go test ./internal/flip/ ./internal/feed/ ./internal/trading/ -v   # 引擎/编排/记录器/盘口工具/结算轮询
 go build ./...                         # 全量编译检查
 go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
 ```
@@ -224,7 +229,7 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
    混入），连续块 ≥histMin 窗且最新窗距现在 ≤localFreshMax(15min) 才本地
    seed（「马上重启」毫秒级恢复、零上游 API 压力、与 live push 同源口径），
    否则回退官方 FetchTwapRanges 网络预热（停机期窗口本地没有，只有官方接口
-   能取）。截断决策为纯函数 `recentBlock`（cmd/flip，table 测试）。
+   能取）。截断决策为纯函数 `RecentBlock`（internal/flip/sigma.go，table 测试）。
 
 ---
 

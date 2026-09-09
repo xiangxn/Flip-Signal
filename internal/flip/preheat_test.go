@@ -1,19 +1,17 @@
-package main
+package flip
 
-// recentBlock 纯函数测试: 从窗口振幅日志截最新一段连续块（断档/缺窗容忍）。
+// RecentBlock 纯函数测试: 从窗口振幅日志截最新一段连续块（断档/缺窗容忍）。
 // 时间单位毫秒: 正常窗间隔 300s=300000ms, 缺一窗 600000ms 仍连续, >600000ms 断档。
 
 import (
 	"reflect"
 	"testing"
-
-	"github.com/necklace/flip-signal/internal/flip"
 )
 
-func ws(tsMs ...int64) []flip.WindowEntry {
-	out := make([]flip.WindowEntry, 0, len(tsMs))
+func ws(tsMs ...int64) []WindowEntry {
+	out := make([]WindowEntry, 0, len(tsMs))
 	for _, ts := range tsMs {
-		out = append(out, flip.WindowEntry{Ts: ts})
+		out = append(out, WindowEntry{Ts: ts})
 	}
 	return out
 }
@@ -22,7 +20,7 @@ func TestRecentBlock(t *testing.T) {
 	gap := int64(2 * 300 * 1000) // 600s
 	cases := []struct {
 		name string
-		in   []flip.WindowEntry
+		in   []WindowEntry
 		want []int64 // 期望保留条目的 ts
 	}{
 		{name: "空列表", in: nil, want: nil},
@@ -36,13 +34,13 @@ func TestRecentBlock(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := recentBlock(c.in, gap)
+			got := RecentBlock(c.in, gap)
 			var gotTs []int64
 			for _, e := range got {
 				gotTs = append(gotTs, e.Ts)
 			}
 			if !reflect.DeepEqual(gotTs, c.want) {
-				t.Fatalf("recentBlock = %v, 期望保留 %v", gotTs, c.want)
+				t.Fatalf("RecentBlock = %v, 期望保留 %v", gotTs, c.want)
 			}
 		})
 	}

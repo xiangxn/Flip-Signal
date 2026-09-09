@@ -1,4 +1,4 @@
-package main
+package flip_test
 
 // 临时诊断测试（2026-09-03）: 将 data/btc 的 3640 个回测事件逐 tick 喂给
 // Go flip.Engine，与 python/v4/01_backtest_r1.py extract+rules 的参考表
@@ -6,7 +6,7 @@ package main
 // 目的: 决定性验证 Go 判定链与回测逻辑是否 1:1 —— 若 Go 存在"检查 yes
 // 方向即放弃 no 方向"之类逻辑 bug，同数据镜像必然出现 side/ok 差异。
 //
-// 运行: go test ./cmd/flip -run TestMirrorBacktest -v   （依赖 /tmp/mirror_ref.json）
+// 运行: go test ./internal/flip -run TestMirrorBacktest -v   （依赖 /tmp/mirror_ref.json）
 
 import (
 	"encoding/json"
@@ -116,7 +116,7 @@ func TestMirrorBacktest(t *testing.T) {
 	// go test 二进制运行于沙箱，data/btc 读取被拒（ENOENT），
 	// 事件镜像副本放 /tmp/mirror_btc（参考表 /tmp/mirror_ref.json 同法）
 	wd, _ := os.Getwd()
-	candidates := []string{"/tmp/mirror_btc", filepath.Join(wd, "..", "..", "data", "btc")}
+	candidates := []string{"/tmp/mirror_btc", filepath.Join(wd, "..", "..", "..", "data", "btc")}
 	var evs []*mEvent
 	for _, dir := range candidates {
 		_, err := os.Stat(dir)

@@ -12,16 +12,18 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
-// LiveTrader 执行 live 信号下单: FAK 限价单 @ 触发 ask（绝不超价）→ 同步 POST →
-// 解析成交结果回 ExecResult。两阶段落盘/风控闸由 cmd/flip main 编排, 本类型
-// 只负责「构造订单 → 提交 → 解析终态」, 不含记录器与重试（FAK 一次即终态）。
-type LiveTrader struct {
+// LiveExecutor 是 live 版 flip.Executor（纸面/实盘同一契约, 见 internal/flip/
+// exec.go——main 单点经接口调用, 本实现与 flip.PaperExecutor 互换）:
+// FAK 限价单 @ 触发 ask（绝不超价）→ 同步 POST → 解析成交结果回 ExecResult。
+// 两阶段落盘/风控闸由 cmd/flip main 编排, 本类型只负责「构造订单 → 提交 →
+// 解析终态」, 不含记录器与重试（FAK 一次即终态）。
+type LiveExecutor struct {
 	client TradeClient
 }
 
-// NewLiveTrader 构造执行器（client 为 SdkClient 或测试 fake）。
-func NewLiveTrader(client TradeClient) *LiveTrader {
-	return &LiveTrader{client: client}
+// NewLiveExecutor 构造执行器（client 为 SdkClient 或测试 fake）。
+func NewLiveExecutor(client TradeClient) *LiveExecutor {
+	return &LiveExecutor{client: client}
 }
 
 // Execute 对一个 ok 观测发起一笔 FAK 限价买单（买狗侧 token 本身:
@@ -33,7 +35,7 @@ func NewLiveTrader(client TradeClient) *LiveTrader {
 //     订单可能已被受理——重启扫描人工核对, 不自动补单）
 //   - unfilled（status 确认 0 成交, order_id 留档）
 //   - filled/partial（sanity 校验通过的成交, Shares/Cost/FillPrice 为实际值）
-func (t *LiveTrader) Execute(o *flip.Observation, tokenID string, stake float64) *flip.ExecResult {
+func (t *LiveExecutor) Execute(o *flip.Observation, tokenID string, stake float64) *flip.ExecResult {
 	start := time.Now()
 	reject := func(note string) *flip.ExecResult {
 		return &flip.ExecResult{Status: flip.ExecStatusRejected, Note: note}
@@ -80,7 +82,7 @@ func (t *LiveTrader) Execute(o *flip.Observation, tokenID string, stake float64)
 // 服务端明确拒绝, 订单不可能被受理, 记 rejected（note 带状态与 body 片段）;
 // 其余（超时/断连/5xx 无 body 语义）订单是否受理未知 → ExecNoteUnknown 标记,
 // 载入/重启扫描判据（main 侧 NeedsReconcile 汇总, 人工核对）。
-func (t *LiveTrader) postErr(err error, since time.Duration) *flip.ExecResult {
+func (t *LiveExecutor) postErr(err error, since time.Duration) *flip.ExecResult {
 	msg := strings.TrimSpace(err.Error())
 	if strings.HasPrefix(msg, "API request failed with status 4") {
 		return &flip.ExecResult{Status: flip.ExecStatusRejected, Note: shortMsg(msg, 400)}
@@ -208,3 +210,7 @@ func shortMsg(s string, n int) string {
 
 // SdkClient 编译期接口断言（确保适配器实现 TradeClient）。
 var _ TradeClient = (*SdkClient)(nil)
+
+// 编译期断言: LiveExecutor 满足 flip.Executor 契约（与 flip.PaperExecutor 同形,
+// main 经接口单点调用 Execute, paper/live 不散落两条调用路径）。
+var _ flip.Executor = (*LiveExecutor)(nil)

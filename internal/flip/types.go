@@ -140,7 +140,7 @@ const (
 // 不属此类。
 const ExecNoteUnknown = "未知结果"
 
-// ExecResult 是一次实盘下单的终态结果（internal/trading LiveTrader.Execute 产出,
+// ExecResult 是一次实盘下单的终态结果（internal/trading LiveExecutor.Execute 产出,
 // Recorder.CompleteExecution 消费回填）。纯数据类型放 flip: recorder 侧引用无需
 // 反向依赖 trading（trading→flip 单向, 无环）。
 type ExecResult struct {

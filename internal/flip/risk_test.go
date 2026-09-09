@@ -1,4 +1,4 @@
-package trading
+package flip
 
 import "testing"
 

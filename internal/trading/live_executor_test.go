@@ -120,11 +120,11 @@ func TestParseFill(t *testing.T) {
 	}
 }
 
-// ── LiveTrader.Execute 全链路 ──
+// ── LiveExecutor.Execute 全链路 ──
 
 func TestExecuteFilled(t *testing.T) {
 	fc := &fakeClient{postResp: parseJSON(`{"success":true,"orderID":"o-live","status":"matched","takingAmount":"10.52","makingAmount":"1.9988"}`)}
-	tr := NewLiveTrader(fc)
+	tr := NewLiveExecutor(fc)
 	res := tr.Execute(mkExecObs(0.19), "tok-up", 2)
 
 	if res.Status != flip.ExecStatusFilled || res.OrderID != "o-live" {
@@ -141,34 +141,34 @@ func TestExecuteFilled(t *testing.T) {
 func TestExecuteRejections(t *testing.T) {
 	// token 空
 	fc := &fakeClient{}
-	res := NewLiveTrader(fc).Execute(mkExecObs(0.19), "", 2)
+	res := NewLiveExecutor(fc).Execute(mkExecObs(0.19), "", 2)
 	if res.Status != flip.ExecStatusRejected {
 		t.Fatalf("token 空应 rejected: %+v", res)
 	}
 	// 规格错误（fill 非法）
-	res = NewLiveTrader(fc).Execute(&flip.Observation{Fill: 0}, "tok", 2)
+	res = NewLiveExecutor(fc).Execute(&flip.Observation{Fill: 0}, "tok", 2)
 	if res.Status != flip.ExecStatusRejected {
 		t.Fatalf("规格错应 rejected: %+v", res)
 	}
 	// CreateOrder 失败
-	res = NewLiveTrader(&fakeClient{createErr: errors.New("签名失败")}).Execute(mkExecObs(0.19), "tok", 2)
+	res = NewLiveExecutor(&fakeClient{createErr: errors.New("签名失败")}).Execute(mkExecObs(0.19), "tok", 2)
 	if res.Status != flip.ExecStatusRejected || strings.HasPrefix(res.Note, flip.ExecNoteUnknown) {
 		t.Fatalf("CreateOrder 失败应明确 rejected: %+v", res)
 	}
 	// CLOB 明确拒单（HTTP 4xx, SDK 返回 error）
 	httpErr := errors.New("API request failed with status 400: {\"errorMsg\":\"not enough balance\"}")
-	res = NewLiveTrader(&fakeClient{postErr: httpErr}).Execute(mkExecObs(0.19), "tok", 2)
+	res = NewLiveExecutor(&fakeClient{postErr: httpErr}).Execute(mkExecObs(0.19), "tok", 2)
 	if res.Status != flip.ExecStatusRejected || strings.HasPrefix(res.Note, flip.ExecNoteUnknown) {
 		t.Fatalf("4xx 应明确 rejected: %+v", res)
 	}
 	// 传输错误/超时（结果不明）→ ExecNoteUnknown 前缀
-	res = NewLiveTrader(&fakeClient{postErr: errors.New("Post \"https://clob...\": context deadline exceeded")}).Execute(mkExecObs(0.19), "tok", 2)
+	res = NewLiveExecutor(&fakeClient{postErr: errors.New("Post \"https://clob...\": context deadline exceeded")}).Execute(mkExecObs(0.19), "tok", 2)
 	if res.Status != flip.ExecStatusRejected || !strings.HasPrefix(res.Note, flip.ExecNoteUnknown) {
 		t.Fatalf("超时应标记未知结果: %+v", res)
 	}
 	// success=false（HTTP <400 的拒单响应）
 	fc2 := &fakeClient{postResp: parseJSON(`{"success":false,"errorMsg":"order size too small"}`)}
-	res = NewLiveTrader(fc2).Execute(mkExecObs(0.19), "tok", 2)
+	res = NewLiveExecutor(fc2).Execute(mkExecObs(0.19), "tok", 2)
 	if res.Status != flip.ExecStatusRejected || strings.Contains(res.Note, "未知结果") {
 		t.Fatalf("success=false 应明确 rejected: %+v", res)
 	}
@@ -176,7 +176,7 @@ func TestExecuteRejections(t *testing.T) {
 
 func TestExecuteUnfilled(t *testing.T) {
 	fc := &fakeClient{postResp: parseJSON(`{"success":true,"orderID":"o-none","status":"unmatched"}`)}
-	res := NewLiveTrader(fc).Execute(mkExecObs(0.19), "tok", 2)
+	res := NewLiveExecutor(fc).Execute(mkExecObs(0.19), "tok", 2)
 	if res.Status != flip.ExecStatusUnfilled || res.OrderID != "o-none" {
 		t.Fatalf("Execute: %+v", res)
 	}

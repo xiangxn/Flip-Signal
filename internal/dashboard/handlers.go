@@ -50,7 +50,7 @@ type stateResponse struct {
 	MaxDrawdown      float64 `json:"max_drawdown"` // 累计 P&L 最大回撤（USDC）
 
 	// live 执行摘要（mode=paper 恒 nil, 前端判空隐藏）
-	LiveExec *LiveExec `json:"live,omitempty"`
+	LiveExec *flip.LiveExec `json:"live,omitempty"`
 }
 
 // recordResponse 是 /api/observations 与 /api/signals 的元素。
@@ -227,7 +227,7 @@ func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 // ── 内部 ──
 
 // remaining 计算当前窗口剩余秒（未到窗口起点或已结束为 0）。
-func (s *State) remaining(live LiveSnapshot) int {
+func (s *State) remaining(live flip.LiveSnapshot) int {
 	if live.EventStart == 0 {
 		return 0
 	}

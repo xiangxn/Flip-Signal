@@ -1,4 +1,4 @@
-package main
+package feed
 
 import (
 	"testing"
@@ -42,12 +42,12 @@ func TestBestPrices(t *testing.T) {
 	}
 }
 
-// TestMakePMTick 四价 + 延迟取两簿较大者。
-func TestMakePMTick(t *testing.T) {
+// TestNewPMTick 四价 + 延迟取两簿较大者。
+func TestNewPMTick(t *testing.T) {
 	up := book([]float64{0.2, 0.7, 0.9}, []float64{0.99, 0.6, 0.5}, 12)
 	down := book([]float64{0.05, 0.08}, []float64{0.99, 0.9, 0.88}, 25)
 
-	pm := makePMTick(up, down)
+	pm := NewPMTick(up, down)
 	if pm.UpBid != 0.9 || pm.UpAsk != 0.5 || pm.DownBid != 0.08 || pm.DownAsk != 0.88 {
 		t.Fatalf("四价 = %v/%v/%v/%v", pm.UpBid, pm.UpAsk, pm.DownBid, pm.DownAsk)
 	}
@@ -56,7 +56,7 @@ func TestMakePMTick(t *testing.T) {
 	}
 
 	// down 簿缺失: 对应价格 0、延迟只计 up
-	pm2 := makePMTick(up, nil)
+	pm2 := NewPMTick(up, nil)
 	if pm2.DownBid != 0 || pm2.DownAsk != 0 || pm2.BookLatMs != 12 {
 		t.Fatalf("单簿缺失: %+v", pm2)
 	}
@@ -68,7 +68,7 @@ func TestParseMarketTokens(t *testing.T) {
 		for _, dn := range []string{"Down", "No"} {
 			j := `{"clobTokenIds":"[\"1111\",\"2222\"]","outcomes":"[\"` + oc + `\",\"` + dn + `\"]"}`
 			res := gjson.Parse(j)
-			up, down := parseMarketTokens(&res)
+			up, down := ParseMarketTokens(&res)
 			if up != "1111" || down != "2222" {
 				t.Fatalf("%s/%s: up/down = %s/%s, 期望 1111/2222", oc, dn, up, down)
 			}
@@ -78,7 +78,7 @@ func TestParseMarketTokens(t *testing.T) {
 	// 长度不匹配时缺侧返回空串（调用方据此跳过窗口）
 	j := `{"clobTokenIds":"[\"1111\"]","outcomes":"[\"Up\",\"Down\"]"}`
 	res := gjson.Parse(j)
-	up, down := parseMarketTokens(&res)
+	up, down := ParseMarketTokens(&res)
 	if up != "1111" || down != "" {
 		t.Fatalf("缺 token 时 up/down = %s/%s, 期望 1111/空", up, down)
 	}

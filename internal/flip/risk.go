@@ -1,4 +1,4 @@
-package trading
+package flip
 
 // CanTrade 日亏熔断闸（纯函数）: 当日已结算 P&L ≤ maxDailyLoss 即停单。
 //

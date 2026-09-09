@@ -1,13 +1,14 @@
-package main
+package feed
 
 import (
 	"github.com/tidwall/gjson"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 )
 
-// pmTick 是一秒一条的 PM 盘口采样（flip.Tick 的盘口部分）。
-// 引擎包零外部依赖：SDK 类型只在 main 层出现，经 makePMTick 转纯数值喂入。
-type pmTick struct {
+// PMTick 是一秒一条的 PM 盘口采样（flip.Tick 的盘口部分）。
+// SDK 类型只在行情适配层（本包）出现，经 NewPMTick 转纯数值喂给引擎
+// （internal/flip 零外部依赖, 见 cmd/flip sampleTick 组装 flip.Tick）。
+type PMTick struct {
 	UpBid     float64 // UP(=yes) 最优买价
 	UpAsk     float64 // UP(=yes) 最优卖价
 	DownBid   float64 // DOWN(=no) 最优买价
@@ -35,10 +36,10 @@ func bestAsk(book *sdk.OrderBook) float64 {
 	return book.Asks[len(book.Asks)-1].Price
 }
 
-// makePMTick 从 UP/DOWN 订单簿构造 1s 盘口采样（传输延迟取两簿较大者；
+// NewPMTick 从 UP/DOWN 订单簿构造 1s 盘口采样（传输延迟取两簿较大者；
 // 单簿为空时对应价格字段为 0，由引擎侧判缺失）。
-func makePMTick(upBook, downBook *sdk.OrderBook) pmTick {
-	t := pmTick{
+func NewPMTick(upBook, downBook *sdk.OrderBook) PMTick {
+	t := PMTick{
 		UpBid:     bestBid(upBook),
 		UpAsk:     bestAsk(upBook),
 		DownBid:   bestBid(downBook),
@@ -54,11 +55,11 @@ func makePMTick(upBook, downBook *sdk.OrderBook) pmTick {
 	return t
 }
 
-// parseMarketTokens 从 gamma 市场 JSON 解析 UP/DOWN token ID。
+// ParseMarketTokens 从 gamma 市场 JSON 解析 UP/DOWN token ID。
 //
 // outcomes 约定 [0]=Up [1]=Down（与 Python 侧一致），clobTokenIds 与之对齐；
 // 支持 "Up"/"Yes"、"Down"/"No" 两种 outcome 命名。未找到时返回空串。
-func parseMarketTokens(data *gjson.Result) (upTokenID, downTokenID string) {
+func ParseMarketTokens(data *gjson.Result) (upTokenID, downTokenID string) {
 	clobRaw := data.Get("clobTokenIds").String()
 	var tokenIDs []string
 	for _, v := range gjson.Parse(clobRaw).Array() {
