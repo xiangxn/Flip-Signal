@@ -20,10 +20,16 @@ v4 纸面记录对账与口径复核（dog@0.2 组合版侧别带——2026-09-0
 起点 unix 秒）——不用 rem（live 与数据有 ±1-2 tick 相位差, 见口径文档 §3）。
 
 用法: python 02_paper_compare.py [--data <dir>] [--btcsv trades_r1_combo.csv]
+                                 [--include-gated]
+
+⚠️ 风控闸（2026-09-16 起）: gate_reason 非空的行（daily_loss/first_window）是
+「纸面照记照结算、实盘不会开」的信号（方案 A, docs §3.5/§3.7）——默认排除,
+否则信号量与 P&L 会混入未成交行。--include-gated 恢复旧口径作对照。
 """
 import argparse
 import json
 import sys
+from collections import Counter
 from pathlib import Path
 
 import numpy as np
@@ -91,15 +97,25 @@ def main():
                     help="引擎 touches_*.jsonl 目录")
     ap.add_argument("--btcsv", default=str(BASE / "data" / "trades_r1_combo.csv"),
                     help="回测逐笔 CSV（对照口径用 = 组合版明细, 可不存在）")
+    ap.add_argument("--include-gated", action="store_true",
+                    help="不排除风控闸拦截行（gate_reason 非空; 默认排除, docs §3.7）")
     args = ap.parse_args()
 
     rows = load_records(args.data)
+    gated = [r for r in rows if r.get("gate_reason")]
+    if gated and not args.include_gated:
+        rows = [r for r in rows if not r.get("gate_reason")]
     df = pd.DataFrame(rows)
     df = df.sort_values("ts").reset_index(drop=True)
     df["date"] = df["date"].astype(str)
     df["event_ts"] = df["event_start"].astype(int) * 1000  # 对账键（毫秒）
 
     print(f"纸面记录 {args.data}: 观测 {len(df)} 行 / {df['date'].nunique()} 天")
+    if gated:
+        by = Counter(r.get("gate_reason") for r in gated)
+        print(f"  风控闸被闸行 {len(gated)} 行（{dict(by)}）: "
+              f"{'已计入（--include-gated）' if args.include_gated else '已排除'}"
+              f"——实盘不会开这一笔（方案 A, docs §3.5/§3.7）")
 
     # 1) 信号口径复核: 重判 vs ok 列（应恒等; 输入缺失时重判为 None 不比对）
     j = df["ok"].map({True: 1, False: 0}).astype(float)

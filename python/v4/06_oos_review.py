@@ -11,6 +11,10 @@ docs/dog020_oos_review_2026-09-15.md §5(A 层)/§4(B 层)/§6(C 层) 固定格�
 用法:
   python3 06_oos_review.py                          # 主窗口
   python3 06_oos_review.py --from 2026-09-03 --to 2026-09-15   # 含 09-03 残日
+  python3 06_oos_review.py --include-gated          # 不排除日亏熔断被闸行
+
+⚠️ 风控闸（2026-09-16 起）: gate_reason 非空的行是「纸面照记照结算、但实盘那一笔
+不会开」的信号（方案 A, docs §3.5/§3.7）——默认排除, 否则 P&L 会混入未成交行。
 """
 import argparse
 import datetime as dt
@@ -104,17 +108,26 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--from", dest="frm", default="2026-09-04", help="起始 UTC 日（含）")
     ap.add_argument("--to", dest="to", default="2026-09-16", help="结束 UTC 日（不含）")
+    ap.add_argument("--include-gated", action="store_true",
+                    help="不排除风控闸拦截行（gate_reason 非空; 默认排除, docs §3.7）")
     args = ap.parse_args()
 
     rows = load(args.frm, args.to)
     days = sorted({r["date"] for r in rows})
     obs = len(rows)
-    sig = [r for r in rows if r.get("ok")]
+    # 风控闸被闸行（方案 A: 纸面照记照结算, 实盘不会开这一笔）——默认排除, 只用它
+    # 报告剔除量; 观测级统计（触底/日、reject 分流、口径复核）仍看全量, 保持可比
+    gated = [r for r in rows if r.get("gate_reason")]
+    sig = [r for r in rows if r.get("ok") and (args.include_gated or not r.get("gate_reason"))]
     settled = [r for r in sig if r.get("won") is not None]
     pending = len(sig) - len(settled)
 
     print("=" * 78)
     print(f"统计窗 {args.frm} 00:00 UTC → {args.to} 00:00 UTC  ({len(days)} 日)")
+    if gated:
+        g = sorted({r["date"] for r in gated})
+        print(f"被闸行 {len(gated)} 笔（{g[0]}~{g[-1]}）: "
+              f"{'已计入（--include-gated）' if args.include_gated else '已排除'}")
     print("=" * 78)
 
     # ---------------- §5 A 层：口径与运行完整性（前置闸门） ----------------
