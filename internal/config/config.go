@@ -123,7 +123,7 @@ func defaults() *AppConfig {
 			DashboardAddr: "", // 留空 = 不启动 Dashboard（保持 v4 现状; master 默认 :8090）
 			SlugPrefix:    "btc-updown-5m",
 		},
-		Flip: flip.DefaultConfig(), // 策略参数单一真相（含 MaxBookLatMs=300）, 见 internal/flip/types.go
+		Flip: flip.DefaultConfig(), // 策略参数单一真相（含 MaxBookLatMs=300）, 见 internal/flip/config.go
 		Feed: FeedConfig{
 			// spot 2s: BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻
 			// 而非交易所成交时间戳（链路排队/服务器时钟都会让后者失真，见 BinanceAdapter）。
