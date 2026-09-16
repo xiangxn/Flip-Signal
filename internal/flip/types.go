@@ -65,6 +65,11 @@ type Config struct {
 	RemMin int
 	// 每信号投入 USDC（2）
 	Stake float64
+	// 盘口延迟闸: BookLatMs > 此值 的 tick 无效（300, 回测 MAX_LAT）。
+	// 2026-09-16 由包内常量改为配置（--max-book-lat-ms）——默认值不变，
+	// 配置化的意义是「能调」而非「该调」: 14 天回测按阈值重算，
+	// 300ms 在平台期上，往下收紧单调变差（T=20ms EV +0.633→+0.551）。
+	MaxBookLatMs int64
 }
 
 // DefaultConfig 返回回测标定的默认参数（python/v4/01_backtest_r1.py）:
@@ -80,6 +85,7 @@ func DefaultConfig() Config {
 		DistHi:        0.0,  // 浅洞带上界: dist_s<0 = 现货须在狗败侧（方向约束）
 		RemMin:        180,  // 窗口前 2 分钟内才观测
 		Stake:         2,    // 每笔 2 USDC
+		MaxBookLatMs:  300,  // 盘口延迟闸（回测 MAX_LAT=300，见 Config 注释）
 	}
 }
 
@@ -114,8 +120,9 @@ type Tick struct {
 	UpAsk     float64 // UP(=yes) 最优卖价
 	DownBid   float64 // DOWN(=no) 最优买价
 	DownAsk   float64 // DOWN(=no) 最优卖价
-	BookLatMs int64   // 盘口传输延迟（毫秒，>300 视为无效 tick）
+	BookLatMs int64   // 盘口传输延迟（毫秒，> Config.MaxBookLatMs 视为无效 tick）
 	BinPrice  float64 // Binance BTCUSDT 最新 @trade 价（≤0 = 缺失/陈旧）
+	SpotAgeMs int64   // spot 距本地接收毫秒数（-1 = 尚无推送; 诊断，不参与判定）
 	TwapPrice float64 // Chainlink TWAP-60 现值（≤0 = 缺失；dist_t 观察腿输入）
 	TwapAgeMs int64   // TWAP 距上次推送毫秒数（诊断）
 }
@@ -175,9 +182,14 @@ type Observation struct {
 
 	// 浅洞腿决策原始输入（2026-09-03 起落盘，诊断 anchor/σ/spot 口径差与
 	// yes/no 进带率漂移用；0 = 该输入当时缺失，与 reject_reason 呼应）
-	Anchor    float64 `json:"anchor"`     // 本窗 anchor = 边界 TWAP-60 流值（USD）
-	HistBps   float64 `json:"hist_bps"`   // σ（bps）: 前 ≤18 已完窗 |close−open| 均值（0 = 不足 3 窗）
-	Spot      float64 `json:"spot"`       // 触底 tick Binance BTCUSDT 价（0 = 缺失/陈旧 >2s）
+	Anchor  float64 `json:"anchor"`   // 本窗 anchor = 边界 TWAP-60 流值（USD）
+	HistBps float64 `json:"hist_bps"` // σ（bps）: 前 ≤18 已完窗 |close−open| 均值（0 = 不足 3 窗）
+	Spot    float64 `json:"spot"`     // 触底 tick Binance BTCUSDT 价（0 = 缺失/陈旧 >2s）
+	// 触底 tick 的 spot 本地接收龄（毫秒，-1 = 尚无推送）。2026-09-16 补: 此前只落
+	// spot 价格不落年龄，0.1s 与 1.9s（亚阈值陈旧）在数据里无从区分——而触发点正是
+	// 急动点（崩盘秒 1s 位移可达 0.8~1.6σ，yes 侧浅洞带总宽仅 0.6σ），陈旧足以把
+	// 一笔单从带内推到带外。纯诊断，不参与判定（口径见 docs/dog020_risk_latency_plan_2026-09-16.md §2.3）
+	SpotAgeMs int64   `json:"spot_age_ms,omitempty"`
 	TwapPrice float64 `json:"twap_price"` // 触底 tick TWAP-60 流值（dist_t 观察腿输入）
 }
 

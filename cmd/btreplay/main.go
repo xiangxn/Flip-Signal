@@ -42,7 +42,7 @@ type rawTick struct {
 		NoAsk         float64 `json:"no_ask"`
 		BookLatencyMs float64 `json:"book_latency_ms"`
 	} `json:"pm"`
-	Bin  *struct {
+	Bin *struct {
 		Price float64 `json:"price"`
 	} `json:"bin"`
 	Twap *struct {
@@ -178,6 +178,9 @@ func main() {
 	fmt.Fprintln(bw, "date\tevent_start\tside\trem\tfill\tm_20\tm_30\tm_45\tdist_s\tdist_t\tsettle_won")
 
 	cfg := flip.DefaultConfig() // 组合带 yes(−0.6,0)+no(−1,0) = 引擎现行
+	// 延迟闸钉死 300（= 回测 MAX_LAT）: 本工具的职责是与 01_backtest_r1.py 逐位
+	// 对账，阈值必须跟随回测常量而非 cmd/flip 的 flag（2026-09-16 配置化后显式声明）
+	cfg.MaxBookLatMs = 300
 	nOk, nWin := 0, 0
 	pnlSum := 0.0
 	sideCnt := map[string]int{}

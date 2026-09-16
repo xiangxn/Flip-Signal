@@ -58,25 +58,27 @@ const prefetchLead = 20 * time.Second
 // 防假截断（迟到 ≤15s 时 45 槽窗仍基本完整，与回测 ±1-2 tick 相位差同级）。
 const lateLimit = 15 * time.Second
 
-// spotFreshMs 是 Binance spot 新鲜度阈值: 距本地接收 >此毫秒判现货缺失。
-// BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻而非
-// 交易所成交时间戳（链路排队/服务器时钟都会让后者失真，见 BinanceAdapter）。
-const spotFreshMs = 2000
-
 // twapMaxStale 是 TWAP 推送新鲜度阈值: 超过该时长未收到推送则重建订阅
 // （2026-09-01 服务器实测断流事件，TwapAdapter 内建看门狗，见其注释）。
 const twapMaxStale = 2 * time.Minute
 
-// twapCloseFreshMs 是 TWAP 采样的新鲜度上限（毫秒）: 超过判为断流陈旧。
-// 窗口起/止两处采样共用同一阈值（2026-09-09 review 起 anchor 也受守卫）:
-//  1. 窗口结束 σ push: 陈旧 close 会把假振幅污染进其后 18 窗的 σ 尺度，
-//     进而扭曲浅洞带判定（缺一窗可接受——本阈值原始依据，见下方注释）;
-//  2. 窗口起点 anchor（main 步骤 5 守卫）: 陈旧 anchor 会让整窗 dist_s 相对
-//     错锚失真——超龄按锚缺失整窗跳过（镜像回测 :69 语义）。
+// 数据源新鲜度默认阈值（2026-09-16 由包内常量改为 flag；默认值 = 原常量值，
+// 行为中性——见 docs/dog020_risk_latency_plan_2026-09-16.md §2.2）:
 //
-// 2min 看门狗重建线太粗，够不到数秒~分钟的推送缺口（data/v4 实测曾现 55s 缺口）；
-// 正常推送龄 p99≈1.7s（119 行记录），10s 余量充足。
-const twapCloseFreshMs = 10_000
+//   - spot 2s: Binance spot 距本地接收 >此值判现货缺失（置 0 → missing_spot 否决）。
+//     BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻而非交易所
+//     成交时间戳（链路排队/服务器时钟都会让后者失真，见 BinanceAdapter）。
+//   - TWAP 10s: 窗口起/止两处采样共用——① 窗口结束 σ push（陈旧 close 会把假振幅
+//     污染进其后 18 窗的 σ 尺度，进而扭曲浅洞带判定）; ② 窗口起点 anchor（陈旧
+//     anchor 让整窗 dist_s 相对错锚失真，超龄按锚缺失整窗跳过，镜像回测 :69）。
+//     2min 看门狗重建线太粗，够不到数秒~分钟的推送缺口（实测曾现 55s 缺口）；
+//     正常推送龄 p99≈1.7s，10s 余量充足。
+const (
+	spotFreshMsDefault  int64 = 2000
+	twapFreshMsDefault  int64 = 10_000
+	maxBookLatMsDefault int64 = 300
+	maxDailyLossDefault       = -24
+)
 
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
 const twapLookbackSeconds = 60
@@ -112,11 +114,28 @@ func main() {
 	distHi := flag.Float64("dist-hi", 0.0, "浅洞带上界: dist_s 必须 < 此值（开区间）")
 	remMin := flag.Int("rem-min", 180, "时间腿: 仅 rem > 此值的触发有效")
 	stake := flag.Float64("stake", 2, "每信号投入 USDC")
-	maxDailyLoss := flag.Float64("max-daily-loss", -20, "live 日亏熔断线: 当日已结算 P&L ≤ 此值 停单（无状态现算, paper 无效）")
+	maxDailyLoss := flag.Float64("max-daily-loss", maxDailyLossDefault, "日亏熔断线: 当日(UTC)已结算 P&L ≤ 此值 停单（负值；两模式同源, 见 docs/dog020_risk_latency_plan_2026-09-16.md）")
+	maxBookLat := flag.Int64("max-book-lat-ms", maxBookLatMsDefault, "盘口延迟闸: book_latency_ms > 此值的 tick 无效（回测 MAX_LAT=300; 收紧是负收益, 见 docs 同文 §1.2b）")
+	maxSpotAge := flag.Int64("max-spot-age-ms", spotFreshMsDefault, "Binance spot 新鲜度闸: 距本地接收 > 此值判现货缺失")
+	maxTwapAge := flag.Int64("max-twap-age-ms", twapFreshMsDefault, "TWAP 新鲜度闸: 窗口起 anchor + 窗末 close 共用，超龄按缺失处理")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	// ── 参数校验（快速失败: 误配比不配更危险）──
+	// 阈值 ≤0 会让全部 tick/采样无效（信号静默归零而非报错），必须挡在启动前；
+	// book 阈值 <100ms 属负收益区但仍允许（配置化的意义是「能调」），只告警。
+	if *maxBookLat <= 0 || *maxSpotAge <= 0 || *maxTwapAge <= 0 {
+		log.Fatalf("数据源新鲜度阈值必须 > 0（book=%d spot=%d twap=%d）——0 会让全部采样判无效、信号静默归零",
+			*maxBookLat, *maxSpotAge, *maxTwapAge)
+	}
+	if *maxBookLat < 100 {
+		log.Printf("⚠️  [Dog] --max-book-lat-ms=%d < 100ms —— 14 天回测显示该区为负收益（EV 单调变差），确认无误再用", *maxBookLat)
+	}
+	if *maxDailyLoss >= 0 {
+		log.Fatalf("--max-daily-loss 必须为负值（现值 %.2f）——口径是「当日已结算 P&L ≤ 线值即停单」，传正数会立刻永久熔断", *maxDailyLoss)
+	}
 
 	// ── 策略配置 ──
 	cfg := flip.Config{
@@ -128,6 +147,7 @@ func main() {
 		DistHi:        *distHi,
 		RemMin:        *remMin,
 		Stake:         *stake,
+		MaxBookLatMs:  *maxBookLat,
 	}
 	// ── Polymarket 客户端（未配置私钥则自动生成临时密钥，只读运行）──
 	cfgSDK := defaultSDKConfig()
@@ -319,6 +339,8 @@ func main() {
 	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞 yes(%.2f,%.2f)/no(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
 		cfg.TriggerAskMax, cfg.CrashWindow, cfg.CrashMinAsk,
 		cfg.DistLoYes, cfg.DistHi, cfg.DistLoNo, cfg.DistHi, cfg.RemMin, cfg.Stake)
+	log.Printf(" 新鲜度闸: book_lat≤%dms + spot_age≤%dms + twap_age≤%dms（生效值，见 docs/dog020_risk_latency_plan_2026-09-16.md）",
+		cfg.MaxBookLatMs, *maxSpotAge, *maxTwapAge)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 浅洞]")
 	log.Println("========================================")
 
@@ -475,20 +497,21 @@ func main() {
 		// twapCloseFreshMs, 超龄把 anchor 置 0 → 引擎整窗不观测 + 窗口结束
 		// 不计入 σ（既有 anchor≤0 分支, 镜像回测 :69 锚缺失事件跳过）。
 		anchor, anchorAgeMs := twapAdapter.Latest()
-		if !flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, twapCloseFreshMs) {
+		if !flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, *maxTwapAge) {
 			if anchor > 0 {
 				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms），整窗按锚缺失跳过",
-					conditionID, anchorAgeMs, twapCloseFreshMs)
+					conditionID, anchorAgeMs, *maxTwapAge)
 			}
 			anchor = 0
 		}
 		engine := flip.NewEngine(cfg)
-		engine.BeginWindow(anchor, hist.Bps(anchor))
+		histBps := hist.Bps(anchor) // 本窗 σ（引擎判定输入 + 窗末健康度落盘共用）
+		engine.BeginWindow(anchor, histBps)
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
 		endTime := nextStart.Add(windowSec * time.Second)
 
 		log.Printf("[Cycle] event=%s 窗口开始 anchor=%.2f hist_bps=%.2f（%d 窗）",
-			conditionID, anchor, hist.Bps(anchor), hist.Count())
+			conditionID, anchor, histBps, hist.Count())
 
 		ticker := time.NewTicker(time.Second)
 		lastTick := flip.Tick{}
@@ -504,7 +527,7 @@ func main() {
 				if rem < 0 {
 					rem = 0
 				}
-				lastTick = sampleTick(tickTime, rem, runtime)
+				lastTick = sampleTick(tickTime, rem, runtime, *maxSpotAge)
 
 				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
 				// 结算只注册实际成交（paper 行 ExecStatus 空恒成交; live 仅
@@ -548,7 +571,7 @@ func main() {
 		switch {
 		case anchor <= 0 || lastTick.TwapPrice <= 0:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)
-		case lastTick.TwapAgeMs > twapCloseFreshMs:
+		case lastTick.TwapAgeMs > *maxTwapAge:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s TWAP 陈旧（龄 %dms），本窗不计入 σ",
 				conditionID, lastTick.TwapAgeMs)
 		default:
@@ -672,16 +695,21 @@ func (rt *runtimeState) clearWindow() {
 // sampleTick 读取当前盘口/现货/TWAP 构造一条引擎 tick（1s 粒度）。
 // 盘口缺失时 bid/ask 为 0（引擎判无效 tick 不检）；spot 新鲜度超阈值置 0
 // （= missing_spot）；TWAP 现值随身携带（dist_t 观察腿 + 窗口 close 采样）。
-func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
+// spot 接收龄随行落盘（spotAgeMs，诊断——不参与判定，见 flip.Observation）。
+func sampleTick(t time.Time, rem int, rt *runtimeState, maxSpotAgeMs int64) flip.Tick {
 	yb, nb := rt.books()
 	pm := feed.NewPMTick(yb, nb)
 
-	// Binance spot（浅洞腿输入）: 本地接收新鲜度 ≤spotFreshMs 才有效——
-	// 断流后保留的最后价必须判 stale（交易所时间戳不可作新鲜度判据）
+	// Binance spot（浅洞腿输入）: 本地接收新鲜度 ≤maxSpotAgeMs 才有效——
+	// 断流后保留的最后价必须判 stale（交易所时间戳不可作新鲜度判据）。
+	// 龄与价格同源于这一次 LatestData 读取（避免「价格是新的、年龄是旧的」自相矛盾）。
 	bin := rt.Binance.LatestData()
-	spot := 0.0
-	if bin.RxAtMs > 0 && t.UnixMilli()-bin.RxAtMs <= spotFreshMs {
-		spot = bin.Price
+	spot, spotAge := 0.0, int64(-1)
+	if bin.RxAtMs > 0 {
+		spotAge = t.UnixMilli() - bin.RxAtMs
+		if spotAge <= maxSpotAgeMs {
+			spot = bin.Price
+		}
 	}
 
 	twapPrice, twAge := rt.TwapAdapter.Latest()
@@ -694,6 +722,7 @@ func sampleTick(t time.Time, rem int, rt *runtimeState) flip.Tick {
 		DownAsk:   pm.DownAsk,
 		BookLatMs: pm.BookLatMs,
 		BinPrice:  spot,
+		SpotAgeMs: spotAge,
 		TwapPrice: twapPrice,
 		TwapAgeMs: twAge,
 	}

@@ -2,10 +2,6 @@ package flip
 
 import "sync"
 
-// maxLat 与回测 MAX_LAT=300 一致: 盘口传输延迟超此值的 tick 无效
-// （不参与触发检查；作为 0 值槽位占用窗口索引，不贡献急跌窗口 max）。
-const maxLat = 300
-
 // lookMax 是观测列 m_τ 的最大回看窗（tick 槽位）——急跌窗 ring 至少存这么深
 // （python LOOKS=(20,30,45)，另有 60 仅作子版本参考未落地）。
 const lookMax = 45
@@ -20,8 +16,9 @@ const lookMax = 45
 // 判定输入全部经 Tick / BeginWindow 注入，本包零外部依赖、无副作用可测：
 //   - 锚缺失窗口（anchor ≤ 0，窗口级）整窗不观测不占槽——镜像回测 :69 锚缺失
 //     事件直接跳过（观测宇宙 1:1；missing_anchor 仅存 decide 纯函数防线，现网不可达）
-//   - 有效 tick = BookLatMs ≤ 300 且 UP(=yes)/DOWN(=no) 双侧 bid/ask 报价齐全
-//     （整簿快照门控，镜像回测 :79；实测缺失为整行全空，只挡无快照行）
+//   - 有效 tick = BookLatMs ≤ Config.MaxBookLatMs（默认 300, 回测 MAX_LAT）且
+//     UP(=yes)/DOWN(=no) 双侧 bid/ask 报价齐全（整簿快照门控，镜像回测 :79；
+//     实测缺失为整行全空，只挡无快照行）
 //   - 急跌窗 = 索引槽位 ring（先判后插：触发 tick 不进窗；无效 tick 压 0 占槽，
 //     窗头自然截断——窗口未满取现有值，与回测合法短窗一致）
 //   - dist = sgn·(price − anchor)/anchor·1e4 / histBps，sgn: dog=yes +1 / no −1
@@ -90,7 +87,7 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 	}
 
 	// tick 无效（延迟过高）：占槽不检——与回测一致，其后触发仍按索引计数。
-	if t.BookLatMs > maxLat {
+	if t.BookLatMs > e.cfg.MaxBookLatMs {
 		e.pushSlots(t)
 		return nil
 	}
@@ -144,7 +141,7 @@ func (e *Engine) decide(t Tick, side string) *Observation {
 	}
 	o := &Observation{
 		Ts: t.Ts, Side: side, Rem: t.Rem, Fill: fill,
-		BookLatMs: t.BookLatMs, TwapAgeMs: t.TwapAgeMs,
+		BookLatMs: t.BookLatMs, TwapAgeMs: t.TwapAgeMs, SpotAgeMs: t.SpotAgeMs,
 		// 决策原始输入随行快照（诊断: 浅洞带分解 / anchor·σ 口径差比对）
 		Anchor:    e.anchor,
 		HistBps:   e.histBps,
@@ -198,10 +195,10 @@ func (e *Engine) decide(t Tick, side string) *Observation {
 }
 
 // pushSlots 将本 tick 追加为 up/down 两个并行的索引槽位（ask 保留或压 0），
-// ring 超深则丢弃最老槽位。无效 tick（延迟 > maxLat）压 0 占槽。
+// ring 超深则丢弃最老槽位。无效 tick（延迟 > MaxBookLatMs）压 0 占槽。
 func (e *Engine) pushSlots(t Tick) {
 	up, down := 0.0, 0.0
-	if t.BookLatMs <= maxLat {
+	if t.BookLatMs <= e.cfg.MaxBookLatMs {
 		up, down = t.UpAsk, t.DownAsk
 	}
 	e.upAsks = pushRing(e.upAsks, up, max(e.cfg.CrashWindow, lookMax))
