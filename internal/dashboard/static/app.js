@@ -50,10 +50,24 @@
     return d ? d.toFixed(2) : '—';
   }
 
+  function formatUptime(uptimeSec) {
+    const sec = Math.floor(uptimeSec);
+    const days = Math.floor(sec / 86400);
+    const hours = Math.floor((sec % 86400) / 3600);
+    const minutes = Math.floor((sec % 3600) / 60);
+
+    const parts = [];
+    if (days > 0) parts.push(`${days}D`);
+    if (hours > 0) parts.push(`${hours}H`);
+    if (minutes > 0 || parts.length === 0) parts.push(`${minutes}m`);
+
+    return parts.join(' ');
+}
+
   function renderState(s) {
     setLive(true);
     $('modeBadge').textContent = s.mode === 'live' ? '实盘' : '纸面';
-    $('uptime').textContent = '运行 ' + Math.floor(s.uptime_sec / 60) + 'm';
+    $('uptime').textContent = '运行 ' + formatUptime(s.uptime_sec);
 
     // 实盘执行摘要（paper 恒空 → 隐藏）
     var lb = $('liveBar');
