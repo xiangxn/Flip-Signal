@@ -54,6 +54,15 @@
   - 09-03~05 的「深 yes/浅 no 镜像」**未持续**（OOS yes −0.33σ / no −0.71σ，与回测
     −0.39/−0.75 高度吻合）——深度没变，**胜率变了**；判定对窗口切法不敏感（4 种切法皆「不显著」），
     唯计划字面窗（09-03~09-15, n=416, WR 18.0%）会触发 WR<20% 加重判负条款
+- 🧭 **2026-09-16 追加：延迟可见化 + 日亏熔断**（计划/验收/决策表见
+  `docs/dog020_risk_latency_plan_2026-09-16.md`）。起因是 09-15 复验的频率缺口查不下去：
+  三源阈值全部配置化（默认值不动——book 收紧在 14 天回测里单调变差），并补上两类此前
+  **零痕迹**的证据：`winstats_*.jsonl`（每窗 tick 健康度 + 被闸挡掉的丢信号明细）与观测
+  `spot_age_ms`（亚阈值陈旧是否污染 dist_s）。日亏熔断默认 **−24U**、UTC 日、两模式同判据
+  且**当日锁存**；paper 取方案 A（被闸行照记照结算 + `gate_reason`，分析脚本默认过滤）。
+  已量化结论：现货断流每日只丢 ≈0.14 笔（0.35% 信号量）→ **延迟不是频率缺口的主因**，
+  主因仍是触底时点后移（`rem_low` 占比升高）；24U 线在纸面 14 天回放里 Δ+64.9U 且 4 次
+  触发全落在亏损日、10 个盈利日零误伤。
 - 已证伪：flip「自信崩溃」家族（v3，分支 v3 保留）、v1/v2 follow/wait 族、0.2 深度
   全市场扫、双层版单独 TWAP 腿等——历史分析/代码在 git 其他分支可查。
 
@@ -73,14 +82,15 @@
 FlipSignal/
 ├── cmd/flip/                         # 策略引擎主入口（纸面/实盘同源，-mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件, 其余下沉 internal）
+├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── internal/
 │   ├── flip/                         # 引擎核心层（零外部依赖, 可独立测试）
-│   │   ├── types.go                  # Config + Tick/Observation/Record + 状态枚举
-│   │   ├── engine.go                 # 状态机: Watching → Done（触底观测/四腿判定）
+│   │   ├── types.go                  # Config + Tick/Observation/Record + 状态枚举 + 闸原因常量
+│   │   ├── engine.go                 # 状态机: Watching → Done（触底观测/四腿判定 + 本窗 tick 健康度计数）
 │   │   ├── exec.go                   # Executor 接口 + PaperExecutor（live 实现由 trading 注入）
-│   │   ├── exec_state.go             # ExecState 编排: paper 单步 / live 闸+submitting 两阶段 → 统一 Execute
-│   │   ├── recorder.go               # JSONL 观测记录 + windows_* 窗口振幅日志（按日切分）+ P&L 回填
-│   │   ├── risk.go                   # CanTrade 日亏熔断判定
+│   │   ├── exec_state.go             # ExecState 编排: 风控闸（两模式共用）→ paper 单步 / live submitting 两阶段 → 统一 Execute
+│   │   ├── recorder.go               # JSONL 观测记录 + windows_* 窗口振幅日志 + winstats_* 健康度（按日切分）+ P&L 回填
+│   │   ├── risk.go                   # CanTrade 日亏熔断判定（纯函数; 锁存在 exec_state.breakerTripped）
 │   │   ├── sigma.go                  # HistState（σ 滚动窗）+ RecentBlock 截断纯函数 + AnchorUsableAtBoundary
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
 │   │   └── *_test.go                 # engine/recorder/exec_state/risk/anchor/preheat + mirrorcheck 镜像回归
@@ -99,7 +109,7 @@ FlipSignal/
 ├── docs/                             # 策略文档（v4 方案/口径映射）
 ├── python/
 │   ├── v2/lib.py                     # 数据加载器（v4 回测脚本依赖，保留）
-│   └── v4/                           # 回测权威脚本 + 纸面对账脚本
+│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）
 ├── go.mod / go.sum
 └── CLAUDE.md                         # 本文件
 ```
@@ -128,10 +138,13 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
             Watching → (触底) → Done
                          │
                          ▼
-             Executor (PaperExecutor 模拟成交)
+             风控闸 gate（paper/live 同判据: 首窗禁单 + 日亏熔断锁存）
                          │
                          ▼
-             Recorder (touches_* 观测 + windows_* 窗口振幅, 按日切分 + P&L)
+             Executor (PaperExecutor 模拟成交; live = LiveExecutor FAK)
+                         │
+                         ▼
+   Recorder (touches_* 观测 + windows_* 窗口振幅 + winstats_* 健康度, 按日切分 + P&L)
                          │
                          ▼
              ResolutionPoller (gamma 结算轮询)
@@ -144,10 +157,12 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
 2. 边界对齐 → 注入窗口上下文（anchor=TWAP 流值、σ）→ 订阅 UP/DOWN token
 3. 每秒 1s tick：读 UP/DOWN 盘口 + Binance spot + TWAP → ProcessTick(状态机)
 4. 首个触底 tick（ask≤0.20）→ 四腿判定 → 观测落盘（ok 与失败都记，即时落盘）
-5. ok 信号 → PaperExecutor 执行 → Register 结算轮询（窗口内完成，无窗末补判）
+5. ok 信号 → 风控闸（live 命中拦 POST 记 rejected；paper 命中记 gate_reason 照常结算）
+   → PaperExecutor 执行 → Register 结算轮询（窗口内完成，无窗末补判）
 6. 窗口结束（rem=0）→ |close−anchor| 追加进 σ 滚动窗并落盘 windows_*.jsonl
    （重启 σ 预热本地优先：windows_* 新鲜即毫秒级恢复，不足/过旧回退官方网络
-   预热 FetchTwapRanges——停机期窗口只有官方能取）→ 下一窗口
+   预热 FetchTwapRanges——停机期窗口只有官方能取）；同刻本窗 tick 健康度落盘
+   winstats_*.jsonl（含被延迟闸挡掉的丢信号明细）→ 下一窗口
 ```
 
 ### 引擎状态机
@@ -212,6 +227,8 @@ go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
 # python 分析/回测脚本一律用项目内 venv（系统 python3 无 numpy/pandas）
 python/venv/bin/python python/v4/01_backtest_r1.py
 python/venv/bin/python python/v4/06_oos_review.py    # 09-15 复验裁判（纯标准库）
+python/venv/bin/python python/v4/07_source_health_check.py            # 数据源健康度审计（纯标准库）
+python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book 阈值扫描/零成交代理
 ```
 
 ---
@@ -246,6 +263,25 @@ python/venv/bin/python python/v4/06_oos_review.py    # 09-15 复验裁判（纯�
    seed（「马上重启」毫秒级恢复、零上游 API 压力、与 live push 同源口径），
    否则回退官方 FetchTwapRanges 网络预热（停机期窗口本地没有，只有官方接口
    能取）。截断决策为纯函数 `RecentBlock`（internal/flip/sigma.go，table 测试）。
+9. **数据源延迟闸配置化 + 丢信号可见化**（2026-09-16）：三源新鲜度阈值由
+   `Config.MaxBookLatMs` 与 `--max-spot-age-ms/--max-twap-age-ms` 驱动，
+   **默认值 = 现行值 = 数据支持值**（配置化的意义是"能调"而非"该调"——book 收紧
+   在 14 天回测里单调变差：T=20ms 少赚 62.8U）。判定分支不动，只把盲区点亮：无效
+   tick 上"本会触发"的 tick 落 `winstats_YYYY-MM-DD.jsonl`（每窗一行，含
+   `ticks/ticks_valid/book_stale/book_missing/lost_triggers` 明细与恒等式），触底
+   观测补 `spot_age_ms`（亚阈值陈旧是否污染 `dist_s` 从"零可观测"变为可审计）。
+   ⚠️ `winstats_*` 必须独立于 `windows_*`：后者是 σ 预热数据源，混入统计行会以
+   Amp=0 污染其后 18 窗（文件前缀 + `kind` 字段双保险）。
+10. **日亏熔断：两模式同闸 + 当日锁存**（2026-09-16）：`CanTrade(todayPnl, 线)` 纯
+   函数不变（`todayPnl > 线` 才可交易），闸（`gate()`）在 `HandleObservation` 里
+   两模式共用同一判据——live 命中拦下真实 POST（rejected 行），paper 命中只写
+   `gate_reason` 且行照记照结算（方案 A：纸面是唯一在跑的 live-like 样本，砍数据
+   削弱统计力；被闸行即"不熔断会怎样"的反事实）。**必须锁存**：paper 下被闸行照常
+   结算会让当日 P&L 回升过线、无锁存则自动复牌，故判据叠加"当日已有被闸行"
+   （`Recorder.GatedOn`，磁盘真相 → 重启自动恢复、UTC 跨日自动归零）。
+   `LiveExec.BreakerOpen` 是**历史反极性字段**（true = 可开单），新类型改用
+   `RiskSummary.CanTrade` 直说极性。分析脚本（02/06/07）默认过滤 `gate_reason`
+   非空行，`--include-gated` 恢复旧口径。
 
 ---
 
@@ -259,7 +295,18 @@ go run ./cmd/flip -output data/v4 -dashboard :8090
 go run ./cmd/flip --trigger-ask-max 0.2 --crash-min-ask 0.4 \
                   --crash-window 45 --dist-lo-yes -0.6 --dist-lo-no -1.0 \
                   --dist-hi 0 --rem-min 180 --stake 2 --mode paper
+
+# 数据源新鲜度闸 + 日亏熔断（默认值 = 下表；三者都必须 > 0，日亏线必须为负）
+go run ./cmd/flip --max-book-lat-ms 300 --max-spot-age-ms 2000 \
+                  --max-twap-age-ms 10000 --max-daily-loss -24
 ```
+
+| flag | 默认 | 含义 |
+|------|------|------|
+| `--max-book-lat-ms` | 300 | PM 盘口延迟闸：`book_latency_ms` 超此值的 tick 无效（**回测 `MAX_LAT` 同值，收紧是负收益**，见 `docs/dog020_risk_latency_plan_2026-09-16.md` §1.2b） |
+| `--max-spot-age-ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
+| `--max-twap-age-ms` | 10000 | TWAP-60 新鲜度：窗口起 anchor 与窗末 close 共用，超龄按缺失处理 |
+| `--max-daily-loss` | **−24** | 日亏熔断线（负值）：当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存；两模式同源（paper 只标记不拦单） |
 
 环境变量（无配置即只读运行）：
 | 变量 | 说明 | 必填 |

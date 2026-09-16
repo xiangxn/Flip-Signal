@@ -7,8 +7,23 @@
 > 本文只落方案，不动代码。文中所有数字均为本地实测（数据源 `data/v4` 纸面 09-03~09-16、
 > `data/btc` 回测 08-18~08-31、`python/v4/data/trades_r1_combo.csv` 头条）。
 >
-> **状态：方案已定，待实施。** 三个开放项已于 2026-09-16 拍板（见 §7）：
+> **状态：已实施（2026-09-16 当日完成）。** 三个开放项于 2026-09-16 拍板（见 §7）：
 > 需求 1 只做配置化 + 可见性、paper 语义取方案 A、熔断线 24U 为终值且不做线扫描脚本。
+>
+> 落地记录（提交序，与 §6 的切分一致）：
+> - `flip:` 延迟闸配置化 + 观测补 `spot_age_ms`（行为中性）
+> - `flip:` 每窗 tick 健康度计数 + `winstats_*.jsonl` + dashboard 阈值下发
+> - `flip:` 日亏熔断 —— 闸上移两模式共用（方案 A）+ 当日锁存 + `gate_reason` + dashboard 风控块
+> - `python:` 07 数据源健康度审计 + 02/06 过滤被闸行（`--include-gated`）
+> - `docs:` 本文与 CLAUDE.md 同步
+>
+> 落地期修正的三处口径（正文对应位置已就地标注）：§2.4 计数器 `Ticks` 不含 `rem==0`
+> 终 tick 且新增 `TicksValid`（恒等式可当场核对）；§2.4 `winstats` 实际 schema（`kind`
+> 守卫 + `lost_triggers` 为明细数组 + `skip` 原因）；§3.6 极性字段取名 `CanTrade` 而非
+> `BreakerOpen`（避免与 `LiveExec` 的历史反极性字段混淆）。验收：`cmd/btreplay` 625 笔
+> 逐位一致红线不变；`07_source_health_check.py` 首跑与 §1.2 基线**逐项对齐**（33 行
+> 0.93% / 遮蔽 24 / 真丢 9 / 急跌过 5 / 夜间 88% / book 扫描 T=300 → n=625 +395.8U，
+> T=20 少赚 62.8U / 零成交代理 8 笔 1 胜 7 负）。
 
 ---
 
@@ -219,7 +234,8 @@ n=53 且本项目在这个数据上已反复踩过「小样本切片」的坑（
 ```go
 // windowStats: 本窗 tick 健康度（Watching 态内统计; Done 后不再计）
 type windowStats struct {
-    Ticks        int // 窗口内 tick 总数（含 rem==0）
+    Ticks        int // 进入有效性分类的 tick 数（不含 rem==0 终 tick、不含 Done 后的 tick）
+    TicksValid   int // 过延迟闸 + 整簿门控的 tick（= Ticks − BookStale − BookMissing）
     BookStale    int // BookLatMs > MaxBookLatMs 而无效的 tick
     BookMissing  int // 整簿四字段不全而无效的 tick（镜像回测 :79 门控）
     LostTriggers []lostTrigger // 「本会触发但被上两条挡掉」的 tick
@@ -229,6 +245,12 @@ type lostTrigger struct {
     BookLatMs int64; Reason string // stale_book | book_missing
 }
 ```
+
+> 口径修正（2026-09-16 落地时）：`Ticks` 计的是**进入有效性分类的 tick**，不含
+> `rem==0` 的窗口终 tick（该 tick 只做窗末结算，不进触发检查），全窗 300 槽位下
+> 典型值为 299；`TicksValid` 是新增字段，让恒等式
+> `Ticks == TicksValid + BookStale + BookMissing` 可当场核对（07 脚本 A 段即查这条）。
+> 另加 `AnchorMissing bool` 标记整窗不观测（锚缺失），此情形下计数恒 0。
 
 - `LostTriggers` 判据：`state==Watching` 且该 tick 任一侧 `0 < ask ≤ TriggerAskMax`，
   但 tick 因延迟/缺快照被判无效 → 记录。**不改变状态机**（该 tick 依旧走 `pushSlots`，事件未 Done）
@@ -242,11 +264,20 @@ Amp=0 直接污染其后 18 窗）。故：
 **新增独立文件 `winstats_YYYY-MM-DD.jsonl`**（追加写、不重写、不载入内存、纯分析用）：
 
 ```json
-{"ts":..., "date":"2026-09-16", "condition_id":"0x..", "event_start":..., "rem_end":0,
- "anchor_ok":true, "ticks":300, "ticks_valid":298, "book_stale":2, "book_missing":0,
- "lost_triggers":1, "lost_detail":[{"ts":...,"side":"yes","rem":196,"ask":0.19,
- "book_lat_ms":412,"reason":"stale_book"}], "triggered":true, "ok":true}
+{"ts":..., "date":"2026-09-16", "kind":"winstats", "condition_id":"0x..", "slug":"btc-updown-5m-...",
+ "event_start":..., "anchor":69000.0, "hist_bps":9.3,
+ "ticks":299, "ticks_valid":297, "book_stale":2, "book_missing":0,
+ "lost_triggers":[{"ts":...,"side":"yes","rem":196,"ask":0.19,
+ "book_lat_ms":412,"reason":"stale_book"}]}
 ```
+
+> 口径修正（2026-09-16 落地时）：`kind` 恒为 `"winstats"`（跨类型误读的第二道守卫，
+> 第一道是文件前缀）；`lost_triggers` 是**明细数组**而非计数（计数即数组长度）；
+> 未采集的窗口落 `"skip"`（取值 `late` 窗口来不及 / `no_market` gamma 无市场 /
+> `no_token` token 解析失败 / `dup_record` 条件 id 重复）且统计字段全 0——保留该行是为了让
+> 逐日行数（≈288）本身成为"主循环是否跑满"的证据；锚缺失窗落 `"anchor_missing":true`。
+> 原稿的 `rem_end`/`anchor_ok`/`triggered`/`ok` 字段未实现（触发与结算结果已在
+> `touches_*.jsonl` 里，同键重复只会带来两处口径打架）。
 
 加载器 `loadWindowFileLocked` **同时加一道 schema 守卫**（过滤 `kind != ""` 的统计行），
 双保险——即使将来误写进 windows 文件也不会污染 σ。
@@ -384,12 +415,18 @@ POST、paper 只写 `gate_reason`。被闸行**不改变** `IsFilled()` 的既�
 type RiskSummary struct {
     TodayPnl     float64 `json:"today_pnl"`
     MaxDailyLoss float64 `json:"max_daily_loss"`
-    BreakerOpen  bool    `json:"breaker_open"`   // false = 可开单
+    CanTrade     bool    `json:"can_trade"`      // 熔断未触发 = 可开单（含当日锁存）
     GatedToday   int     `json:"gated_today"`    // 今日被闸笔数
     Enforced     bool    `json:"enforced"`       // 是否拦下真实 POST：live=true / paper=false
                                                  // （闸判据本身两模式同源，见 §3.5 方案 A）
 }
 ```
+
+> 实现修正（2026-09-16 落地时）：极性字段取名 `CanTrade` 而非 `BreakerOpen`。
+> 既有 `LiveExec.BreakerOpen` 是**历史遗留的反极性命名**（`true` = 可开单，
+> app.js 用 `if (!l.breaker_open)` 显示"熔断停单"），新增类型沿用同名反极性只会
+> 制造第二个语义陷阱——新类型直说 `CanTrade`，`LiveExec` 保持原样不动
+> （其取值已改为与闸同源：`!breakerTripped()`，否则面板会显示"可开单"而实际已停单）。
 
 前端在现有 live 卡片旁加一行：`风控 今日 −18.0 / −24.0U  ·  熔断已触发（拦 6 笔）`，
 paper 模式加"影子"角标。
