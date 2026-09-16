@@ -58,7 +58,9 @@ CRASH_MIN = 0.40       # 窗口内曾 ≥ θ（09-03 灵敏度: P&L argmax, θ�
 BAND = (-0.5, 0.0)     # R1 对照带（2026-09-02 定稿, yes/no 共用; 口径与历史一致）
 BAND_YC = (-0.6, 0.0)  # 组合版 yes 带（09-03 分桶 argmax; 破位下行中继族）
 BAND_NO = (-1.0, 0.0)  # 组合版 no 带（09-03 分桶 argmax; 顶部恐慌族, spot 领先 TWAP）
-REM_MIN = 180          # 时间腿（09-03 灵敏度: τ=150 边际弱正, 维持原值）
+REM_MIN = 180          # 时间腿下界（09-03 灵敏度: τ=150 边际弱正, 维持原值）
+REM_MAX = 240         # 时间腿上界（None = 不设限, 历史口径; 240 = 「只做盘中段」变体）
+                       # 判定 rem_min < rem < rem_max（严格, 保持历史 > 语义）
 LOOKS = (20, 30, 45, 60)  # 顺带记录的窗口, 供子版本复算
 
 
@@ -170,6 +172,8 @@ def rules(df):
     （侧别带 yes BAND_YC / no BAND_NO, dist_t 层同理; 2026-09-03 分桶扫描定带）。"""
     crash = df["m_45"] >= CRASH_MIN
     rem_ok = df["rem"] > REM_MIN
+    if REM_MAX is not None:
+        rem_ok &= df["rem"] < REM_MAX
     yes_s = df["side"] == "yes"
     # R1 对照: 双侧 (−0.5, 0)
     pure = crash & rem_ok & shallow(df["dist_s"])
@@ -227,20 +231,28 @@ def report(name, s, ndays):
 
 
 def main():
-    global STAKE
+    global STAKE, REM_MIN, REM_MAX
     ap = argparse.ArgumentParser(description="v4 狗@0.2 R1(m_45) 回测")
     ap.add_argument("--data", default=str(
         BASE.parent.parent / "data" / "btc"), help="data/btc 事件目录")
     ap.add_argument("--stake", type=float, default=STAKE)
+    ap.add_argument("--rem-min", type=int, default=REM_MIN,
+                    help="时间腿下界（判定 rem > rem-min, 默认 180）")
+    ap.add_argument("--rem-max", type=int, default=None,
+                    help="时间腿上界（判定 rem < rem-max, 默认不设限; "
+                         "如 240 配合 --rem-min 160 = 只在盘中段入场）")
     ap.add_argument("--csv", default=str(BASE / "data" / "trades_r1.csv"),
                     help="明细 CSV 输出路径（R1 对照两条, 语义与历史一致）")
     ap.add_argument("--csv-combo", default=str(BASE / "data" / "trades_r1_combo.csv"),
                     help="组合版头条明细 CSV 输出路径")
     args = ap.parse_args()
     STAKE = args.stake
+    REM_MIN, REM_MAX = args.rem_min, args.rem_max
 
     df = extract(args.data)
-    print(f"数据 {args.data}: 事件 → 0.2 首触 {len(df)}\n")
+    band = f"{REM_MIN} < rem" + (f" < {REM_MAX}" if REM_MAX is not None else "")
+    print(f"数据 {args.data}: 事件 → 0.2 首触 {len(df)}"
+          f"   时间腿 {band}（触发 {df.rem.min():.0f}~{df.rem.max():.0f}）\n")
     pure, dual, pureC, dualC = rules(df)
     ndays = df["date"].nunique()
     for name, mask in (("R1 m_45 纯现货（对照）", pure), ("R1 m_45 双层（对照）", dual),
