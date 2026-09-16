@@ -28,10 +28,8 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"time"
 
 	"github.com/spf13/viper"
-	orders "github.com/xiangxn/go-polymarket-sdk/orders"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/feed"
@@ -143,27 +141,25 @@ func defaults() *AppConfig {
 	}
 }
 
-// defaultSDKConfig 构造 SDK 配置的默认值。
+// defaultSDKConfig 构造 SDK 配置的默认值：以 sdk.DefaultConfig() 为基底（端点 URL /
+// http_timeout / signature_type 等常量不手抄，SDK 改一处我们跟着走），
+// 只覆盖两处 v4 有意偏离项。
 //
-// 字面值原样搬自 cmd/flip 的 defaultSDKConfig()（2026-09-16 迁入, 仅删去 os.Getenv 部分）。
-// **不要"简化"成 sdk.DefaultConfig()**: 后者设了 RateLimitMaxRetries=3 /
-// RateLimitBaseDelay=500ms，而这里留 0 → SDK 内建兜底 6 次 / 1000ms
-// （SDK polymarket.go 的 defaultRateLimit* 常量），照搬会静默改掉 429 退避行为。
+//  1. **OwnerKey 清空**：SDK 给的是占位私钥 "1111…1111"（64 hex，能过 HexToECDSA），
+//     而 v4 用**空串**表达"未配置"——decrypt.go 判「非空即密文」会拿它去解密，
+//     main.go 也以空串为「只读纸面 + 生成临时密钥」的判据。不清空则：任何只写要改的
+//     项的配置文件（省略 owner_key）启动即报"读取解密密码失败"，且 live 缺 key 时
+//     不再降级纸面。
+//  2. **429 退避复位 0**：SDK 的 3 次/500ms 会盖掉它自己的内建兜底 6 次/1000ms
+//     （polymarket.go 的 defaultRateLimit* 常量，只有 ≤0 才走兜底）。
+//
+// SignatureType 不再显式赋 POLY_GNOSIS_SAFE（live 签名形态恒为 Gnosis Safe，
+// maker=FunderAddress、签名=OwnerKey EOA）：DefaultConfig 已是该值，且
+// v4.config.yaml 的 signature_type: 2 受漂移守卫逐键比对，SDK 侧一改就测试失败。
 func defaultSDKConfig() sdk.Config {
-	cfg := sdk.Config{
-		HttpTimeout: 10 * time.Second,
-		Polymarket: sdk.PolymarketConfig{
-			ChainID:        137,
-			ClobBaseURL:    "https://clob.polymarket.com",
-			ClobWSBaseURL:  "wss://ws-subscriptions-clob.polymarket.com",
-			GammaBaseURL:   "https://gamma-api.polymarket.com",
-			DataAPIBaseURL: "https://data-api.polymarket.com",
-			LiveWSBaseURL:  "wss://ws-live-data.polymarket.com",
-		},
-	}
-	// live 签名形态恒为 Gnosis Safe（POLY_GNOSIS_SAFE=2, maker=FunderAddress,
-	// 签名=OwnerKey EOA）——与 eth 分支生产配置同款; 显式赋值（零值=EOA=0,
-	// live 下会被 CLOB 拒单）; paper 路径不参与签名, 赋值无副作用。
-	cfg.Polymarket.SignatureType = orders.POLY_GNOSIS_SAFE
+	cfg := *sdk.DefaultConfig()
+	cfg.Polymarket.OwnerKey = ""
+	cfg.RateLimitMaxRetries = 0
+	cfg.RateLimitBaseDelay = 0
 	return cfg
 }

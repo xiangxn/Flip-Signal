@@ -149,11 +149,13 @@ sdk:
     # 实时数据（RTDS）地址: 本引擎未使用（照默认值留着，便于将来接）
     live_ws_base_url: "wss://ws-live-data.polymarket.com"
 
-    # Relayer 地址（代理提交交易用）: 本引擎未使用，留空 = SDK 内建兜底
-    relayer_base_url: ""
+    # Relayer 地址（代理提交交易用，merge/split/redeem 走它）: 本引擎未使用；
+    # 值来自 SDK 的 DefaultConfig()——注意 SDK 只在 DefaultConfig() 里给这个默认值，
+    # NewClient 不回填空串，将来真接 relayer 别把它清空。
+    relayer_base_url: "https://relayer-v2.polymarket.com"
 
-    # 加密价格接口: 留空 = SDK 默认 https://polymarket.com/api/crypto/crypto-price
-    crypto_price_url: ""
+    # 加密价格接口: 值来自 SDK 的 DefaultConfig()（SDK 对空串也有同值兜底，等价）
+    crypto_price_url: "https://polymarket.com/api/crypto/crypto-price"
 
     # 签名类型: 0 = EOA, 1 = POLY_PROXY, 2 = POLY_GNOSIS_SAFE（live 必须用 2，
     # 零值 EOA 会被 CLOB 拒单）; 引擎恒按 2 启动，此键一般不需要改。
@@ -182,5 +184,4 @@ sdk:
     #   passphrase: ""
     # relayer_key:
     #   key: ""
-    #   secret: ""
-    #   passphrase: ""
+    #   key_address: ""

@@ -309,9 +309,11 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
      `POLYMARKET_*` 环境变量已**全部废弃**，凭证只能来自配置文件。
    - `v4.config.yaml` = 默认值镜像（入 git），有漂移守卫测试（逐键 `DeepEqual`
      `defaults()` + 覆盖度检查）；调参复制成 `config.local.yaml`（gitignored）。
-   - ⚠️ `sdk.http_timeout: 10s` **必须带单位**（写 `10` = 10 纳秒）；
-     别用 `sdk.DefaultConfig()` 当默认值（它设 3 次/500ms 退避，会静默改掉
-     v4 现行的 6 次/1000ms 内建兜底）。
+   - ⚠️ `sdk.http_timeout: 10s` **必须带单位**（写 `10` = 10 纳秒）。
+   - SDK 默认值以 `sdk.DefaultConfig()` 为**基底**（端点 URL/超时/签名类型不手抄），
+     只覆盖两处：`OwnerKey` 清空（SDK 给占位私钥 `1111…`，会被「非空即密文」判成
+     密文，且 main 以空串为「只读纸面」判据）、`RateLimit*` 复位 0（SDK 的
+     3 次/500ms 会盖掉它自己的内建兜底 6 次/1000ms，≤0 才走兜底）。
 
 ---
 
