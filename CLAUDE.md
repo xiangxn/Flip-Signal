@@ -81,9 +81,14 @@
 ```
 FlipSignal/
 ├── cmd/flip/                         # 策略引擎主入口（纸面/实盘同源，-mode 切换）
-│   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件, 其余下沉 internal）
+│   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个 flag, 配置见 internal/config）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── internal/
+│   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
+│   │   ├── config.go                 # AppConfig + defaults()（唯一默认值来源）+ Load()
+│   │   ├── decrypt.go                # owner_key/clob_creds 密文解密（PM_CONFIG_DECRYPT_PASSWORD）
+│   │   ├── validate.go               # 校验（fatal/warning），在 CLI 覆盖之后调用
+│   │   └── configfile_drift_test.go  # v4.config.yaml 漂移守卫
 │   ├── flip/                         # 引擎核心层（零外部依赖, 可独立测试）
 │   │   ├── types.go                  # Config + Tick/Observation/Record + 状态枚举 + 闸原因常量
 │   │   ├── engine.go                 # 状态机: Watching → Done（触底观测/四腿判定 + 本窗 tick 健康度计数）
@@ -110,6 +115,7 @@ FlipSignal/
 ├── python/
 │   ├── v2/lib.py                     # 数据加载器（v4 回测脚本依赖，保留）
 │   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）
+├── v4.config.yaml                    # 全量配置示例（= 代码默认值, 有漂移守卫测试; 调参请复制成 config.local.yaml）
 ├── go.mod / go.sum
 └── CLAUDE.md                         # 本文件
 ```
@@ -190,6 +196,8 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
 | `github.com/xiangxn/go-polymarket-sdk` | Polymarket REST/WS 客户端 |
 | `github.com/gorilla/websocket` | Binance WebSocket 连接（feed adapter） |
 | `github.com/tidwall/gjson` | JSON 解析（SDK 依赖）|
+| `github.com/spf13/viper` | 配置文件加载（internal/config，同 master 分支）|
+| `golang.org/x/term` | 解密密码无回显终端输入（nohup 场景走环境变量，不走它）|
 
 ### 本地开发 replace 指令
 
@@ -220,9 +228,9 @@ replace (
 
 ### 测试
 ```bash
-go test ./internal/flip/ ./internal/feed/ ./internal/trading/ -v   # 引擎/编排/记录器/盘口工具/结算轮询
+go test ./internal/... -v              # 引擎/编排/记录器/盘口工具/结算轮询/配置（含 YAML 漂移守卫）
 go build ./...                         # 全量编译检查
-go run ./cmd/flip -dashboard :8090     # 运行引擎 + Dashboard
+go run ./cmd/flip -config v4.config.yaml -dashboard :8090   # 运行引擎 + Dashboard
 
 # python 分析/回测脚本一律用项目内 venv（系统 python3 无 numpy/pandas）
 python/venv/bin/python python/v4/01_backtest_r1.py
@@ -264,7 +272,8 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
    否则回退官方 FetchTwapRanges 网络预热（停机期窗口本地没有，只有官方接口
    能取）。截断决策为纯函数 `RecentBlock`（internal/flip/sigma.go，table 测试）。
 9. **数据源延迟闸配置化 + 丢信号可见化**（2026-09-16）：三源新鲜度阈值由
-   `Config.MaxBookLatMs` 与 `--max-spot-age-ms/--max-twap-age-ms` 驱动，
+   `Config.MaxBookLatMs` 与 `feed.max_spot_age_ms/feed.max_twap_age_ms` 驱动
+   （落地时是三个 flag，同日 config 重构后改为配置键，见决策 #11），
    **默认值 = 现行值 = 数据支持值**（配置化的意义是"能调"而非"该调"——book 收紧
    在 14 天回测里单调变差：T=20ms 少赚 62.8U）。判定分支不动，只把盲区点亮：无效
    tick 上"本会触发"的 tick 落 `winstats_YYYY-MM-DD.jsonl`（每窗一行，含
@@ -282,38 +291,85 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
    `LiveExec.BreakerOpen` 是**历史反极性字段**（true = 可开单），新类型改用
    `RiskSummary.CanTrade` 直说极性。分析脚本（02/06/07）默认过滤 `gate_reason`
    非空行，`--include-gated` 恢复旧口径。
+11. **配置分层：CLI flag > 配置文件 > 代码默认值（无 env 层）**（2026-09-16）：
+   配置包 `internal/config`（viper，同 master），`main()` 只留 4 个 flag。
+   默认值**唯一来源**是 `defaults()`，`Load()` 把它预置成 `UnmarshalExact` 的目标
+   ——mapstructure 只写输入 map 里出现的键，所以"文件缺哪个键，哪个键就是默认值"，
+   文件可只写要改的项。
+   - **为什么不带环境变量层**：viper 的 `AutomaticEnv()` 单独用是**假生效**——
+     `Unmarshal → getSettings(v.AllKeys())` 而 `AllKeys()` 只汇总 aliases/override/
+     pflags/**显式 BindEnv**/文件/SetDefault，env 探测到的键不在内；要修得逐叶
+     `SetDefault` 注册（还得给 nil 指针子树单独 `BindEnv`），判定不值当。
+     **以后别再加回来**（viper 的 env 系 API 一个都没调）。
+   - **`UnmarshalExact`（拼错的键 = 启动失败）是有意的**：策略参数静默回落默认值
+     比崩溃危险得多。
+   - **敏感字段**（`sdk.polymarket.owner_key`/`clob_creds`）沿用 master：非空即密文
+     （AES-256-CBC, key=SHA256(密码)），密码走 `PM_CONFIG_DECRYPT_PASSWORD` 或终端
+     无回显输入；四项全空则**不弹密码**（纸面运行永不卡在输入）。
+     `POLYMARKET_*` 环境变量已**全部废弃**，凭证只能来自配置文件。
+   - `v4.config.yaml` = 默认值镜像（入 git），有漂移守卫测试（逐键 `DeepEqual`
+     `defaults()` + 覆盖度检查）；调参复制成 `config.local.yaml`（gitignored）。
+   - ⚠️ `sdk.http_timeout: 10s` **必须带单位**（写 `10` = 10 纳秒）；
+     别用 `sdk.DefaultConfig()` 当默认值（它设 3 次/500ms 退避，会静默改掉
+     v4 现行的 6 次/1000ms 内建兜底）。
 
 ---
 
 ## 运行方式
 
+配置优先级：**CLI flag > 配置文件 > 代码默认值**（三层，**不含环境变量层**——
+唯一被读取的环境变量是 `PM_CONFIG_DECRYPT_PASSWORD`）。默认值唯一来源 =
+`internal/config/config.go defaults()`，根目录 `v4.config.yaml` 是它的逐键镜像
+（`configfile_drift_test.go` 守着，改值会测试失败）。
+
 ```bash
-# 纸面运行（默认）
-go run ./cmd/flip -output data/v4 -dashboard :8090
+# 纸面运行（默认值 + Dashboard）
+go run ./cmd/flip -config v4.config.yaml -dashboard :8090
 
-# 参数（与回测脚本同名；浅洞带为侧别带）
-go run ./cmd/flip --trigger-ask-max 0.2 --crash-min-ask 0.4 \
-                  --crash-window 45 --dist-lo-yes -0.6 --dist-lo-no -1.0 \
-                  --dist-hi 0 --rem-min 180 --stake 2 --mode paper
+# 不带 -config = 完全不读文件、纯代码默认值（不开 Dashboard）
+go run ./cmd/flip
 
-# 数据源新鲜度闸 + 日亏熔断（默认值 = 下表；三者都必须 > 0，日亏线必须为负）
-go run ./cmd/flip --max-book-lat-ms 300 --max-spot-age-ms 2000 \
-                  --max-twap-age-ms 10000 --max-daily-loss -24
+# 单点覆盖（最高优先级；-dashboard "" 能真的关掉配置文件里的地址）
+go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 ```
+
+### CLI flag（main() 只有这 4 个）
 
 | flag | 默认 | 含义 |
 |------|------|------|
-| `--max-book-lat-ms` | 300 | PM 盘口延迟闸：`book_latency_ms` 超此值的 tick 无效（**回测 `MAX_LAT` 同值，收紧是负收益**，见 `docs/dog020_risk_latency_plan_2026-09-16.md` §1.2b） |
-| `--max-spot-age-ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
-| `--max-twap-age-ms` | 10000 | TWAP-60 新鲜度：窗口起 anchor 与窗末 close 共用，超龄按缺失处理 |
-| `--max-daily-loss` | **−24** | 日亏熔断线（负值）：当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存；两模式同源（paper 只标记不拦单） |
+| `-config` | `""` | 配置文件路径。**空 = 不读任何文件**，直接用代码默认值 |
+| `-dashboard` | `""` | 覆盖 `runtime.dashboard_addr`；显式传空串 = 本次不开 Dashboard |
+| `-mode` | `""` | 覆盖 `runtime.mode`（paper\|live）|
+| `-stake` | `0` | 覆盖 `flip.stake`；**没给**则用配置值，显式给 0 会校验报错 |
 
-环境变量（无配置即只读运行）：
+用 `flag.Visit` 区分「没给」与「显式给空/0」——所以 `-dashboard ""` 是有效的关闭操作，
+不是"用默认值"。其余全部参数见 `v4.config.yaml`（全量带注释），主要几项：
+
+| 配置键 | 默认 | 含义 |
+|------|------|------|
+| `flip.max_book_lat_ms` | 300 | PM 盘口延迟闸：`book_latency_ms` 超此值的 tick 无效（**回测 `MAX_LAT` 同值，收紧是负收益**，见 `docs/dog020_risk_latency_plan_2026-09-16.md` §1.2b） |
+| `feed.max_spot_age_ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
+| `feed.max_twap_age_ms` | 10000 | TWAP-60 新鲜度：窗口起 anchor 与窗末 close 共用，超龄按缺失处理 |
+| `risk.max_daily_loss` | **−24** | 日亏熔断线（负值）：当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存；两模式同源（paper 只标记不拦单） |
+| `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录，见启动时的 paper/live 混行告警） |
+| `runtime.slug_prefix` | `btc-updown-5m` | 市场 slug 前缀 |
+
+启动校验（`internal/config/validate.go`，判**最终生效值**）：三阈值必须 > 0、
+`risk.max_daily_loss` 必须 < 0、`runtime.mode ∈ {paper, live}`、`flip.stake > 0`、
+`runtime.output_dir` 非空 —— 任一不满足即启动失败；`flip.max_book_lat_ms < 100` 只告警。
+配置文件里拼错的键（`UnmarshalExact`）也是启动失败，不静默回落默认值。
+
+### 敏感字段（`sdk.polymarket.*`）
+
+凭证**只能来自配置文件**（`POLYMARKET_*` 环境变量已不再读取）：`owner_key` /
+`clob_creds.{key,secret,passphrase}` 留空 = 只读运行（引擎自动生成临时密钥跑纸面）；
+填 **密文**（`pmutils.NewEncryptor(密码).Encrypt(明文)`，AES-256-CBC）则实盘可用。
+判定语义是**非空即密文**——明文写进去会在解密时启动失败（没有"看起来像明文"的兜底）。
+
 | 变量 | 说明 | 必填 |
 |------|------|------|
-| `POLYMARKET_OWNER_KEY` | 钱包私钥 | live 模式 |
-| `POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE` | CLOB 凭证 | live 模式 |
-| `POLYMARKET_PROXY` | SOCKS5 代理（本地运行 Polymarket 必需） | 可选 |
+| `PM_CONFIG_DECRYPT_PASSWORD` | 密文凭证的解密密码；不设则终端无回显输入（**nohup/systemd 无终端 → 必须设它**） | 仅当配置文件里有密文 |
 
-> 本地运行记得 `export https_proxy=http://127.0.0.1:1087`（Polymarket 直连超时）；
+> 本地运行记得 `export https_proxy=http://127.0.0.1:1087`（Polymarket 直连超时；这是
+> Go 标准库 `http.ProxyFromEnvironment` 读的，与上面的配置系统无关）；
 > 部署机勿设指向不通代理的 HTTP(S)_PROXY（Binance 拨号走环境代理）。

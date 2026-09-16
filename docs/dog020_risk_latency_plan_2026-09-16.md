@@ -204,6 +204,12 @@ n=53 且本项目在这个数据上已反复踩过「小样本切片」的坑（
 启动时**校验并打印**：`--max-book-lat-ms < 100` 打 ⚠️ 警告（数据上 <100ms 是负收益区，
 见 §1.2b），`< 0` 直接 `log.Fatalf`。
 
+> **2026-09-16 追记（同日 config 重构）**：这三个 flag 与 `--max-daily-loss` 已**不再是 CLI
+> flag**，改为配置键 `flip.max_book_lat_ms` / `feed.max_spot_age_ms` / `feed.max_twap_age_ms` /
+> `risk.max_daily_loss`（默认值与校验规则逐条不变，只是入口从命令行挪到 `v4.config.yaml`；
+> main() 只留 `-config` / `-dashboard` / `-mode` / `-stake` 四个 flag，且 `-stake` 仍能覆盖
+> `flip.stake`）。本节以下文字保留当时（flag 时代）的记录，口径未变。
+
 > spot 龄闸刻意留在采样层（`sampleTick` 里把陈旧 spot 置 0），不搬进引擎：
 > 回测数据没有 spot 龄字段，搬进去会让 mirror 对账多一个不可比输入。
 

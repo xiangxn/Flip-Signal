@@ -8,3 +8,7 @@ reports
 dist
 
 config.yaml
+
+# 配置文件副本工作流: v4.config.yaml 是默认值镜像（入 git、有漂移守卫测试守着），
+# 本地/服务器的实际调参副本用 config.local.yaml（不入 git，可含密文凭证）。
+config.local.yaml
