@@ -1,0 +1,184 @@
+# =============================================================================
+# Flip Signal v4 —— 全量配置示例（每一个键都写着**代码默认值**）
+# =============================================================================
+# 狗@0.2 触底策略引擎（btc-updown-5m, Chainlink TWAP-60 结算）的配置文件。
+#
+# ── 优先级（三层）──
+#   CLI flag  >  本文件  >  代码默认值（internal/config/defaults()）
+#   共 4 个 CLI flag，其余一律走本文件：
+#     -config <路径>     指定本文件（**留空则不读任何配置文件**，纯默认值跑）
+#     -dashboard :8090   覆盖 runtime.dashboard_addr（显式传空串 = 本次不开 Dashboard）
+#     -mode paper|live   覆盖 runtime.mode
+#     -stake 2           覆盖 flip.stake
+#   **不读任何环境变量**（唯一例外: PM_CONFIG_DECRYPT_PASSWORD，见下"敏感字段"）。
+#
+# ── 用法 ──
+#   go run ./cmd/flip                                       # 默认值 + 不开 Dashboard
+#   go run ./cmd/flip -config v4.config.yaml -dashboard :8090
+#
+# ⚠️ 本文件是**默认值镜像**（internal/config/configfile_drift_test.go 守着，改值会测试失败）。
+#    要调参请复制成 config.local.yaml（已 gitignore）再用 -config 指过去。
+#
+# ── 敏感字段（sdk.polymarket.owner_key / clob_creds）──
+#   留空       = 只读运行（纸面交易，引擎自动生成临时密钥）
+#   填密文     = 实盘可用。密文由 SDK 的 pmutils.NewEncryptor(密码).Encrypt(明文) 生成
+#   启动时解密: 优先读环境变量 PM_CONFIG_DECRYPT_PASSWORD，否则终端无回显输入
+#               （nohup/systemd 下没有终端 → 必须设该环境变量）
+#   ⚠️ **明文会被当成密文解析而启动失败**（判定语义是"非空即密文"，没有明文兜底）。
+# =============================================================================
+
+# ---------------------------------------------------------------------------
+# 运行/输出/成交模式（原 -output / -slug / -mode / -dashboard）
+# ---------------------------------------------------------------------------
+runtime:
+  # 成交模式: paper|live。live 需凭证齐全（owner_key + clob_creds + funder_address），
+  # 缺任一则告警并降级 paper。写其它值 = 启动报错（不再静默当 paper）。
+  mode: "paper"
+
+  # 观测 JSONL 输出目录（按日切分: touches_/windows_/winstats_YYYY-MM-DD.jsonl）
+  output_dir: "data/v4"
+
+  # HTTP Dashboard 监听地址，如 ":8090"。留空 = 不启动 Dashboard
+  dashboard_addr: ""
+
+  # Polymarket 市场 slug 前缀，运行时拼接 "-<unix_timestamp>"
+  slug_prefix: "btc-updown-5m"
+
+# ---------------------------------------------------------------------------
+# 策略参数（1:1 对应 flip.Config；标定出处 python/v4/01_backtest_r1.py）
+# ---------------------------------------------------------------------------
+flip:
+  # 触发: 某侧 ask 满足 0 < ask ≤ 此值 即触底观测（唯一触底侧即狗侧）
+  trigger_ask_max: 0.20
+
+  # 急跌腿: 触发前 crash_window 个 tick 槽位内同侧 ask 曾 ≥ 此值
+  crash_min_ask: 0.40
+
+  # 急跌窗（tick 槽位，1 槽 = 1s）
+  crash_window: 45
+
+  # 浅洞带（组合版侧别带 2026-09-03）: dist_s 必须 ∈ (lo(side), dist_hi) 开区间
+  #   yes: 破位下行中继族 → 稍深（BAND_YC）
+  #   no : 顶部恐慌族, spot 领先 TWAP → 带深一档（BAND_NO）
+  dist_lo_yes: -0.6
+  dist_lo_no: -1.0
+
+  # 浅洞带上界: dist_s < 0 = 现货必须在狗败侧（方向约束, 开区间）
+  dist_hi: 0.0
+
+  # 时间腿: 仅 rem > 此值（秒）的触发有效 —— 窗口前 ~2 分钟内才观测
+  rem_min: 180
+
+  # 每信号投入 USDC（成交口径 shares = stake / fill，必须 > 0）
+  stake: 2
+
+  # 盘口延迟闸: book_latency_ms > 此值的 tick 无效（回测 MAX_LAT 同值）。
+  # 默认值 = 数据支持值; 往下收紧是负收益（T=20ms EV +0.633→+0.551），
+  # 见 docs/dog020_risk_latency_plan_2026-09-16.md §1.2b。btreplay 逐位对账亦钉 300。
+  max_book_lat_ms: 300
+
+# ---------------------------------------------------------------------------
+# 数据源新鲜度闸（Binance spot / Chainlink TWAP）
+# ---------------------------------------------------------------------------
+feed:
+  # Binance spot 距**本地接收**超过此值判现货缺失（→ missing_spot 否决该 tick）。
+  # BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻而非交易所
+  # 成交时间戳（链路排队/服务器时钟都会让后者失真）。
+  max_spot_age_ms: 2000
+
+  # TWAP-60 新鲜度: 窗口起 anchor 与窗末 close 共用。陈旧 close 会把假振幅污染进
+  # 其后 18 窗的 σ 尺度；陈旧 anchor 让整窗 dist_s 相对错锚失真（超龄按锚缺失整窗跳过）。
+  # 2min 看门狗重建线太粗，够不到数秒~分钟的推送缺口（实测曾现 55s 缺口）；
+  # 正常推送龄 p99≈1.7s，10s 余量充足。
+  max_twap_age_ms: 10000
+
+# ---------------------------------------------------------------------------
+# 风控
+# ---------------------------------------------------------------------------
+risk:
+  # 日亏熔断线（**必须为负**）: 当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存
+  # （跨 UTC 日自动归零）。两模式同源判据: live 拦下真实 POST，paper 只写 gate_reason
+  # 且行照记照结算（被闸行即"不熔断会怎样"的反事实）。
+  # 24U 在纸面 14 天回放里 Δ+64.9U，4 次触发全落在亏损日、10 个盈利日零误伤。
+  max_daily_loss: -24
+
+# ---------------------------------------------------------------------------
+# Binance 数据源（浅洞腿输入）
+# ---------------------------------------------------------------------------
+binance:
+  # 交易对。⚠️ 不影响引擎硬编码的 TWAP 符号 "BTC"（Chainlink crypto-price 口径）
+  symbol: "BTCUSDT"
+
+  # WebSocket 流地址（trade + depth20 多流复用）
+  stream_base_url: "wss://data-stream.binance.vision"
+
+  # REST 基地址
+  rest_base_url: "https://data-api.binance.vision"
+
+# ---------------------------------------------------------------------------
+# Polymarket SDK
+# ---------------------------------------------------------------------------
+sdk:
+  # HTTP 客户端超时（⚠️ 必须带单位——写 10 会被解析成 10 纳秒）
+  http_timeout: 10s
+
+  # 调试模式: 打印请求/响应详情
+  http_debug: false
+
+  # SOCKS5 代理（网络受限地区用），如 "socks5://127.0.0.1:1080"。留空 = 不用代理
+  # 注意: 这与 https_proxy/http_proxy 是两回事——后者由 Go 标准库
+  # http.ProxyFromEnvironment 消费，走 HTTP 代理拨号 Binance。
+  socks_proxy: ""
+
+  # 429 限流重试: 0 = 用 SDK 内建兜底（6 次重试 / 1000ms 基础退避 / 10s 总等待预算）。
+  # ⚠️ 不要照抄 sdk.DefaultConfig() 的 3 / 500ms —— 那会静默改掉退避行为。
+  rate_limit_max_retries: 0
+  rate_limit_base_delay: 0s
+  rate_limit_retry_budget: 0s
+
+  polymarket:
+    # Polygon 链 ID: 137 = 主网
+    chain_id: 137
+
+    # ------ API 端点 ------
+    clob_base_url: "https://clob.polymarket.com"
+    clob_ws_base_url: "wss://ws-subscriptions-clob.polymarket.com"
+    gamma_base_url: "https://gamma-api.polymarket.com"
+    data_api_base_url: "https://data-api.polymarket.com"
+
+    # 实时数据（RTDS）地址: 本引擎未使用（照默认值留着，便于将来接）
+    live_ws_base_url: "wss://ws-live-data.polymarket.com"
+
+    # Relayer 地址（代理提交交易用）: 本引擎未使用，留空 = SDK 内建兜底
+    relayer_base_url: ""
+
+    # 加密价格接口: 留空 = SDK 默认 https://polymarket.com/api/crypto/crypto-price
+    crypto_price_url: ""
+
+    # 签名类型: 0 = EOA, 1 = POLY_PROXY, 2 = POLY_GNOSIS_SAFE（live 必须用 2，
+    # 零值 EOA 会被 CLOB 拒单）; 引擎恒按 2 启动，此键一般不需要改。
+    signature_type: 2
+
+    # ------ 凭证（见文件头"敏感字段"）------
+    # 钱包私钥: 留空 = 只读纸面; 实盘请填 Encrypt() 生成的密文（明文会启动失败）
+    owner_key: ""
+
+    # 代理钱包地址（POLY_GNOSIS_SAFE 的 maker）
+    funder_address: ""
+
+    # Builder 佣金码（可选）
+    # builder_code: ""
+
+    # CLOB L2 凭证（下单必需）: 留空/整段注释 = 不下单（paper 够用）
+    # clob_creds:
+    #   key: ""
+    #   secret: ""
+    #   passphrase: ""
+
+    # Builder / Relayer 凭证（可选，本引擎未使用）
+    # builder_creds:
+    #   key: ""
+    #   secret: ""
+    #   passphrase: ""
+    # relayer_key:
+    #   key: ""
