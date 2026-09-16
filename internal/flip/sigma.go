@@ -7,7 +7,7 @@ import "sync"
 // （Recorder.RecentWindows）与新鲜度判定（localFreshMax 派生）。
 const (
 	HistWindows = 18 // σ 容量: 前 ≤18 个已完成窗口振幅的均值
-	HistMin     = 3  // σ 可用所需最少窗口数: 不足则 no_hist（冷启动期）
+	HistMin     = 3  // σ 可用所需最少窗口数: 不足 → 引擎 no_hist; cmd/flip 前置闸同判据整窗跳过（2026-09-16）
 )
 
 // HistState 维护 σ 的滚动窗口（线程安全）: hist_bps = 前 ≤HistWindows 个

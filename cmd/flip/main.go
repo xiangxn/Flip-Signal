@@ -498,6 +498,27 @@ func main() {
 			}
 			continue
 		}
+		// σ 未就绪整窗跳过（2026-09-16）: 冷启动时本地 windows_* 不可用（断档/
+		// 陈旧）会回退官方网络预热——warmupSigma 的预热是异步 goroutine, 429
+		// 退避下实测 >70s, 边界落在它完成之前时 hist.Bps 恒 0。此时本窗任何触底
+		// 都被 no_hist 拒（首触即 Done → 必然零信号）, 却仍落一条 hist_bps=0 观测,
+		// 踩中 06_oos_review.py 的关键字段 0 异常硬检查。与锚缺失同一条原则
+		// （数据源不可信 → 本窗不观测, 决策 #12）, 故整窗跳过并留 skip=no_sigma;
+		// 下一窗在 5min 后, 预热早已完成, 不会连跳。无 close 采样 → windows_*
+		// 缺一行, 等价于停机窗（RecentBlock 600s 缺口容差吸收, 同 dup_record）。
+		// 位置在订阅/预取之前: 本段到步骤 5 之间只有同步调用, σ 取值不变。
+		if hist.Count() < flip.HistMin {
+			log.Printf("[Cycle] ⚠️ 窗口 %s σ 未就绪（%d < %d 窗，预热中），跳过本窗口",
+				slug, hist.Count(), flip.HistMin)
+			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
+			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_sigma", anchorRecovery{})
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(time.Until(nextStart.Add(windowSec * time.Second))):
+			}
+			continue
+		}
 		// live 每窗预热 tick size/negRisk/feeRate: SDK CreateOrder 恒走
 		// ResolveTickSize + GetNegRisk 网调——不预热则信号路径多 1-2 次串行网调;
 		// 用本窗 gamma 数据预热, 与下单同源、信号路径零额外网调（见 prefetch.go）。
@@ -523,6 +544,7 @@ func main() {
 		bookMu.Unlock()
 
 		// 步骤 5: 注入窗口上下文（anchor/σ），启动 1s tick 采集
+		// （σ > 0 由前置闸保证; 锚可缺失, 由恢复通道回填——两条闸见上）
 		// anchor = 边界瞬间的 TWAP-60 流值（官方开盘价 p50 偏差 0.08bps / p99
 		// 1.14bps，口径文档已量化——记录在案，复验按分布对比不做逐笔对账）。
 		// 新鲜度守卫（2026-09-09 review）: 边界采样时刻 TWAP 断流会把陈旧流值
@@ -605,9 +627,7 @@ func main() {
 				return
 			case tickTime := <-ticker.C:
 				rem := int(endTime.Sub(tickTime).Seconds())
-				if rem < 0 {
-					rem = 0
-				}
+				rem = max(rem, 0)
 				lastTick = sampleTick(tickTime, rem, runtime, cfg.Feed.MaxSpotAgeMs)
 
 				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
