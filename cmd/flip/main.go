@@ -11,12 +11,16 @@
 // 结算轮询只注册实际成交信号（paper 恒成交; live 仅 filled/partial）；
 // 崩溃后重启按磁盘 pending 恢复注册, submitting/未知结果行打 ⚠️ 人工核对。
 //
+// 配置见包 internal/config 与根目录 v4.config.yaml（全量默认值示例）：
+// 优先级 = CLI flag > 配置文件 > 代码默认值，**不读环境变量**（唯一例外是解密密文
+// 凭证用的 PM_CONFIG_DECRYPT_PASSWORD）。本文件只保留 4 个 flag。
+//
 // 用法：
 //
-//	go run ./cmd/flip -output data/v4 -dashboard :8090
-//	go run ./cmd/flip --trigger-ask-max 0.2 --crash-min-ask 0.4 --stake 2
-//	# live 需 CLOB 凭证 env（见文末 defaultSDKConfig）+ 独立输出目录
-//	go run ./cmd/flip -mode live -output data/v4live --max-daily-loss -20
+//	go run ./cmd/flip                                       # 代码默认值（不开 Dashboard）
+//	go run ./cmd/flip -config v4.config.yaml -dashboard :8090
+//	go run ./cmd/flip -config v4.config.yaml -mode live     # live 需配置文件里有密文凭证
+//	go run ./cmd/flip -stake 5                              # 单点覆盖（最高优先级）
 package main
 
 import (
@@ -35,10 +39,9 @@ import (
 	"time"
 
 	"github.com/tidwall/gjson"
-	"github.com/xiangxn/go-polymarket-sdk/model"
-	"github.com/xiangxn/go-polymarket-sdk/orders"
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
+	"github.com/necklace/flip-signal/internal/config"
 	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
@@ -62,23 +65,10 @@ const lateLimit = 15 * time.Second
 // （2026-09-01 服务器实测断流事件，TwapAdapter 内建看门狗，见其注释）。
 const twapMaxStale = 2 * time.Minute
 
-// 数据源新鲜度默认阈值（2026-09-16 由包内常量改为 flag；默认值 = 原常量值，
-// 行为中性——见 docs/dog020_risk_latency_plan_2026-09-16.md §2.2）:
-//
-//   - spot 2s: Binance spot 距本地接收 >此值判现货缺失（置 0 → missing_spot 否决）。
-//     BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻而非交易所
-//     成交时间戳（链路排队/服务器时钟都会让后者失真，见 BinanceAdapter）。
-//   - TWAP 10s: 窗口起/止两处采样共用——① 窗口结束 σ push（陈旧 close 会把假振幅
-//     污染进其后 18 窗的 σ 尺度，进而扭曲浅洞带判定）; ② 窗口起点 anchor（陈旧
-//     anchor 让整窗 dist_s 相对错锚失真，超龄按锚缺失整窗跳过，镜像回测 :69）。
-//     2min 看门狗重建线太粗，够不到数秒~分钟的推送缺口（实测曾现 55s 缺口）；
-//     正常推送龄 p99≈1.7s，10s 余量充足。
-const (
-	spotFreshMsDefault  int64 = 2000
-	twapFreshMsDefault  int64 = 10_000
-	maxBookLatMsDefault int64 = 300
-	maxDailyLossDefault       = -24
-)
+// 数据源新鲜度阈值（spot/twap）与日亏熔断线的默认值已于 2026-09-16 迁入
+// internal/config（`feed.*` / `risk.max_daily_loss`）——本文件不再持有默认值，
+// 原「为什么是 2s / 10s」的论证见 internal/config/config.go defaults() 注释，
+// 出处 docs/dog020_risk_latency_plan_2026-09-16.md §2.2。
 
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
 const twapLookbackSeconds = 60
@@ -101,56 +91,47 @@ func init() {
 }
 
 func main() {
-	// ── CLI 参数（与回测脚本同名，优先级最高）──
-	outputDir := flag.String("output", "data/v4", "观测 JSONL 输出目录（按日切分）")
-	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（如 :8090）")
-	slugPrefix := flag.String("slug", "btc-updown-5m", "Polymarket slug 前缀")
-	mode := flag.String("mode", "paper", "成交模式: paper|live（live 需 CLOB 凭证 env, 缺则降级 paper）")
-	triggerAskMax := flag.Float64("trigger-ask-max", 0.20, "触发阈值: 某侧 ask ≤ 此值 即触底观测")
-	crashMinAsk := flag.Float64("crash-min-ask", 0.40, "急跌腿: m_45 窗内同侧 ask 曾 ≥ 此值")
-	crashWindow := flag.Int("crash-window", 45, "急跌窗: 触发前 N 个 tick 槽位内求 max")
-	distLoYes := flag.Float64("dist-lo-yes", -0.6, "yes 浅洞带下界: dist_s 必须 > 此值（组合版 BAND_YC）")
-	distLoNo := flag.Float64("dist-lo-no", -1.0, "no 浅洞带下界: dist_s 必须 > 此值（组合版 BAND_NO）")
-	distHi := flag.Float64("dist-hi", 0.0, "浅洞带上界: dist_s 必须 < 此值（开区间）")
-	remMin := flag.Int("rem-min", 180, "时间腿: 仅 rem > 此值的触发有效")
-	stake := flag.Float64("stake", 2, "每信号投入 USDC")
-	maxDailyLoss := flag.Float64("max-daily-loss", maxDailyLossDefault, "日亏熔断线: 当日(UTC)已结算 P&L ≤ 此值 停单（负值；两模式同源, 见 docs/dog020_risk_latency_plan_2026-09-16.md）")
-	maxBookLat := flag.Int64("max-book-lat-ms", maxBookLatMsDefault, "盘口延迟闸: book_latency_ms > 此值的 tick 无效（回测 MAX_LAT=300; 收紧是负收益, 见 docs 同文 §1.2b）")
-	maxSpotAge := flag.Int64("max-spot-age-ms", spotFreshMsDefault, "Binance spot 新鲜度闸: 距本地接收 > 此值判现货缺失")
-	maxTwapAge := flag.Int64("max-twap-age-ms", twapFreshMsDefault, "TWAP 新鲜度闸: 窗口起 anchor + 窗末 close 共用，超龄按缺失处理")
+	// ── CLI 参数（仅 4 个，其余一律走配置文件; 优先级最高）──
+	configPath := flag.String("config", "", "配置文件路径（YAML; 空 = 只用代码默认值）")
+	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（覆盖 runtime.dashboard_addr）")
+	mode := flag.String("mode", "", "成交模式: paper|live（覆盖 runtime.mode）")
+	stake := flag.Float64("stake", 0, "每信号投入 USDC（覆盖 flip.stake）")
 	flag.Parse()
+
+	// set 记录「哪些 flag 被显式给出」。用 flag.Visit 而非比零值: 这样 -dashboard ""
+	// 能真的关掉配置文件里的 :8090，-stake 0 也会走校验报错（响亮）而不是静默回退。
+	set := map[string]bool{}
+	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// ── 参数校验（快速失败: 误配比不配更危险）──
-	// 阈值 ≤0 会让全部 tick/采样无效（信号静默归零而非报错），必须挡在启动前；
-	// book 阈值 <100ms 属负收益区但仍允许（配置化的意义是「能调」），只告警。
-	if *maxBookLat <= 0 || *maxSpotAge <= 0 || *maxTwapAge <= 0 {
-		log.Fatalf("数据源新鲜度阈值必须 > 0（book=%d spot=%d twap=%d）——0 会让全部采样判无效、信号静默归零",
-			*maxBookLat, *maxSpotAge, *maxTwapAge)
+	// ── 配置加载（CLI flag > 配置文件 > 代码默认值; 不读环境变量）──
+	cfg, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatalf("[Config] %v", err)
 	}
-	if *maxBookLat < 100 {
-		log.Printf("⚠️  [Dog] --max-book-lat-ms=%d < 100ms —— 14 天回测显示该区为负收益（EV 单调变差），确认无误再用", *maxBookLat)
+	if set["dashboard"] {
+		cfg.Runtime.DashboardAddr = *dashboardAddr
 	}
-	if *maxDailyLoss >= 0 {
-		log.Fatalf("--max-daily-loss 必须为负值（现值 %.2f）——口径是「当日已结算 P&L ≤ 线值即停单」，传正数会立刻永久熔断", *maxDailyLoss)
+	if set["mode"] {
+		cfg.Runtime.Mode = *mode
+	}
+	if set["stake"] {
+		cfg.Flip.Stake = *stake
+	}
+	// 校验判的是最终生效值，必须在覆盖之后
+	warns, verr := config.Validate(cfg)
+	if verr != nil {
+		log.Fatalf("[Config] 配置校验失败: %v", verr)
+	}
+	for _, w := range warns {
+		log.Printf("⚠️  [Config] %s", w)
 	}
 
-	// ── 策略配置 ──
-	cfg := flip.Config{
-		TriggerAskMax: *triggerAskMax,
-		CrashMinAsk:   *crashMinAsk,
-		CrashWindow:   *crashWindow,
-		DistLoYes:     *distLoYes,
-		DistLoNo:      *distLoNo,
-		DistHi:        *distHi,
-		RemMin:        *remMin,
-		Stake:         *stake,
-		MaxBookLatMs:  *maxBookLat,
-	}
-	// ── Polymarket 客户端（未配置私钥则自动生成临时密钥，只读运行）──
-	cfgSDK := defaultSDKConfig()
+	// ── Polymarket 客户端（配置文件未写 sdk.polymarket.owner_key 则自动生成
+	// 临时密钥，只读运行）──
+	cfgSDK := cfg.SDK
 	readOnly := false
 	if cfgSDK.Polymarket.OwnerKey == "" {
 		key := make([]byte, 32)
@@ -162,11 +143,11 @@ func main() {
 	}
 	client := sdk.NewClient(&cfgSDK)
 	if readOnly {
-		log.Println("[Dog] ⚠️  未配置 POLYMARKET_OWNER_KEY —— 只读运行（纸面交易）")
+		log.Println("[Dog] ⚠️  配置文件未提供 sdk.polymarket.owner_key —— 只读运行（纸面交易）")
 	}
 
 	// ── 成交执行器 + live 分流（一个函数: 默认纸面; -mode live 且凭证齐 → 真单）──
-	effMode, executor := resolveLiveMode(*mode, cfgSDK, readOnly, client)
+	effMode, executor := resolveLiveMode(cfg.Runtime.Mode, cfgSDK, readOnly, client)
 
 	// ── PM 订单簿订阅（SDK MarketMonitor）──
 	monitor := sdk.NewMarketMonitor(cfgSDK.Polymarket.ClobWSBaseURL, false, client, false)
@@ -237,7 +218,7 @@ func main() {
 	// Start 首次拨号失败不自愈（返回 err），外层包装指数退避重试直至连上；
 	// 后续断线由 runReadLoop 自愈重连。拨号走 http.ProxyFromEnvironment
 	// （部署机勿设指向不通代理的 HTTP(S)_PROXY）。
-	binance := feed.NewBinanceAdapter()
+	binance := feed.NewBinanceAdapterWithConfig(cfg.Binance)
 	go func() {
 		backoff := time.Second
 		for {
@@ -256,7 +237,7 @@ func main() {
 	}()
 
 	// ── 记录器与结算轮询 ──
-	recorder, err := flip.NewRecorder(*outputDir)
+	recorder, err := flip.NewRecorder(cfg.Runtime.OutputDir)
 	if err != nil {
 		log.Fatalf("[Dog] 记录器创建失败: %v", err)
 	}
@@ -303,8 +284,8 @@ func main() {
 			Rec:          recorder,
 			Ex:           executor,
 			Live:         effMode == "live",
-			Stake:        cfg.Stake,
-			MaxDailyLoss: *maxDailyLoss,
+			Stake:        cfg.Flip.Stake,
+			MaxDailyLoss: cfg.Risk.MaxDailyLoss,
 			FirstWindow:  effMode == "live", // live 首窗禁单（重启防双单缝隙）
 			Tokens: func() (string, string) {
 				tokMu.RLock()
@@ -320,15 +301,15 @@ func main() {
 	}
 
 	// ── Dashboard（手机浏览器兼容的单页前端）──
-	if *dashboardAddr != "" {
+	if cfg.Runtime.DashboardAddr != "" {
 		// 三源新鲜度阈值下发（前端按阈值标红——book/twap 无颜色语义的缺口补上）
 		limits := dashboard.SourceLimits{
-			BookLatMs: cfg.MaxBookLatMs,
-			SpotAgeMs: *maxSpotAge,
-			TwapAgeMs: *maxTwapAge,
+			BookLatMs: cfg.Flip.MaxBookLatMs,
+			SpotAgeMs: cfg.Feed.MaxSpotAgeMs,
+			TwapAgeMs: cfg.Feed.MaxTwapAgeMs,
 		}
-		dashState := dashboard.NewState(recorder, runtime, cfg, effMode, limits)
-		go dashState.ListenAndServe(*dashboardAddr)
+		dashState := dashboard.NewState(recorder, runtime, cfg.Flip, effMode, limits)
+		go dashState.ListenAndServe(cfg.Runtime.DashboardAddr)
 	}
 
 	// σ 启动预热（本地 windows_*.jsonl 优先, 不足/陈旧回退官方网络预热——见 warmupSigma）
@@ -337,19 +318,19 @@ func main() {
 
 	log.Println("========================================")
 	if effMode == "live" {
-		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（FAK 限价单 @ 触发 ask, 日亏熔断 ≤%.1fU）", *maxDailyLoss)
+		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（FAK 限价单 @ 触发 ask, 日亏熔断 ≤%.1fU）", cfg.Risk.MaxDailyLoss)
 	} else {
 		// 纸面同样打印熔断线: 闸判据两模式同源（方案 A）——纸面被闸行照记照结算,
 		// 只多 gate_reason 字段（分析脚本需过滤, 见 plan §3.5/§3.7）
 		log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s, 日亏熔断 ≤%.1fU 影子: 只标记不拦单）",
-			effMode, *maxDailyLoss)
+			effMode, cfg.Risk.MaxDailyLoss)
 	}
-	log.Printf(" 输出: %s  |  Slug: %s", *outputDir, *slugPrefix)
+	log.Printf(" 输出: %s  |  Slug: %s", cfg.Runtime.OutputDir, cfg.Runtime.SlugPrefix)
 	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞 yes(%.2f,%.2f)/no(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
-		cfg.TriggerAskMax, cfg.CrashWindow, cfg.CrashMinAsk,
-		cfg.DistLoYes, cfg.DistHi, cfg.DistLoNo, cfg.DistHi, cfg.RemMin, cfg.Stake)
+		cfg.Flip.TriggerAskMax, cfg.Flip.CrashWindow, cfg.Flip.CrashMinAsk,
+		cfg.Flip.DistLoYes, cfg.Flip.DistHi, cfg.Flip.DistLoNo, cfg.Flip.DistHi, cfg.Flip.RemMin, cfg.Flip.Stake)
 	log.Printf(" 新鲜度闸: book_lat≤%dms + spot_age≤%dms + twap_age≤%dms（生效值，见 docs/dog020_risk_latency_plan_2026-09-16.md）",
-		cfg.MaxBookLatMs, *maxSpotAge, *maxTwapAge)
+		cfg.Flip.MaxBookLatMs, cfg.Feed.MaxSpotAgeMs, cfg.Feed.MaxTwapAgeMs)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 浅洞]")
 	log.Println("========================================")
 
@@ -394,7 +375,7 @@ func main() {
 			logWinstats("", "", nextStart.Unix(), 0, 0, flip.WindowStats{}, "late")
 			nextStart = nextStart.Add(windowSec * time.Second)
 		}
-		slug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
+		slug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
 
 		// 步骤 2: 市场信息（优先用本窗 tick 期间预取的缓存；未命中则按
 		// 边界前 20s 预取 + 5s 重试，仅首窗/跳窗后走此路径）
@@ -523,17 +504,17 @@ func main() {
 		// 1.14bps，口径文档已量化——记录在案，复验按分布对比不做逐笔对账）。
 		// 新鲜度守卫（2026-09-09 review）: 边界采样时刻 TWAP 断流会把陈旧流值
 		// 当锚, 整窗 dist_s/触发相对错锚失真——与窗口结束 σ 同一阈值
-		// twapCloseFreshMs, 超龄把 anchor 置 0 → 引擎整窗不观测 + 窗口结束
+		// （feed.max_twap_age_ms）, 超龄把 anchor 置 0 → 引擎整窗不观测 + 窗口结束
 		// 不计入 σ（既有 anchor≤0 分支, 镜像回测 :69 锚缺失事件跳过）。
 		anchor, anchorAgeMs := twapAdapter.Latest()
-		if !flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, *maxTwapAge) {
+		if !flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, cfg.Feed.MaxTwapAgeMs) {
 			if anchor > 0 {
 				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms），整窗按锚缺失跳过",
-					conditionID, anchorAgeMs, *maxTwapAge)
+					conditionID, anchorAgeMs, cfg.Feed.MaxTwapAgeMs)
 			}
 			anchor = 0
 		}
-		engine := flip.NewEngine(cfg)
+		engine := flip.NewEngine(cfg.Flip)
 		histBps := hist.Bps(anchor) // 本窗 σ（引擎判定输入 + 窗末健康度落盘共用）
 		engine.BeginWindow(anchor, histBps)
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
@@ -556,7 +537,7 @@ func main() {
 				if rem < 0 {
 					rem = 0
 				}
-				lastTick = sampleTick(tickTime, rem, runtime, *maxSpotAge)
+				lastTick = sampleTick(tickTime, rem, runtime, cfg.Feed.MaxSpotAgeMs)
 
 				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
 				// 结算只注册实际成交（paper 行 ExecStatus 空恒成交; live 仅
@@ -574,7 +555,7 @@ func main() {
 				// rem%5==0 提供失败重试点（20/15/10/5 共 4 次）；loop 顶部
 				// 按 slug 匹配复用，窗口被跳过时自动丢弃
 				if nextCache == nil && rem <= 20 && rem%5 == 0 {
-					nextSlug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Add(windowSec*time.Second).Unix())
+					nextSlug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Add(windowSec*time.Second).Unix())
 					res, err := client.FetchMarketBySlug(nextSlug)
 					if err != nil {
 						log.Printf("[Cycle] ⚠️ 下一窗预取失败 %s: %v（rem=%d 时重试）", nextSlug, err, rem)
@@ -596,11 +577,11 @@ func main() {
 		// close 采自边界瞬间的 TWAP 流值（与官方收盘价口径差异已在文档量化）。
 		// 无触底的窗口无记录（回测 extract 同款语义），本窗结算注册已在触发时完成。
 		// 新鲜度守卫: 断流期陈旧流值会把本窗振幅放大成假 σ 污染其后 18 窗，
-		// 缺一窗可接受（阈值依据见 twapCloseFreshMs）。
+		// 缺一窗可接受（阈值依据见 feed.max_twap_age_ms 的注释）。
 		switch {
 		case anchor <= 0 || lastTick.TwapPrice <= 0:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)
-		case lastTick.TwapAgeMs > *maxTwapAge:
+		case lastTick.TwapAgeMs > cfg.Feed.MaxTwapAgeMs:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s TWAP 陈旧（龄 %dms），本窗不计入 σ",
 				conditionID, lastTick.TwapAgeMs)
 		default:
@@ -778,21 +759,21 @@ func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.
 	if mode != "live" {
 		return "paper", flip.NewExecutor("paper")
 	}
-	// live 依赖三段凭证（defaultSDKConfig 已读 env, 见下）:
-	//   1) POLYMARKET_OWNER_KEY: 订单签名 EOA;
-	//   2) POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE: CLOB L2 headers;
-	//   3) POLYMARKET_FUNDER_ADDRESS: Safe 签名(POLY_GNOSIS_SAFE=2)下的 maker
+	// live 依赖三段凭证（全部来自配置文件, 2026-09-16 起不再读环境变量）:
+	//   1) sdk.polymarket.owner_key: 订单签名 EOA;
+	//   2) sdk.polymarket.clob_creds.{key,secret,passphrase}: CLOB L2 headers;
+	//   3) sdk.polymarket.funder_address: Safe 签名(POLY_GNOSIS_SAFE=2)下的 maker
 	//      地址——非可选: 缺失则 maker=裸 EOA, 以余额/授权不符被 CLOB 拒单。
 	creds := cfgSDK.Polymarket.CLOBCreds
 	var missing []string
 	if readOnly {
-		missing = append(missing, "POLYMARKET_OWNER_KEY")
+		missing = append(missing, "sdk.polymarket.owner_key")
 	}
 	if creds == nil || creds.Key == "" || creds.Secret == "" || creds.Passphrase == "" {
-		missing = append(missing, "POLYMARKET_CLOB_KEY/SECRET/PASSPHRASE")
+		missing = append(missing, "sdk.polymarket.clob_creds.key/secret/passphrase")
 	}
 	if cfgSDK.Polymarket.FunderAddress == "" {
-		missing = append(missing, "POLYMARKET_FUNDER_ADDRESS")
+		missing = append(missing, "sdk.polymarket.funder_address")
 	}
 	if len(missing) > 0 {
 		log.Printf("[Trading] ⚠️ -mode live 但凭证缺失（%s）—— 降级纸面执行", strings.Join(missing, ", "))
@@ -868,41 +849,4 @@ func warmupSigma(hist *flip.HistState, r *flip.Recorder, client *sdk.PolymarketC
 			log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
 		}()
 	}
-}
-
-// defaultSDKConfig 构造 SDK 配置（环境变量覆盖）。
-func defaultSDKConfig() sdk.Config {
-	cfg := sdk.Config{
-		HttpTimeout: 10 * time.Second,
-		Polymarket: sdk.PolymarketConfig{
-			ChainID:        137,
-			ClobBaseURL:    "https://clob.polymarket.com",
-			ClobWSBaseURL:  "wss://ws-subscriptions-clob.polymarket.com",
-			GammaBaseURL:   "https://gamma-api.polymarket.com",
-			DataAPIBaseURL: "https://data-api.polymarket.com",
-			LiveWSBaseURL:  "wss://ws-live-data.polymarket.com",
-		},
-	}
-	if v := os.Getenv("POLYMARKET_OWNER_KEY"); v != "" {
-		cfg.Polymarket.OwnerKey = v
-	}
-	if v := os.Getenv("POLYMARKET_PROXY"); v != "" {
-		cfg.SocksProxy = v
-	}
-	if v := os.Getenv("POLYMARKET_CLOB_KEY"); v != "" {
-		cfg.Polymarket.CLOBCreds = &model.ApiKeyCreds{
-			Key:        v,
-			Secret:     os.Getenv("POLYMARKET_CLOB_SECRET"),
-			Passphrase: os.Getenv("POLYMARKET_CLOB_PASSPHRASE"),
-		}
-	}
-	if v := os.Getenv("POLYMARKET_FUNDER_ADDRESS"); v != "" {
-		cfg.Polymarket.FunderAddress = v
-	}
-	// live 签名形态恒为 Gnosis Safe（POLY_GNOSIS_SAFE=2, maker=FunderAddress,
-	// 签名=OwnerKey EOA）——与 eth 分支生产配置同款; 显式赋值（本文件不用
-	// sdk.DefaultConfig, 零值=EOA=0, live 下会被 CLOB 拒单）; paper 路径不
-	// 参与签名, 赋值无副作用。
-	cfg.Polymarket.SignatureType = orders.POLY_GNOSIS_SAFE
-	return cfg
 }
