@@ -6,6 +6,50 @@ import "sync"
 // （python LOOKS=(20,30,45)，另有 60 仅作子版本参考未落地）。
 const lookMax = 45
 
+// 丢信号原因（LostTrigger.Reason 取值）。
+const (
+	// LostReasonStaleBook 盘口延迟超阈（BookLatMs > MaxBookLatMs）。
+	LostReasonStaleBook = "stale_book"
+	// LostReasonBookMissing 整簿四字段报价不全（无快照行）。
+	LostReasonBookMissing = "book_missing"
+)
+
+// LostTrigger 是一个「本会触发但被数据质量闸挡掉」的 tick 明细。
+//
+// 为什么需要它（2026-09-16 补, docs/dog020_risk_latency_plan_2026-09-16.md §1.3）:
+// 无效 tick 走 pushSlots 直接 return，若此刻某侧 ask 已砸到 ≤0.20，这个信号就凭空
+// 消失——不进观测、不进 reject 原因统计、Dashboard 也看不到。09-15 OOS 复验的
+// 信号频率闸门（实测 36.5/日 vs 计划 44±5）一直查不下去，缺的就是这条痕迹。
+type LostTrigger struct {
+	Ts        int64   `json:"ts"`          // 该 tick 采样时刻（unix 毫秒）
+	Side      string  `json:"side"`        // 本会触发的狗侧（yes/no）
+	Rem       int     `json:"rem"`         // 窗口剩余秒
+	Ask       float64 `json:"ask"`         // 该侧 ask（≤ TriggerAskMax）
+	BookLatMs int64   `json:"book_lat_ms"` // 该 tick 盘口延迟
+	Reason    string  `json:"reason"`      // stale_book | book_missing
+}
+
+// WindowStats 是本窗 tick 健康度统计（每窗无条件落盘一行, 见 Recorder.LogWindowStats）。
+//
+// 只计数、不参与任何判定——btreplay 与 01_backtest_r1.py 逐位对账是红线，
+// 计数器禁止触碰 pushSlots / decide 的任何分支走向。
+type WindowStats struct {
+	// AnchorMissing 锚缺失: 整窗不观测（镜像回测锚缺失事件跳过），下方计数恒 0。
+	AnchorMissing bool `json:"anchor_missing,omitempty"`
+	// Ticks 进入有效性分类的 tick 数（不含 rem==0 终 tick、不含 Done 后的 tick）。
+	Ticks int `json:"ticks"`
+	// TicksValid 有效 tick（过延迟闸 + 整簿门控）。
+	TicksValid int `json:"ticks_valid"`
+	// BookStale 延迟超阈而无效的 tick（占槽不检）。
+	BookStale int `json:"book_stale"`
+	// BookMissing 整簿四字段不全而无效的 tick（占槽不检）。
+	BookMissing int `json:"book_missing"`
+	// LostTriggers 本会触发但被上述两闸挡掉的 tick 明细（诊断核心）。
+	LostTriggers []LostTrigger `json:"lost_triggers,omitempty"`
+}
+
+// 恒等（每窗落盘后可直接核对）: Ticks == TicksValid + BookStale + BookMissing
+
 // Engine 是「狗@0.2」触底观测状态机。
 //
 // 每 300s 窗口重置一次（或每窗新建实例）：Watching 中每秒推入 ProcessTick，
@@ -34,6 +78,8 @@ type Engine struct {
 
 	upAsks   []float64 // up/down 并行的 45+ 槽 ask ring（无效 tick 压 0）
 	downAsks []float64
+
+	stats WindowStats // 本窗 tick 健康度（纯计数, 不参与判定; 每窗重置）
 }
 
 // NewEngine 创建一个处于 Watching 态的空引擎（窗口上下文由 BeginWindow 注入）。
@@ -51,6 +97,7 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.histBps = histBps
 	e.upAsks = e.upAsks[:0]
 	e.downAsks = e.downAsks[:0]
+	e.stats = WindowStats{} // 本窗健康度重新计数（LostTriggers 底层数组一并丢弃）
 }
 
 // State 返回当前状态（Dashboard 展示用）。
@@ -83,11 +130,16 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 	if e.anchor <= 0 {
 		// 锚缺失窗口（BeginWindow 时边界 TWAP 缺值）：整窗直接丢掉本 tick——
 		// 不观测、不占槽，镜像回测 :69 锚缺失事件整体跳过（无 missing_anchor 行）。
+		e.stats.AnchorMissing = true
 		return nil
 	}
 
+	// 以下计数器只累加，不改变任何分支走向（btreplay 逐位对账红线）。
+	e.stats.Ticks++
 	// tick 无效（延迟过高）：占槽不检——与回测一致，其后触发仍按索引计数。
 	if t.BookLatMs > e.cfg.MaxBookLatMs {
+		e.stats.BookStale++
+		e.lostTrigger(t, LostReasonStaleBook)
 		e.pushSlots(t)
 		return nil
 	}
@@ -95,9 +147,12 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 	// 实测报价缺失是整行全空（两侧同秒为 0），本检查只挡无快照行；
 	// 任一侧报价不全 → 不参与触发（ask=0 本就无法触底）。
 	if !(t.UpBid > 0 && t.UpAsk > 0 && t.DownBid > 0 && t.DownAsk > 0) {
+		e.stats.BookMissing++
+		e.lostTrigger(t, LostReasonBookMissing)
 		e.pushSlots(t)
 		return nil
 	}
+	e.stats.TicksValid++
 
 	var obs *Observation
 	switch {
@@ -124,6 +179,55 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 	}
 	e.pushSlots(t)
 	return nil
+}
+
+// lostTrigger 记录一个「本会触发但被数据质量闸挡掉」的 tick（无触发则不记）。
+// 只累加 e.stats.LostTriggers，不改变本 tick 的任何处理路径。
+func (e *Engine) lostTrigger(t Tick, reason string) {
+	side := e.touchSide(t)
+	if side == "" {
+		return
+	}
+	ask := t.UpAsk
+	if side == SideNo {
+		ask = t.DownAsk
+	}
+	e.stats.LostTriggers = append(e.stats.LostTriggers, LostTrigger{
+		Ts: t.Ts, Side: side, Rem: t.Rem, Ask: ask,
+		BookLatMs: t.BookLatMs, Reason: reason,
+	})
+}
+
+// touchSide 返回该 tick 的触底狗侧（无触底返回 ""）。
+//
+// 判据与 ProcessTick 内联的触发 switch **逐条对齐**（交叉态取 sgn·(spot−anchor)<0
+// 侧、不可判退回 yes），只多一条 `> 0` 守卫——实际触发路径由整簿门控保证四字段
+// 为正，而本函数用于无效 tick（ask 可能为 0，正是 book_missing 的来源），故必须
+// 自行守卫。两处必须同步修改，TestTouchSideMirrorsTrigger 钉住等价性。
+func (e *Engine) touchSide(t Tick) string {
+	upTouch := t.UpAsk > 0 && t.UpAsk <= e.cfg.TriggerAskMax
+	downTouch := t.DownAsk > 0 && t.DownAsk <= e.cfg.TriggerAskMax
+	switch {
+	case upTouch && downTouch:
+		if t.BinPrice > e.anchor {
+			return SideNo
+		}
+		return SideYes
+	case upTouch:
+		return SideYes
+	case downTouch:
+		return SideNo
+	}
+	return ""
+}
+
+// WindowStats 返回本窗健康度统计的拷贝（含 LostTriggers 深拷贝；Dashboard / 落盘用）。
+func (e *Engine) WindowStats() WindowStats {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	st := e.stats
+	st.LostTriggers = append([]LostTrigger(nil), e.stats.LostTriggers...)
+	return st
 }
 
 // decide 在首个触底 tick 上一次判定（填充观测、检查四腿）。

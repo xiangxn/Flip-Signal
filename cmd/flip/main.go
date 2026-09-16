@@ -321,7 +321,13 @@ func main() {
 
 	// ── Dashboard（手机浏览器兼容的单页前端）──
 	if *dashboardAddr != "" {
-		dashState := dashboard.NewState(recorder, runtime, cfg, effMode)
+		// 三源新鲜度阈值下发（前端按阈值标红——book/twap 无颜色语义的缺口补上）
+		limits := dashboard.SourceLimits{
+			BookLatMs: cfg.MaxBookLatMs,
+			SpotAgeMs: *maxSpotAge,
+			TwapAgeMs: *maxTwapAge,
+		}
+		dashState := dashboard.NewState(recorder, runtime, cfg, effMode, limits)
 		go dashState.ListenAndServe(*dashboardAddr)
 	}
 
@@ -343,6 +349,22 @@ func main() {
 		cfg.MaxBookLatMs, *maxSpotAge, *maxTwapAge)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 浅洞]")
 	log.Println("========================================")
+
+	// logWinstats 落盘一行本窗 tick 健康度（winstats_YYYY-MM-DD.jsonl）。
+	// 每窗无条件一行——含被跳过的窗口（skip 非空）：逐日行数（≈288）本身即「主循环
+	// 跑满」的证据；而 LostTriggers 明细是「延迟到底吃掉了多少信号」的唯一可见性
+	// 来源（此前无效 tick 走 pushSlots 直接 return，磁盘上零痕迹——
+	// docs/dog020_risk_latency_plan_2026-09-16.md §1.3）。失败只告警，不影响主循环。
+	logWinstats := func(condID, slug string, eventStart int64, anchor, hb float64, st flip.WindowStats, skip string) {
+		e := flip.WindowStatsEntry{
+			Ts: time.Now().UnixMilli(), ConditionID: condID, Slug: slug,
+			EventStart: eventStart, Skip: skip, Anchor: anchor, HistBps: hb,
+			WindowStats: st,
+		}
+		if err := recorder.LogWindowStats(e); err != nil {
+			log.Printf("[Cycle] ⚠️ 窗口健康度落盘失败: %v", err)
+		}
+	}
 
 	// ── 市场周期主循环 ──
 	// nextCache 跨窗口缓存下一窗市场信息（稳态预取，见 collectLoop 内 rem≤20 逻辑）
@@ -366,6 +388,7 @@ func main() {
 				elapsed.Round(time.Second), lateLimit,
 				nextStart.UTC().Format(time.RFC3339))
 			runtime.clearWindow() // 本窗被跳过: 快照不留上一窗陈旧状态（跳到下一窗, 等待最长 ~5min）
+			logWinstats("", "", nextStart.Unix(), 0, 0, flip.WindowStats{}, "late")
 			nextStart = nextStart.Add(windowSec * time.Second)
 		}
 		slug := fmt.Sprintf("%s-%d", *slugPrefix, nextStart.Unix())
@@ -429,6 +452,7 @@ func main() {
 			if err != nil {
 				log.Printf("[Cycle] 获取市场失败: %v —— 跳过本窗口", err)
 				runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
+				logWinstats("", slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_market")
 				select {
 				case <-ctx.Done():
 					return
@@ -442,6 +466,7 @@ func main() {
 		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
 			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
+			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_token")
 			select {
 			case <-ctx.Done():
 				return
@@ -458,6 +483,7 @@ func main() {
 		if recorder.HasRecord(conditionID) {
 			log.Printf("[Cycle] ⚠️ 窗口 %s 已有落盘记录（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
 			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
+			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "dup_record")
 			select {
 			case <-ctx.Done():
 				return
@@ -587,6 +613,10 @@ func main() {
 				conditionID, amp, hist.Count())
 		}
 
+		// 本窗 tick 健康度无条件落盘（含锚缺失/σ 未计的窗口——可见性优先于整洁:
+		// 「本窗为什么没信号」必须留下可查的痕迹, 见 logWinstats 注释）
+		logWinstats(conditionID, slug, nextStart.Unix(), anchor, histBps, engine.WindowStats(), "")
+
 		// live 首窗禁单解除: 首个完整跑完的窗口结束后置 false。窗口被跳过
 		// （continue）则顺延——保守多禁一窗, 防重启残留窗双单的缝隙优先于
 		// 交易频率; 解除后 HandleObservation 的 FirstWindow 闸恒放行。
@@ -641,8 +671,9 @@ func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 
 	rt.mu.RLock()
 	engineState := ""
-	if rt.Engine != nil {
-		engineState = rt.Engine.State().String()
+	eng := rt.Engine // 引擎引用（窗口换装时替换; 计数器读取放到锁外）
+	if eng != nil {
+		engineState = eng.State().String()
 	}
 	snap := flip.LiveSnapshot{
 		Mode:        rt.Mode,
@@ -661,6 +692,13 @@ func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 		SpotAgeMs:   spotAgeMs,
 	}
 	rt.mu.RUnlock()
+
+	// 本窗 tick 健康度放锁外: 引擎自锁（诊断计数, 与本窗盘口快照同一窗口上下文）。
+	// 窗口间（clearWindow 后 Engine=nil）为 nil——前端隐藏本窗统计块。
+	if eng != nil {
+		st := eng.WindowStats()
+		snap.Stats = &st
+	}
 
 	// live 摘要放锁外: Exec 构造后不变且方法内部自锁（Recorder 域, 与窗口快照无关）
 	// ——全量观测遍历不阻塞 setWindow/clearWindow 的窗口换装写锁（paper 恒 nil,

@@ -37,6 +37,13 @@ type stateResponse struct {
 	SpotPrice float64 `json:"spot_price"`
 	SpotAgeMs int64   `json:"spot_age_ms"`
 
+	// 三源新鲜度阈值（前端按此标红 book_lat/twap_age/spot_age，勿硬编码）
+	Limits SourceLimits `json:"limits"`
+
+	// 本窗 tick 健康度（引擎计数器; 窗口间为 nil——与 condition_id 同生命周期）。
+	// lost_triggers = 本会触发但被延迟闸/整簿缺失挡掉的 tick 明细（§1.3 可见性）
+	WindowStats *flip.WindowStats `json:"window_stats,omitempty"`
+
 	// 统计汇总（已结算 + 待结算信号）
 	ObservationCount int     `json:"observation_count"` // 全部触底观测（含失败）
 	SignalCount      int     `json:"signal_count"`
@@ -130,6 +137,8 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		TwapAgeMs:        live.TwapAgeMs,
 		SpotPrice:        live.SpotPrice,
 		SpotAgeMs:        live.SpotAgeMs,
+		Limits:           s.limits,
+		WindowStats:      live.Stats,
 		ObservationCount: len(s.recorder.Observations()),
 		SignalCount:      total,
 		WonCount:         won,

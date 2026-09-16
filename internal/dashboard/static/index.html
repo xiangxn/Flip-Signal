@@ -61,6 +61,14 @@
         <span>spot <b id="winSpot">—</b> <span class="spot-age" id="winSpotAge">—</span></span>
         <span id="winCond" class="cond">—</span>
       </div>
+      <!-- 本窗 tick 健康度（延迟闸挡掉的本会触发 tick 在此可见; 窗口间隐藏） -->
+      <div class="win-health" id="winHealth" hidden>
+        <span>ticks <b id="whTicks">—</b></span>
+        <span>有效 <b id="whValid">—</b></span>
+        <span>延迟无效 <b id="whStale">—</b></span>
+        <span>无快照 <b id="whMissing">—</b></span>
+        <span class="lost" id="whLost">—</span>
+      </div>
     </section>
 
     <!-- 信号列表 -->

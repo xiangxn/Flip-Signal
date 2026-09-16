@@ -26,6 +26,22 @@ const (
 // 窗口行无回填需求（追加即终稿），混入同一文件会被结算重写丢掉。
 const windowPrefix = "windows_"
 
+// 行 schema 标识（kind 字段）: 两类窗口级日志互斥, 防串读。
+// 取值即文件前缀, 让 grep/人读同一眼能对上。
+const (
+	windowKindAmp   = "windows"  // WindowEntry（σ 预热数据源）
+	windowKindStats = "winstats" // WindowStatsEntry（tick 健康度审计）
+)
+
+// 窗口 tick 健康度日志: 文件名 winstats_YYYY-MM-DD.jsonl，每窗一行（含被跳过
+// 的窗口——「信号为什么少」的可见性数据源，见 docs/dog020_risk_latency_plan_2026-09-16.md §2.4）。
+//
+// ⚠️ 必须独立于 windows_*.jsonl: 后者是 σ 预热的**数据源**，loadWindowFileLocked
+// 只校验 Ts>0 && Date!=""，混入统计行会被当成振幅行（Amp=0）读进来污染 σ——
+// 本文件的独立前缀 + kind 字段双重保险（前缀不重合是主防线；kind 是防手滑
+// 把两类行写进同一文件，或将来有人合并文件）。
+const statsPrefix = "winstats_"
+
 // Recorder 追加写 JSONL 观测记录（按 UTC 日切分文件），外加每完成窗口
 // 一行的窗口振幅日志 windows_*.jsonl（σ 重启本地预热的数据源，见
 // LogWindowAmplitude —— 独立文件、独立句柄，与 touches 互不干扰）。
@@ -48,6 +64,11 @@ type Recorder struct {
 	winDay  string        // 窗口日志当前打开文件的 UTC 日
 	winFile *os.File
 	winBuf  *bufio.Writer
+
+	// tick 健康度日志: 只追加、不载入内存（纯审计, 无对账需求——省一次全量读盘）
+	statsDay  string
+	statsFile *os.File
+	statsBuf  *bufio.Writer
 }
 
 // DayPnl 单日已结算 P&L（Dashboard 用）。
@@ -69,6 +90,26 @@ type WindowEntry struct {
 	Anchor      float64 `json:"anchor"` // 边界 TWAP-60 流值
 	Close       float64 `json:"close"`  // 窗口结束 TWAP-60 流值
 	Amp         float64 `json:"amp"`    // |close − anchor|（USD）
+	// Kind 行类型标识（恒 windowKindAmp）。2026-09-16 新增：旧行无此字段（读作空串，
+	// 加载器按「空 = 合法旧行」放行），新行显式写 "windows"——用作跨类型误读的
+	// 第二道守卫（第一道是文件前缀不重合，见 statsPrefix 注释）。
+	Kind string `json:"kind,omitempty"`
+}
+
+// WindowStatsEntry 是一个窗口的 tick 健康度行（winstats_*.jsonl）。
+// Skip 非空表示该窗未采集（窗口被跳过/获取失败），统计字段全 0——保留一行是为了
+// 让逐日行数（≈288）本身成为「主循环是否跑满」的证据。
+type WindowStatsEntry struct {
+	Ts          int64   `json:"ts"` // 落盘时刻（unix 毫秒）
+	Date        string  `json:"date"`
+	Kind        string  `json:"kind"` // 恒 windowKindStats
+	ConditionID string  `json:"condition_id,omitempty"`
+	Slug        string  `json:"slug,omitempty"`
+	EventStart  int64   `json:"event_start,omitempty"`
+	Skip        string  `json:"skip,omitempty"` // 非空 = 本窗未采集（原因, 见 cmd/flip）
+	Anchor      float64 `json:"anchor"`         // 本窗 anchor（0 = 锚缺失/跳过）
+	HistBps     float64 `json:"hist_bps"`       // 本窗生效 σ（bps; 0 = 不可用）
+	WindowStats         // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
 }
 
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
@@ -137,6 +178,13 @@ func (r *Recorder) loadWindowFileLocked(path string) (int, error) {
 		}
 		if e.Ts <= 0 || e.Date == "" {
 			log.Printf("⚠️ [Recorder] %s: 跳过异常窗口行（ts=%d）", path, e.Ts)
+			continue
+		}
+		// schema 守卫: 只收振幅行。空串 = 2026-09-16 之前的旧行（无 kind 字段），放行；
+		// 其余 kind（如 winstats 统计行）一律拒收——统计行的 Ts/Date 合法但无 amp，
+		// 放进来会被当振幅 0 污染 σ（本文件是 σ 预热数据源, 见 statsPrefix 注释）。
+		if e.Kind != "" && e.Kind != windowKindAmp {
+			log.Printf("⚠️ [Recorder] %s: 跳过非振幅行（kind=%q）——防污染 σ 预热", path, e.Kind)
 			continue
 		}
 		r.wins = append(r.wins, e)
@@ -455,6 +503,7 @@ func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end
 		Anchor:      anchor,
 		Close:       close_,
 		Amp:         amp,
+		Kind:        windowKindAmp,
 	}
 	r.wins = append(r.wins, e)
 	line, err := json.Marshal(e)
@@ -468,6 +517,62 @@ func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end
 		return err
 	}
 	return r.winBuf.Flush()
+}
+
+// LogWindowStats 落盘一个窗口的 tick 健康度行（每窗无条件一行, 行级 flush）。
+// e.Date 由 Ts 派生（调用方无需自算 UTC 日）。只追加、不载入内存。
+func (r *Recorder) LogWindowStats(e WindowStatsEntry) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e.Kind = windowKindStats
+	e.Date = utcDate(e.Ts)
+	if err := r.openStatsDayLocked(e.Date); err != nil {
+		return err
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("Recorder: marshal 健康度行: %w", err)
+	}
+	if _, err := r.statsBuf.Write(line); err != nil {
+		return err
+	}
+	if err := r.statsBuf.WriteByte('\n'); err != nil {
+		return err
+	}
+	return r.statsBuf.Flush()
+}
+
+// openStatsDayLocked 打开（必要时轮转）指定 UTC 日的健康度日志文件（调用方已持锁）。
+func (r *Recorder) openStatsDayLocked(date string) error {
+	if r.statsDay == date && r.statsFile != nil {
+		return nil
+	}
+	if err := r.closeStatsDayLocked(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(statsFilePath(r.dir, date), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("Recorder: 打开健康度日志 %s: %w", date, err)
+	}
+	r.statsDay, r.statsFile, r.statsBuf = date, f, bufio.NewWriter(f)
+	return nil
+}
+
+// closeStatsDayLocked flush 并关闭健康度日志文件（调用方已持锁）。
+func (r *Recorder) closeStatsDayLocked() error {
+	if r.statsFile == nil {
+		return nil
+	}
+	if err := r.statsBuf.Flush(); err != nil {
+		r.statsFile.Close()
+		return err
+	}
+	if err := r.statsFile.Close(); err != nil {
+		return err
+	}
+	r.statsDay, r.statsFile, r.statsBuf = "", nil, nil
+	return nil
 }
 
 // openWinDayLocked 打开（必要时轮转）指定 UTC 日的窗口日志文件（调用方已持锁）。
@@ -502,10 +607,13 @@ func (r *Recorder) closeWinDayLocked() error {
 	return nil
 }
 
-// Close flush 并关闭当前文件（观测 + 窗口日志）。
+// Close flush 并关闭当前文件（观测 + 窗口日志 + 健康度日志）。
 func (r *Recorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.closeStatsDayLocked(); err != nil {
+		return err
+	}
 	if err := r.closeWinDayLocked(); err != nil {
 		return err
 	}
@@ -691,4 +799,9 @@ func recordFilePath(dir, date string) string {
 // windowFilePath 生成窗口日志日文件名（集中一处，rotate/load 共用）。
 func windowFilePath(dir, date string) string {
 	return filepath.Join(dir, windowPrefix+date+".jsonl")
+}
+
+// statsFilePath 生成窗口健康度日志日文件名（集中一处，rotate 共用；无载入路径）。
+func statsFilePath(dir, date string) string {
+	return filepath.Join(dir, statsPrefix+date+".jsonl")
 }

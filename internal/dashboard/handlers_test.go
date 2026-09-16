@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/necklace/flip-signal/internal/flip"
@@ -85,5 +86,64 @@ func TestWritePage(t *testing.T) {
 			}
 			eqTs(t, tsItems(r.Items), c.wantTs...)
 		})
+	}
+}
+
+// ── /api/state: 三源阈值下发 + 本窗 tick 健康度（2026-09-16）──
+
+// fakeSnap 实现 flip.Snapshotter（固定快照）。
+type fakeSnap struct{ s flip.LiveSnapshot }
+
+func (f fakeSnap) Snapshot() flip.LiveSnapshot { return f.s }
+
+// TestStateLimitsAndWindowStats 前端标红/诊断行的数据源: limits 原样下发、
+// window_stats 随快照透出（含丢信号明细）。
+func TestStateLimitsAndWindowStats(t *testing.T) {
+	rec, err := flip.NewRecorder(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	defer rec.Close()
+
+	stats := flip.WindowStats{
+		Ticks: 300, TicksValid: 298, BookStale: 1, BookMissing: 1,
+		LostTriggers: []flip.LostTrigger{{
+			Ts: 1, Side: flip.SideYes, Rem: 196, Ask: 0.19,
+			BookLatMs: 412, Reason: flip.LostReasonStaleBook,
+		}},
+	}
+	limits := SourceLimits{BookLatMs: 300, SpotAgeMs: 2000, TwapAgeMs: 10_000}
+	s := NewState(rec, fakeSnap{flip.LiveSnapshot{
+		EngineState: "Watching", BookLatMs: 412, Stats: &stats,
+	}}, flip.DefaultConfig(), "paper", limits)
+
+	w := httptest.NewRecorder()
+	s.handleState(w, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+	var got stateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析 /api/state: %v", err)
+	}
+	if got.Limits != limits {
+		t.Fatalf("limits = %+v, 期望 %+v", got.Limits, limits)
+	}
+	if got.WindowStats == nil {
+		t.Fatal("window_stats 缺失（快照有 Stats 时应透出）")
+	}
+	if got.WindowStats.Ticks != 300 || got.WindowStats.TicksValid != 298 ||
+		got.WindowStats.BookStale != 1 || got.WindowStats.BookMissing != 1 {
+		t.Fatalf("本窗计数错: %+v", got.WindowStats)
+	}
+	if len(got.WindowStats.LostTriggers) != 1 ||
+		got.WindowStats.LostTriggers[0].BookLatMs != 412 {
+		t.Fatalf("丢信号明细未透出: %+v", got.WindowStats.LostTriggers)
+	}
+
+	// 窗口间（快照无 Stats）: 字段省略，前端隐藏健康度行
+	s2 := NewState(rec, fakeSnap{flip.LiveSnapshot{}}, flip.DefaultConfig(), "paper", limits)
+	w2 := httptest.NewRecorder()
+	s2.handleState(w2, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+	if body := w2.Body.String(); !strings.Contains(body, "\"limits\"") ||
+		strings.Contains(body, "\"window_stats\"") {
+		t.Fatalf("窗口间应只下发 limits 而不含 window_stats: %s", body)
 	}
 }

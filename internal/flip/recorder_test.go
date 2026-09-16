@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -345,6 +346,128 @@ func TestWindowLogRoundtrip(t *testing.T) {
 	last := r2.RecentWindows(2)
 	if len(last) != 2 || last[0].Amp != 3 || last[1].Amp != 4 {
 		t.Fatalf("重启后最近 2 窗 = %+v, 期望 amp [3 4]", last)
+	}
+}
+
+// 窗口 tick 健康度日志（winstats_*.jsonl）: 独立文件、跨日切分、不载入内存（纯审计）。
+func TestWindowStatsLog(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+
+	rows := []struct {
+		end  time.Time
+		skip string
+		st   WindowStats
+	}{
+		{time.Date(2026, 9, 2, 23, 58, 0, 0, time.UTC), "", WindowStats{
+			Ticks: 300, TicksValid: 297, BookStale: 2, BookMissing: 1,
+			LostTriggers: []LostTrigger{{Ts: 1, Side: SideYes, Rem: 210, Ask: 0.19,
+				BookLatMs: 812, Reason: LostReasonStaleBook}},
+		}},
+		{time.Date(2026, 9, 2, 23, 59, 0, 0, time.UTC), "no_market", WindowStats{}},
+		{time.Date(2026, 9, 3, 0, 3, 0, 0, time.UTC), "", WindowStats{
+			AnchorMissing: true, Ticks: 0,
+		}},
+	}
+	for i, w := range rows {
+		e := WindowStatsEntry{
+			Ts: w.end.UnixMilli(), ConditionID: "0x" + string(rune('a'+i)),
+			Slug: "btc-updown-5m", EventStart: w.end.Unix() - 300,
+			Skip: w.skip, Anchor: 100000, HistBps: 7, WindowStats: w.st,
+		}
+		if err := r.LogWindowStats(e); err != nil {
+			t.Fatalf("LogWindowStats[%d]: %v", i, err)
+		}
+	}
+
+	// 独立文件 + 跨日切分
+	for date, want := range map[string]int{"2026-09-02": 2, "2026-09-03": 1} {
+		if n := countLines(t, statsFilePath(dir, date)); n != want {
+			t.Fatalf("%s 健康度行数 = %d, 期望 %d", date, n, want)
+		}
+		if n := countLines(t, windowFilePath(dir, date)); n != 0 {
+			t.Fatalf("%s 窗口振幅文件不应被健康度行写入, 行数 = %d", date, n)
+		}
+		if n := countLines(t, recordFilePath(dir, date)); n != 0 {
+			t.Fatalf("%s: touches 文件不应被健康度行写入, 行数 = %d", date, n)
+		}
+	}
+
+	// 行 schema: kind 恒 winstats、date 由 Ts 推出、统计字段平铺
+	b, err := os.ReadFile(statsFilePath(dir, "2026-09-02"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got WindowStatsEntry
+	first := strings.SplitN(strings.TrimSpace(string(b)), "\n", 2)[0]
+	if err := json.Unmarshal([]byte(first), &got); err != nil {
+		t.Fatalf("解析健康度行: %v", err)
+	}
+	if got.Kind != windowKindStats || got.Date != "2026-09-02" {
+		t.Fatalf("kind/date 错: %+v", got)
+	}
+	if got.Ticks != 300 || got.BookStale != 2 || len(got.LostTriggers) != 1 ||
+		got.LostTriggers[0].Reason != LostReasonStaleBook {
+		t.Fatalf("统计字段未平铺落盘: %+v", got)
+	}
+	// 跳窗行也保留一行（逐日行数 = 主循环跑满与否的证据）
+	if l := countLines(t, statsFilePath(dir, "2026-09-02")); l != 2 {
+		t.Fatalf("跳过窗口也应落一行, 行数 = %d", l)
+	}
+
+	// 健康度不进内存（RecentWindows 只收振幅行）
+	if n := len(r.RecentWindows(18)); n != 0 {
+		t.Fatalf("winstats 不得进 RecentWindows, 得 %d 窗", n)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatalf("重启 NewRecorder: %v", err)
+	}
+	defer r2.Close()
+	if n := len(r2.RecentWindows(18)); n != 0 {
+		t.Fatalf("重启后 winstats 仍不得进 RecentWindows, 得 %d 窗", n)
+	}
+}
+
+// 窗口振幅日志的 schema 守卫: 统计行误入 windows_*.jsonl 时拒收（防 Amp=0 污染 σ 预热）。
+func TestWindowAmpSchemaGuard(t *testing.T) {
+	dir := t.TempDir()
+	ts, _, _ := testTs(t)
+
+	amp, _ := json.Marshal(&WindowEntry{Ts: ts, Date: "2026-09-02", Amp: 1.5, Kind: windowKindAmp})
+	// 旧行（2026-09-16 前落盘, 无 kind 字段）——必须放行
+	legacy, _ := json.Marshal(&WindowEntry{Ts: ts + 300_000, Date: "2026-09-02", Amp: 2.5})
+	// 手滑: 统计行被写进振幅文件（前缀不重合是主防线, 本用例只验第二道守卫）
+	// 带合法 ts/date（模拟 LogWindowStats 的真实落盘行, 只能靠 kind 守卫拦下）
+	stats, _ := json.Marshal(&WindowStatsEntry{Ts: ts + 600_000, Date: "2026-09-02",
+		Kind: windowKindStats, WindowStats: WindowStats{Ticks: 300}})
+
+	blob := append(amp, '\n')
+	blob = append(blob, legacy...)
+	blob = append(blob, '\n')
+	blob = append(blob, stats...)
+	blob = append(blob, '\n')
+	if err := os.WriteFile(windowFilePath(dir, "2026-09-02"), blob, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	wins := r.RecentWindows(18)
+	if len(wins) != 2 {
+		t.Fatalf("RecentWindows = %d, 期望 2（拒 kind=winstats 行、收旧行）", len(wins))
+	}
+	if wins[0].Amp != 1.5 || wins[1].Amp != 2.5 {
+		t.Fatalf("振幅载入错: %+v", wins)
 	}
 }
 

@@ -25,6 +25,11 @@ type LiveSnapshot struct {
 	SpotPrice float64
 	SpotAgeMs int64
 
+	// Stats 为本窗 tick 健康度（引擎计数器, 窗口间/未开始为 nil）。
+	// 「信号为什么少」的现场证据: 延迟闸挡掉的本会触发 tick 在此可见
+	//（见 docs/dog020_risk_latency_plan_2026-09-16.md §1.3/§2.5）。
+	Stats *WindowStats
+
 	// Live 为 live 执行摘要（Mode=="live" 时填充; paper 恒 nil）
 	Live *LiveExec
 }

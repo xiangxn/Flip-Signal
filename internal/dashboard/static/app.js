@@ -106,10 +106,18 @@
     $('downBid').textContent = s.down_bid > 0 ? s.down_bid.toFixed(3) : '—';
     $('downAsk').textContent = s.down_ask > 0 ? s.down_ask.toFixed(3) : '—';
     $('winRem').textContent = s.remaining_sec;
-    $('winLat').textContent = s.book_latency_ms;
-    $('winTwap').textContent = s.twap_age_ms;
 
-    // spot: −1 无推送（灰）；>2s 陈旧（红，引擎已判现货缺失）；否则正常
+    // 三源新鲜度: 阈值由服务端下发（limits），前端不得硬编码——调 flag 后
+    // 颜色语义必须跟随实际生效值
+    var lim = s.limits || {};
+    var latEl = $('winLat');
+    latEl.textContent = s.book_latency_ms;
+    latEl.className = lim.book_lat_ms && s.book_latency_ms > lim.book_lat_ms ? 'stale' : '';
+    var twEl = $('winTwap');
+    twEl.textContent = s.twap_age_ms;
+    twEl.className = lim.twap_age_ms && s.twap_age_ms > lim.twap_age_ms ? 'stale' : '';
+
+    // spot: −1 无推送（灰）；超阈陈旧（红，引擎已判现货缺失）；否则正常
     var spotAge = $('winSpotAge');
     if (s.spot_age_ms < 0 || s.spot_price === 0) {
       $('winSpot').textContent = '—';
@@ -118,7 +126,35 @@
     } else {
       $('winSpot').textContent = s.spot_price.toFixed(2);
       spotAge.textContent = s.spot_age_ms + 'ms';
-      spotAge.className = 'spot-age' + (s.spot_age_ms > 2000 ? ' stale' : '');
+      spotAge.className = 'spot-age' + (s.spot_age_ms > (lim.spot_age_ms || 2000) ? ' stale' : '');
+    }
+
+    // 本窗 tick 健康度: 「本窗为什么没信号」的现场（延迟闸挡掉的本会触发 tick）
+    var wh = $('winHealth');
+    var ws = s.window_stats;
+    if (!ws) {
+      wh.hidden = true;
+    } else {
+      wh.hidden = false;
+      $('whTicks').textContent = ws.ticks;
+      $('whValid').textContent = ws.ticks_valid;
+      $('whStale').textContent = ws.book_stale;
+      $('whMissing').textContent = ws.book_missing;
+      var lost = ws.lost_triggers || [];
+      var lEl = $('whLost');
+      if (ws.anchor_missing) {
+        lEl.textContent = '锚缺失，本窗不观测';
+        lEl.className = 'lost warn';
+      } else if (lost.length === 0) {
+        lEl.textContent = '丢信号 0';
+        lEl.className = 'lost';
+      } else {
+        var t = lost[lost.length - 1]; // 最近一笔（落盘明细见 winstats_*.jsonl）
+        lEl.textContent = '丢信号 ' + lost.length + ' 笔 · 最近 ' + t.side + ' rem=' + t.rem +
+          ' ask=' + t.ask.toFixed(2) +
+          (t.reason === 'stale_book' ? ' (book ' + t.book_lat_ms + 'ms)' : ' (无快照)');
+        lEl.className = 'lost warn';
+      }
     }
 
     $('foot').textContent = 'TS ' + s.ts + ' · 触底观测 ' + s.observation_count + ' 条';
