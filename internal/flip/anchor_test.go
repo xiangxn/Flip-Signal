@@ -1,7 +1,7 @@
 package flip
 
 // AnchorUsableAtBoundary 纯函数测试: 边界 anchor 采样的新鲜度守卫
-// （2026-09-09 review 补, 与窗口结束 σ 采样共用阈值 twapCloseFreshMs,
+// （2026-09-09 review 补, 与窗口结束 σ 采样共用阈值 feed.max_twap_age_ms,
 // 测试恒以 10s 阈值验证）。
 // 不可用 → 调用方把 anchor 置 0 → 引擎整窗不观测 + 窗口结束不计入 σ
 // （既有 anchor≤0 路径, 镜像回测 :69 锚缺失事件跳过）。

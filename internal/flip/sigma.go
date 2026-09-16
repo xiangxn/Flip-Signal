@@ -85,7 +85,7 @@ func RecentBlock(wins []WindowEntry, gapMs int64) []WindowEntry {
 
 // AnchorUsableAtBoundary 判定窗口边界 anchor 采样是否可用: TWAP 尚未收到推送
 // （price≤0）或推送陈旧（龄 > freshMs——阈值由调用方传入: cmd/flip 与窗口结束
-// σ 采样共用 twapCloseFreshMs，正常推送龄 p99≈1.7s，10s 余量充足）判不可用。
+// σ 采样共用 feed.max_twap_age_ms，正常推送龄 p99≈1.7s，10s 余量充足）判不可用。
 // 不可用时调用方把 anchor 置 0 → 引擎按锚缺失整窗跳过（镜像回测 :69），
 // σ 亦不计入（既有 anchor≤0 分支，零额外路径）。
 func AnchorUsableAtBoundary(price float64, ageMs, freshMs int64) bool {
