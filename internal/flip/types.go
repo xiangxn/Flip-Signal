@@ -44,6 +44,16 @@ const (
 	RejectDistOut = "dist_out"
 )
 
+// 风控闸原因常量（Record.GateReason 取值; 空 = 未被闸）。
+// 口径见 docs/dog020_risk_latency_plan_2026-09-16.md §3。
+const (
+	// GateDailyLoss 日亏熔断: 当日（UTC）已结算 P&L ≤ MaxDailyLoss。
+	// 触发即当日锁存（此前已封过一笔也保持停单, 见 ExecState.breakerTripped）。
+	GateDailyLoss = "daily_loss"
+	// GateFirstWindow live 重启后首窗禁单（防重启残留窗双单; paper 无仓位不设）。
+	GateFirstWindow = "first_window"
+)
+
 // Config 包含策略的全部可调参数。
 // 默认值与回测标定一致（python/v4/01_backtest_r1.py 常量，2026-09-02 定稿 R1、
 // 2026-09-03 引擎切组合版侧别带——BAND_YC/BAND_NO，观察头条，09-15 双样本复验后评估）。
@@ -208,6 +218,14 @@ type Record struct {
 	Won         *bool   `json:"won,omitempty"`         // 结算后填充（狗侧是否赢）
 	PnL         float64 `json:"pnl,omitempty"`         // 结算后填充（USDC）
 	ResolvedAt  string  `json:"resolved_at,omitempty"` // 结算时间（RFC3339）
+
+	// GateReason 风控闸原因（GateDailyLoss/GateFirstWindow; 空 = 未被闸）。
+	//
+	// 两模式都写（2026-09-16 方案 A, docs §3.5）: paper 被闸行行 schema 与正常信号
+	// 完全一致（IsFilled 仍 true、照常结算回填 won/pnl）——纸面是当前唯一在跑的
+	// live-like 样本, 砍数据会削弱 09-30 复盘的统计力, 而被闸行正是「不熔断会怎样」
+	// 的反事实。⚠️ 因此分析脚本必须显式过滤（02/06 的 --include-gated 对照）。
+	GateReason string `json:"gate_reason,omitempty"`
 
 	// ── live 执行回填（paper 行恒空）──
 	ExecStatus string  `json:"exec_status,omitempty"`    // 空=paper; 取值见 ExecStatus*

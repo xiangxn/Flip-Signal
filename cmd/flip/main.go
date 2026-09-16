@@ -339,7 +339,10 @@ func main() {
 	if effMode == "live" {
 		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（FAK 限价单 @ 触发 ask, 日亏熔断 ≤%.1fU）", *maxDailyLoss)
 	} else {
-		log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s）", effMode)
+		// 纸面同样打印熔断线: 闸判据两模式同源（方案 A）——纸面被闸行照记照结算,
+		// 只多 gate_reason 字段（分析脚本需过滤, 见 plan §3.5/§3.7）
+		log.Printf(" Dog@0.2 触底策略 — 纸面交易（mode=%s, 日亏熔断 ≤%.1fU 影子: 只标记不拦单）",
+			effMode, *maxDailyLoss)
 	}
 	log.Printf(" 输出: %s  |  Slug: %s", *outputDir, *slugPrefix)
 	log.Printf(" 参数: ask≤%.2f 急跌m%d≥%.2f 浅洞 yes(%.2f,%.2f)/no(%.2f,%.2f)σ rem>%ds stake=%.0fUSDC",
@@ -704,6 +707,7 @@ func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 	// ——全量观测遍历不阻塞 setWindow/clearWindow 的窗口换装写锁（paper 恒 nil,
 	// 逻辑见 flip.ExecState.LiveSummary）
 	snap.Live = rt.Exec.LiveSummary()
+	snap.Risk = rt.Exec.RiskSummary() // 日亏熔断摘要（两模式都填, 与闸判据同源）
 	return snap
 }
 

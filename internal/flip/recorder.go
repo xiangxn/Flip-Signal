@@ -296,17 +296,63 @@ func (r *Recorder) SubmitLiveObservation(condID, slug string, eventStart int64, 
 // RecordLiveRejected 落盘 live 风控闸拒绝行（熔断/首窗禁单等: 未发起下单, 无
 // submitting 中间态）。OK=true（策略信号本身成立）但 ExecStatus=rejected →
 // IsFilled=false 不注册结算; 观测保留供 live 信号频率口径。
-func (r *Recorder) RecordLiveRejected(condID, slug string, eventStart int64, obs *Observation, stake float64, note string) (*Record, error) {
+// gateReason 见 Record.GateReason（paper 侧同源闸走 RecordGatedObservation）。
+func (r *Recorder) RecordLiveRejected(condID, slug string, eventStart int64, obs *Observation, stake float64, gateReason, note string) (*Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	rec := newRecord(condID, slug, eventStart, obs, stake)
 	rec.ExecStatus = ExecStatusRejected
+	rec.GateReason = gateReason
 	rec.ExecNote = note
 	if err := r.writeLocked(rec); err != nil {
 		return nil, err
 	}
 	return rec, nil
+}
+
+// RecordGatedObservation 落盘 paper 模式下被风控闸拦下的 ok 信号行（方案 A, docs §3.5）。
+//
+// 行 schema 与正常 paper 信号**完全一致**（exec_status 仍空 → IsFilled 仍 true →
+// 调用方照常注册结算、Resolve 照常回填 won/pnl），只多 gate_reason 一个键——
+// 于是「纸面/实盘唯一差别 = 是否真实 POST」在闸这里也成立，且被闸行本身就是
+// 「当日不熔断会怎样」的反事实样本。⚠️ 分析脚本必须显式过滤（§3.7）。
+func (r *Recorder) RecordGatedObservation(condID, slug string, eventStart int64, obs *Observation, stake float64, gateReason string) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec := newRecord(condID, slug, eventStart, obs, stake)
+	rec.GateReason = gateReason
+	if err := r.writeLocked(rec); err != nil {
+		return nil, err
+	}
+	if isSettlable(rec) {
+		r.pending[rec.ConditionID] = rec // 与 RecordObservation 同款: 被闸行照常结算
+	}
+	return rec, nil
+}
+
+// GatedOn 本 UTC 日是否已有指定原因的被闸行（日亏熔断的当日锁存判据, docs §3.4）。
+//
+// 为什么锁存必需: paper 方案 A 下被闸行照常结算 → 累积 P&L 可能因后到的结算回升过线,
+// 只看「现算 P&L ≤ 线」会当日自动复牌、风控形同虚设。判据取磁盘真相（本函数扫内存
+// 记录 = 磁盘已载入内容）——重启后锁存自动恢复, 跨日自动归零, 无需任何额外状态文件。
+func (r *Recorder) GatedOn(date, reason string) bool {
+	return r.GatedToday(date, reason) > 0
+}
+
+// GatedToday 当日（date，UTC）指定原因的被闸行数（Dashboard 风控块的「拦 N 笔」）。
+func (r *Recorder) GatedToday(date, reason string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	n := 0
+	for _, rec := range r.recs {
+		if rec.Date == date && rec.GateReason == reason {
+			n++
+		}
+	}
+	return n
 }
 
 // CompleteExecution 回填一个 submitting 行的执行结果（两阶段第二步, POST 同步
@@ -789,6 +835,11 @@ func WonFor(side string, outcome int) bool {
 // utcDate 把 unix 毫秒时间戳映射为 UTC 日（YYYY-MM-DD，文件名/记录共用）。
 func utcDate(tsMs int64) string {
 	return time.UnixMilli(tsMs).UTC().Format("2006-01-02")
+}
+
+// utcToday 当前 UTC 日（日界唯一实现: 文件切分/日亏熔断/Dashboard 今日口径同源）。
+func utcToday() string {
+	return utcDate(time.Now().UnixMilli())
 }
 
 // recordFilePath 生成日文件名（集中一处，rotate/rewrite/load 共用）。

@@ -38,6 +38,9 @@ func mkExecObs(side string) *Observation {
 
 // mkExecRec 构造临时 recorder + ExecState。
 // live 时 ex 为脚本 executor（免真实 SDK 网调）; FirstWindow 由测试自设。
+// ⚠️ maxDailyLoss 传 0 = 「永不开单」（CanTrade 是 todayPnl > 线, 0 > 0 不成立）——
+// 2026-09-16 闸上移到两模式共用后, paper 用例也必须给一条真实线, 否则会静默
+// 走进被闸分支（cmd/flip 对 ≥0 的线值直接 Fatal, 见 plan §3.2）。
 func mkExecRec(t *testing.T, ex Executor, live bool, maxDailyLoss float64) (*ExecState, *Recorder) {
 	t.Helper()
 	rec, err := NewRecorder(t.TempDir())
@@ -58,7 +61,7 @@ func mkExecRec(t *testing.T, ex Executor, live bool, maxDailyLoss float64) (*Exe
 // ── paper 单步（无闸、无两阶段、无 exec 字段）──
 
 func TestExecPaperOK(t *testing.T) {
-	x, rec := mkExecRec(t, PaperExecutor{}, false, 0)
+	x, rec := mkExecRec(t, PaperExecutor{}, false, -24)
 	o := mkExecObs(SideYes)
 	got := x.HandleObservation(o, "condP", "slug", 1_800_000_000_000)
 	if got == nil || !got.OK || got.ExecStatus != "" || !got.IsFilled() {
@@ -73,7 +76,7 @@ func TestExecPaperOK(t *testing.T) {
 }
 
 func TestExecPaperRejectedObsNoSideEffect(t *testing.T) {
-	x, rec := mkExecRec(t, PaperExecutor{}, false, 0)
+	x, rec := mkExecRec(t, PaperExecutor{}, false, -24)
 	o := mkExecObs(SideYes)
 	o.OK = false
 	o.RejectReason = "no_crash"
@@ -168,7 +171,7 @@ func TestExecLiveDailyLossBreaker(t *testing.T) {
 }
 
 func TestExecLiveSummaryPaperNil(t *testing.T) {
-	x, _ := mkExecRec(t, PaperExecutor{}, false, 0)
+	x, _ := mkExecRec(t, PaperExecutor{}, false, -24)
 	if s := x.LiveSummary(); s != nil {
 		t.Fatalf("paper LiveSummary 应 nil: %+v", s)
 	}
@@ -181,7 +184,7 @@ func TestExecPaperLiveParity(t *testing.T) {
 	obs := mkExecObs(SideYes)
 
 	// paper 路
-	xp, recP := mkExecRec(t, PaperExecutor{}, false, 0)
+	xp, recP := mkExecRec(t, PaperExecutor{}, false, -24)
 	rp := xp.HandleObservation(obs, "condP1", "slug", 1_800_000_000_000)
 	// live 路（脚本全额 @ 同价）
 	xl, recL := mkExecRec(t, sc, true, -20)
@@ -204,5 +207,98 @@ func TestExecPaperLiveParity(t *testing.T) {
 	// 文件行数: 各 1 行
 	if len(recP.Observations()) != 1 || len(recL.Observations()) != 1 {
 		t.Fatalf("各应 1 行: paper=%d live=%d", len(recP.Observations()), len(recL.Observations()))
+	}
+}
+
+// ── 日亏熔断: 两模式同源 + 当日锁存（2026-09-16, plan §3.3/§3.4）──
+
+// TestExecBreakerParityPaperLive 同一已结算亏损输入下, paper/live 闸判据一致
+// （唯一差别: live 拦下 POST 记 rejected, paper 只写 gate_reason 且照常结算）。
+func TestExecBreakerParityPaperLive(t *testing.T) {
+	const line = -0.5
+	// paper: 先结算一笔输单（−2U ≤ −0.5U）→ 第二笔被闸, 但仍是"成交"行
+	xp, recP := mkExecRec(t, PaperExecutor{}, false, line)
+	xp.HandleObservation(mkExecObs(SideYes), "pA", "slug", 1_800_000_000_000)
+	if !recP.Resolve("pA", OutcomeDown, time.Now()) {
+		t.Fatal("paper 首笔结算失败")
+	}
+	gotP := xp.HandleObservation(mkExecObs(SideYes), "pB", "slug", 1_800_000_000_000)
+	if gotP == nil || gotP.GateReason != GateDailyLoss {
+		t.Fatalf("paper 第二笔应被闸且带 gate_reason: %+v", gotP)
+	}
+	// 方案 A: 被闸行仍是完整信号行（IsFilled 不变、照常进结算）
+	if !gotP.OK || !gotP.IsFilled() || gotP.ExecStatus != "" {
+		t.Fatalf("paper 被闸行 schema 应与正常信号一致: %+v", gotP)
+	}
+	if len(recP.PendingSignals()) != 1 {
+		t.Fatalf("paper 被闸行应照常注册结算, pending=%d", len(recP.PendingSignals()))
+	}
+
+	// live: 同输入同判据, 但拦下真实 POST
+	sc := &scriptedExecutor{res: mkFilled("o9")}
+	xl, recL := mkExecRec(t, sc, true, line)
+	xl.HandleObservation(mkExecObs(SideYes), "lA", "slug", 1_800_000_000_000)
+	if !recL.Resolve("lA", OutcomeDown, time.Now()) {
+		t.Fatal("live 首笔结算失败")
+	}
+	gotL := xl.HandleObservation(mkExecObs(SideYes), "lB", "slug", 1_800_000_000_000)
+	if gotL == nil || gotL.GateReason != GateDailyLoss || gotL.ExecStatus != ExecStatusRejected {
+		t.Fatalf("live 第二笔应被闸为 rejected + gate_reason: %+v", gotL)
+	}
+	if sc.calls != 1 {
+		t.Fatalf("live 被闸后不得下单, 实 Execute %d 次（应 1: 仅首笔）", sc.calls)
+	}
+}
+
+// TestExecBreakerLatch 当日锁存: 被闸行结算后累计 P&L 回升过线, 当日仍不得复牌。
+// （无锁存则「现算 P&L > 线」会自动放行——paper 方案 A 下这是必然发生的序列。）
+func TestExecBreakerLatch(t *testing.T) {
+	const line = -1.5
+	x, rec := mkExecRec(t, PaperExecutor{}, false, line)
+
+	// 1) 输一笔: 今日 −2U ≤ −1.5U → 熔断
+	x.HandleObservation(mkExecObs(SideYes), "a", "slug", 1_800_000_000_000)
+	rec.Resolve("a", OutcomeDown, time.Now())
+
+	// 2) 被闸行（照常结算）: 结算为赢 +8U → 今日回升到 +6U（已过线）
+	gated := x.HandleObservation(mkExecObs(SideYes), "b", "slug", 1_800_000_000_000)
+	if gated == nil || gated.GateReason != GateDailyLoss {
+		t.Fatalf("第二笔应被闸: %+v", gated)
+	}
+	if !rec.Resolve("b", OutcomeUp, time.Now()) {
+		t.Fatal("被闸行应可结算（方案 A）")
+	}
+	if pnl := x.todaySettledPnl(); pnl <= line {
+		t.Fatalf("前置条件不成立: 今日 P&L 应已回升过线, 实 %.2f", pnl)
+	}
+
+	// 3) 锁存: 尽管现算 P&L 过线, 当日仍停单
+	if x.breakerTripped() != true {
+		t.Fatal("被闸行结算回升后仍应保持停单（锁存）")
+	}
+	got := x.HandleObservation(mkExecObs(SideYes), "c", "slug", 1_800_000_000_000)
+	if got == nil || got.GateReason != GateDailyLoss {
+		t.Fatalf("锁存期内的信号仍应被闸: %+v", got)
+	}
+	if n := rec.GatedToday(utcToday(), GateDailyLoss); n != 2 {
+		t.Fatalf("今日被闸计数 = %d, 期望 2（b/c; a 是闸前那笔真亏）", n)
+	}
+	if !rec.GatedOn(utcToday(), GateDailyLoss) || rec.GatedOn("2000-01-01", GateDailyLoss) {
+		t.Fatal("GatedOn 应按日隔离")
+	}
+}
+
+// TestRiskSummaryModes 熔断摘要两模式都填, 唯一差别是 Enforced（是否真拦 POST）。
+func TestRiskSummaryModes(t *testing.T) {
+	xp, _ := mkExecRec(t, PaperExecutor{}, false, -24)
+	rp := xp.RiskSummary()
+	if rp == nil || !rp.CanTrade || rp.Enforced || rp.MaxDailyLoss != -24 || rp.GatedToday != 0 {
+		t.Fatalf("paper 摘要不符: %+v", rp)
+	}
+	sc := &scriptedExecutor{res: mkFilled("o10")}
+	xl, _ := mkExecRec(t, sc, true, -24)
+	rl := xl.RiskSummary()
+	if rl == nil || !rl.CanTrade || !rl.Enforced {
+		t.Fatalf("live 摘要不符（enforced 应为 true）: %+v", rl)
 	}
 }

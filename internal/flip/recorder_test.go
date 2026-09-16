@@ -581,12 +581,16 @@ func TestLiveRiskGateRejectedRow(t *testing.T) {
 	ts, _, _ := testTs(t)
 
 	// 风控闸拒绝（未发起下单）: 直接落 rejected 行, 不入 pending
-	rec, err := r.RecordLiveRejected("cond-g", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2, "日亏熔断")
+	rec, err := r.RecordLiveRejected("cond-g", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2,
+		GateDailyLoss, "日亏熔断")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !rec.OK || rec.ExecStatus != ExecStatusRejected || rec.IsFilled() {
 		t.Fatalf("闸拒行: %+v", rec)
+	}
+	if rec.GateReason != GateDailyLoss {
+		t.Fatalf("闸拒行应带 gate_reason: %+v", rec)
 	}
 	if len(r.PendingSignals()) != 0 {
 		t.Fatal("闸拒行不应入 pending")
@@ -670,4 +674,45 @@ func countLines(t *testing.T, path string) int {
 		}
 	}
 	return n
+}
+
+// 日亏熔断锁存的磁盘真相: 被闸行带 gate_reason 落盘, 重启后 GatedOn 自动恢复,
+// 跨 UTC 日自动归零（2026-09-16, plan §3.4）。
+func TestGatedOnCrossDayAndRestart(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts, _, _ := testTs(t) // 2026-09-02 12:00 UTC
+	rec := newRecord("cond-y", "slug", ts/1000, mkObs(ts, SideYes, true, 0.19), 2)
+	rec.GateReason = GateDailyLoss
+	if err := r.writeLocked(rec); err != nil {
+		t.Fatal(err)
+	}
+	if !r.GatedOn("2026-09-02", GateDailyLoss) {
+		t.Fatal("当日被闸行应可查")
+	}
+	if r.GatedOn("2026-09-03", GateDailyLoss) || r.GatedToday("2026-09-03", GateDailyLoss) != 0 {
+		t.Fatal("跨日应自动归零")
+	}
+	if r.GatedOn("2026-09-02", GateFirstWindow) {
+		t.Fatal("闸原因应按原因隔离")
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 重启: 锁存从磁盘恢复（无需任何额外状态文件）
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	if !r2.GatedOn("2026-09-02", GateDailyLoss) || r2.GatedToday("2026-09-02", GateDailyLoss) != 1 {
+		t.Fatal("重启后锁存应自动恢复")
+	}
+	if r2.GatedOn("2026-09-03", GateDailyLoss) {
+		t.Fatal("重启后跨日仍应归零")
+	}
 }

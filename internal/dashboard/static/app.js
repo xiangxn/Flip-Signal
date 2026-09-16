@@ -69,6 +69,22 @@
       lb.style.display = 'none';
     }
 
+    // 日亏熔断（两模式都显示; paper 是"影子"——闸判据同源, 但只标记不拦 POST）
+    var rb = $('riskBar');
+    if (s.risk) {
+      var rk = s.risk;
+      rb.style.display = '';
+      var rbits = ['风控 今日 ' + fmtPnl(rk.today_pnl) + ' / ' + fmtPnl(rk.max_daily_loss) + 'U'];
+      if (!rk.can_trade) {
+        rbits.push('⛔ 熔断停单' + (rk.gated_today > 0 ? '（今日拦 ' + rk.gated_today + ' 笔）' : '（锁存中）'));
+      }
+      if (!rk.enforced) rbits.push('影子（纸面只标记）');
+      rb.textContent = rbits.join(' · ');
+      rb.className = 'riskbar' + (rk.can_trade ? '' : ' neg');
+    } else {
+      rb.style.display = 'none';
+    }
+
     $('statSignal').textContent = s.signal_count;
     $('statWon').textContent = s.won_count;
     $('statLost').textContent = s.lost_count;

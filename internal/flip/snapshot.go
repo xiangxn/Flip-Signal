@@ -25,6 +25,9 @@ type LiveSnapshot struct {
 	SpotPrice float64
 	SpotAgeMs int64
 
+	// Risk 为日亏熔断摘要（两模式都填; paper 的 Enforced=false 见 RiskSummary）
+	Risk *RiskSummary
+
 	// Stats 为本窗 tick 健康度（引擎计数器, 窗口间/未开始为 nil）。
 	// 「信号为什么少」的现场证据: 延迟闸挡掉的本会触发 tick 在此可见
 	//（见 docs/dog020_risk_latency_plan_2026-09-16.md §1.3/§2.5）。
@@ -44,6 +47,18 @@ type LiveExec struct {
 	MaxDailyLoss float64 `json:"max_daily_loss"` // 熔断线（--max-daily-loss）
 	BreakerOpen  bool    `json:"breaker_open"`   // 熔断未触发: 今日 P&L > MaxDailyLoss（可下单）
 	Reconciling  int     `json:"reconciling"`    // 待人工核对执行行（submitting/未知结果, 重启扫描语义）
+}
+
+// RiskSummary 是日亏熔断的状态摘要（Dashboard 风控块, 两模式都显示）。
+//
+// 命名注意: 与 LiveExec.BreakerOpen（历史字段, true = **可**开单）区分——本类型
+// 用 CanTrade 直说极性, 避免同类状态两个相反语义的布尔。live 块保持原样不动。
+type RiskSummary struct {
+	TodayPnl     float64 `json:"today_pnl"`      // 今日（UTC）已结算 P&L（含被闸行, 方案 A）
+	MaxDailyLoss float64 `json:"max_daily_loss"` // 熔断线（--max-daily-loss）
+	CanTrade     bool    `json:"can_trade"`      // 熔断未触发 = 可开单（含当日锁存, 见 breakerTripped）
+	GatedToday   int     `json:"gated_today"`    // 今日被闸笔数（gate_reason=daily_loss）
+	Enforced     bool    `json:"enforced"`       // 是否拦下真实 POST: live=true / paper=false（只标记）
 }
 
 // Snapshotter 由 cmd/flip main 的 runtimeState 实现，返回当前运行快照

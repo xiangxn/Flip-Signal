@@ -58,6 +58,9 @@ type stateResponse struct {
 
 	// live 执行摘要（mode=paper 恒 nil, 前端判空隐藏）
 	LiveExec *flip.LiveExec `json:"live,omitempty"`
+
+	// 日亏熔断摘要（两模式都填; paper 的 enforced=false = 只标记不拦 POST）
+	Risk *flip.RiskSummary `json:"risk,omitempty"`
 }
 
 // recordResponse 是 /api/observations 与 /api/signals 的元素。
@@ -150,6 +153,7 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		DayTotal:         len(daily),
 		MaxDrawdown:      s.recorder.MaxDrawdown(),
 		LiveExec:         live.Live,
+		Risk:             live.Risk,
 	})
 }
 
