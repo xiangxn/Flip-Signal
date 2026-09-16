@@ -280,7 +280,8 @@ Amp=0 直接污染其后 18 窗）。故：
 > 口径修正（2026-09-16 落地时）：`kind` 恒为 `"winstats"`（跨类型误读的第二道守卫，
 > 第一道是文件前缀）；`lost_triggers` 是**明细数组**而非计数（计数即数组长度）；
 > 未采集的窗口落 `"skip"`（取值 `late` 窗口来不及 / `no_market` gamma 无市场 /
-> `no_token` token 解析失败 / `dup_record` 条件 id 重复）且统计字段全 0——保留该行是为了让
+> `no_token` token 解析失败 / `dup_record` 条件 id 重复 / `no_sigma` σ 冷启动预热
+> 未就绪，2026-09-16 补，见 `dog020_anchor_recovery_2026-09-16.md` §9.2）且统计字段全 0——保留该行是为了让
 > 逐日行数（≈288）本身成为"主循环是否跑满"的证据；锚缺失窗落 `"anchor_missing":true`。
 > 原稿的 `rem_end`/`anchor_ok`/`triggered`/`ok` 字段未实现（触发与结算结果已在
 > `touches_*.jsonl` 里，同键重复只会带来两处口径打架）。

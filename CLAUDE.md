@@ -168,7 +168,8 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
 
 ```
 1. 计算下个 5分钟对齐时间戳；预取 gamma 市场信息（边界前 20s）
-2. 边界对齐 → 注入窗口上下文（anchor=TWAP 流值、σ）→ 订阅 UP/DOWN token
+2. 边界对齐 → 准入闸（σ < `flip.HistMin` 窗即整窗跳过 `skip=no_sigma`，决策 #13）
+   → 注入窗口上下文（anchor=TWAP 流值、σ）→ 订阅 UP/DOWN token
 3. 每秒 1s tick：读 UP/DOWN 盘口 + Binance spot + TWAP → ProcessTick(状态机)
    （锚缺失窗口在步骤 2 已并行起恢复通道：官方开盘价 3 次 × 20s + 边界 ±10s 内
    推送直采 → 成功即 SetAnchor 回填，本窗照常判定；3 次全失败才整窗不观测，
@@ -197,7 +198,8 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
   （latency≤300 且 UP/DOWN 双侧报价齐全——整簿快照门控，实测缺失为整行全空）
   上检查 up/down ask 是否 ≤0.20
 - **判定顺序**（一次完成）：rem_low → no_hist → missing_spot → no_crash → dist_out
-  （missing_anchor 现网不可达，仅 decide 纯函数防线）；全过 → ok（shares = stake/fill）
+  （missing_anchor / no_hist 现网不可达——锚恢复通道与 σ 未就绪整窗跳过在前，
+  二者仅 decide 纯函数防线）；全过 → ok（shares = stake/fill）
 - **Done**: 事件内不再检测（与回测每事件仅首个观测一致，无 fallback 重试）；
   锚未就绪期占槽的 tick 不追溯触发，只记 lost_triggers(anchor_pending)
 - 数据质量：无效 tick 压 0 占槽（不进触发检查，不贡献急跌窗 max）
@@ -346,6 +348,23 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
    - 可见性：`winstats_*` 增 `anchor_src`（official\|push）与 `anchor_recovered_ms`
      （边界后多久恢复），失败窗口 `anchor_missing=true`；dashboard「丢信号」栏区分
      `anchor_pending` 与 `无快照`。
+13. **σ 未就绪整窗跳过（`skip=no_sigma`）**（2026-09-16，见
+   `docs/dog020_anchor_recovery_2026-09-16.md` §9.2）：冷启动时本地 `windows_*`
+   预热不可用（断档/最新窗超 `localFreshMax`）会回退**异步**网络预热（`warmupSigma`
+   goroutine：18 窗逐窗 1s + 429 退避，实测 >70s）——边界落在它完成之前时 `hist.Bps`
+   恒 0、`BeginWindow(anchor, 0)` 把 σ 冻住整窗且**无热更新路径**：任何触底都被
+   `no_hist` 拒（首触即 Done → 必然零信号），却仍落一条 `hist_bps=0` 观测，踩中
+   `06_oos_review.py:161-167` 硬检查。与锚缺失同一原则（数据源不可信 → 本窗不观测）
+   → `hist.Count() < flip.HistMin` 即**整窗跳过**：不预取/不订阅、落 `skip=no_sigma`
+   的 `winstats_*` 行，下一窗（5min 后）预热早已完成，不会连跳。
+   - **不取「预热完成后热更新 σ」**（`SetHistBps` 式）：会把「窗口级常量 σ」变成时变量，
+     同一事件的观测行 `dist_s` 取决于 σ 何时落地（不可复现），回测也无对应形态
+     （btreplay 每事件 σ 固定）；收益仅 ≈0.15 笔/冷启动，不值。
+   - 副作用：本窗无 close 采样 → `windows_*` 缺一行，等价于停机窗（`RecentBlock`
+     600s 缺口容差吸收，同 `dup_record`）。`no_hist` 由此与 `missing_anchor` 一样
+     **现网不可达**，`decide` 分支保留为纯函数防线。
+   - 频率：全量纸面数据 3544 条观测里 `hist_bps=0` 仅 2 行（09-03 15:40Z /
+     09-16 13:10Z），均为冷启动窗；修后不再新增（历史两行留在数据里，复查须知）。
 
 ---
 
