@@ -25,6 +25,7 @@
 | 兜底 | `anchor≤0` → 本窗不观测 | **不变**（3 次全失败仍不观测） | `06_oos_review.py:161-167` 对 anchor/hist_bps/fill 为 0 的硬检查 = 本项目红线 |
 | 可观测性 | 无（连窗口被跳过都看不出来） | `winstats_*` 增 `anchor_src` / `anchor_recovered_ms`；失败窗 `anchor_missing=true`；触底留痕 `lost_triggers.reason=anchor_pending`；dashboard 文案区分 | 「本窗为什么没信号」必须可查（沿用 09-16 延迟闸文档 §2.4 的可见性口径） |
 | 同类口子·σ 冷启动窗（§9.2，同日补丁） | 整窗 σ=0 → 触底恒 `no_hist`（必然零信号）且落 `hist_bps=0` 观测，踩 06 硬检查 | `hist.Count() < flip.HistMin` → **整窗跳过**，落 `skip=no_sigma` 的 winstats 行 | 与锚缺失同一条原则：数据源不可信 → 本窗不观测（决策 #13） |
+| 同类口子·winstats 重复行（§9.1，同日补丁） | 每窗多一行假 `skip=late`（**同 `event_start` 两行**），07 的逐日行数翻倍、跳过列全假 | 步骤 1 迟到分支按**上一窗身份**（`prevWindowStart`）静默顺延，不告警不落行 | 收尾 `rem = int()` 截断使循环总在边界前 0~1s 回来，`floor(now/300)` 回指刚跑完的那一窗（生产实测 82/82 窗全中） |
 
 **一句话**：这是**保险不是修复**——实测频率低（§6：paper 12 天里锚缺失槽位占比 ≤0.57%，
 且全部落在 ≥10min 的断档里），但此前这类窗口是**纯损失且不可见**，救回来几乎零成本
@@ -305,24 +306,56 @@ v4.config.yaml -dashboard :8090`）：
 > 该窗口的锚缺失路径**未被真实触发**（实测锚缺失是低频事件，§6）——恢复通道的
 > 正确性由 §7 的注入式单测覆盖（含 `abs` 判据、3 次节奏、ctx 取消），不靠碰运气等现场。
 
-### 9.1 顺带发现 ①：`skip=late` 重复行（**本次改动之外**，`d33d943` winstats 功能）
+### 9.1 顺带发现 ①：`skip=late` 重复行（同日已修）
 
-主循环步骤 1（[main.go:390-400](../cmd/flip/main.go#L390-L400)）用
-`alignedTs := now.Unix()/300*300` 定位当前窗口；而 collectLoop 的收尾 tick 用
-`rem = int(endTime.Sub(tickTime).Seconds())` **截断**取整，会在边界前几毫秒就取到 `rem==0`
-提前退出窗口。两者相遇 → 下一轮循环把**刚跑完的窗口**当成「迟到了 5 分钟」再跳一次：
+**根因**：主循环步骤 1（[main.go:398-419](../cmd/flip/main.go#L398-L419)）用
+`alignedTs := now.Unix()/300*300`（**floor**）定位当前窗口；而 collectLoop 的收尾 tick 用
+`rem = int(endTime.Sub(tickTime).Seconds())` **截断**取整——`rem==0` 在边界**前 0~1s** 就成立，
+循环因此总带着几毫秒~几百毫秒的提前量回来，此刻 `time.Now()` 仍落在**上一窗**内，
+floor 回指的就是刚跑完的那一窗：
 
 ```
 21:14:59.996786 [Cycle] 窗口结束 0xbb64… |close−anchor|=47.68, σ 现 18 窗
 21:14:59.996871 [Cycle] ⚠️ 已落后窗口边界 5m0s（>15s），跳过本窗口 2026-09-16T13:10:00Z
 ```
 
-后果（实测 2/2 完整窗口）：`winstats_*.jsonl` 每窗多一行 `skip=late` 空行，**同
-`event_start` 出现两行**——逐日行数（本应 ≈288，被当作「主循环跑满」的证据）翻倍，
-按 `event_start` 关联窗口的读法失效。**影响面仅限 winstats 的计数/关联，不影响任何判定**。
+该 `nextStart` 上一轮已当作正常窗口跑满（σ／健康度都已落盘），这里却被
+`elapsed ≈ 5m > lateLimit(15s)` 判成迟到 → 多打一条 ⚠️ 日志、多落一行 `skip=late` 空行。
 
-修法（建议，未实施）：循环里记住刚跑完窗口的 `event_start`，`nextStart` 与之相同时
-不发 skip 日志与 skip 行（既准确又不依赖时间启发式）。
+**生产实测规模**（`data/v4/winstats_2026-09-16.jsonl`，bug 生效期 07:40Z 启动 ~ 14:30Z 停）：
+**163 行 / 82 个窗口——除进程启动那一窗，每窗都是两行**（81/81 孪生）。07 的逐日
+「行数」（本应 ≈288，被当作「主循环跑满」的证据）正好翻倍，「跳过」列 82 条**全是假的**。
+指纹（脚本核验 81/81 全中）：同一 `event_start` 恒为 {一行有数据, 一行 `skip=late` 且
+`ticks=0`}。**影响面仅限 winstats 的计数/关联，不碰任何判定**（`touches_*` / `windows_*`
+均为一窗一行，未受影响）。
+
+**变体**：若该窗恰好是 σ 冷启动窗（§9.2），孪生的假行不是 `late` 而是
+「`no_sigma` 真行 + `late` 假行」两行（14:10Z 冒烟实测）——故判据必须是
+「`nextStart` == 上一轮处理过的窗口」，与 `skip` 取值无关。
+
+**修法（2026-09-16 同日已落地）**：**按身份判定，不用时间启发式**——主循环记
+`prevWindowStart`（上一轮迭代处理的窗口起点 unix 秒；进程重启后为 0，天然不复用），
+步骤 1 的迟到分支加一层 `nextStart.Unix() == prevWindowStart` → **静默顺延到下一窗**
+（不告警、不落 skip 行），否则维持原有告警 + `skip=late`。赋值点在顺延之后、`slug`
+拼装之前，因此跳过通道（`no_market`/`no_token`/`dup_record`/`no_sigma`）与跑满窗口的
+末路径**全部出口都被覆盖**——每条出口处理的都是同一窗。
+
+为什么不改成放宽 `elapsed` 阈值：提前量（0~1s）与真·迟到（≥15s，进程启动／上游卡顿）
+同在一条时间轴上，而 `int()` 截断让「提前 0.99s」与「迟到 0.01s」落在**同一秒格**里，
+无法用 `elapsed` 分辨；身份判定零歧义，且不引入新常量（`lateLimit` 语义不变）。
+
+**验收**（2026-09-16 22:35~22:52 UTC 本机 paper，空 `output_dir` 冷启动，`/tmp/dupl_smoke`，
+修后二进制）：
+
+| 观测点 | 结果 |
+|------|------|
+| 启动合法迟到 | 22:35:56 `已落后 56s` + `skip=late` 行**保留**（进程启动那一窗本就该跳） |
+| 收尾边界前 9.5ms | 22:44:59.990472 窗口结束 → 22:45:00.000955 下一窗开始，**无 ⚠️、无 dup 行** |
+| 收尾边界前 933ms | 22:49:59.066854 窗口结束 → 22:50:00.000643 下一窗开始，**无 ⚠️** |
+| winstats | 3 行 / 3 窗 / **无重复**（1 条合法启动 `late` + 2 条真行），σ 连续（9.21→9.55→10.36，恒 18 窗），**无级联丢窗** |
+
+对照：修前同一行为必出 dup（21:14:59.996871 / 22:44:59.990472 两例，见上），
+且生产 82 窗 100% 复现——故本表两次「无 ⚠️」即为判据达成。
 
 ### 9.2 顺带发现 ②：冷启动首窗恒 `no_hist`（发现于本次冒烟，**同日补丁已修**）
 
@@ -374,3 +407,27 @@ v4.config.yaml -dashboard :8090`）：
 - `winstats_2026-09-16.jsonl` 新建 5 行（§9.1 的 2 行重复含在内）
 - 冒烟环境自身降级（代理 + `slow consumer` WS 报错，13:15 窗 `book_missing` 偏高），
   这 3 个窗口的 tick 健康度**不代表生产水平**。
+
+### 9.4 `data/v4/winstats_2026-09-16.jsonl` 的 81 行假 `late`（如需剔除）
+
+§9.1 的 bug 在当天生产进程里全量生效：**163 行里 81 行是假 `skip=late`**（孪生指纹见 §9.1）。
+**未自动改动数据文件**——剔除命令（**须在引擎停跑时执行**：in-place 重写是 temp+rename，
+运行中的进程仍持有旧 inode 的 append 句柄，之后的行会写进已 unlink 的文件）：
+
+```bash
+cd <repo> && cp data/v4/winstats_2026-09-16.jsonl /tmp/winstats_2026-09-16.orig.jsonl
+python/venv/bin/python - <<'PY'
+import json, collections
+p = 'data/v4/winstats_2026-09-16.jsonl'
+rows = [json.loads(l) for l in open(p)]
+cnt = collections.Counter(r['event_start'] for r in rows)
+keep = [r for r in rows if not (r.get('skip') == 'late' and cnt[r['event_start']] > 1)]
+with open(p, 'w') as f:
+    for r in keep:
+        f.write(json.dumps(r, ensure_ascii=False) + '\n')
+print(f'{len(rows)} → {len(keep)} 行（剔除 {len(rows) - len(keep)} 行假 late）')
+PY
+```
+
+判据只丢「`skip=late` 且有孪生」的行——进程启动那一窗的合法 `late`（07:40Z，
+无孪生）会保留。剔除后当天即恢复「每窗一行」，07 的逐日行数／跳过列口径随之复原。

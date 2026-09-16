@@ -293,8 +293,10 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
    （落地时是三个 flag，同日 config 重构后改为配置键，见决策 #11），
    **默认值 = 现行值 = 数据支持值**（配置化的意义是"能调"而非"该调"——book 收紧
    在 14 天回测里单调变差：T=20ms 少赚 62.8U）。判定分支不动，只把盲区点亮：无效
-   tick 上"本会触发"的 tick 落 `winstats_YYYY-MM-DD.jsonl`（每窗一行，含
-   `ticks/ticks_valid/book_stale/book_missing/lost_triggers` 明细与恒等式），触底
+   tick 上"本会触发"的 tick 落 `winstats_YYYY-MM-DD.jsonl`（**严格每窗一行**，含
+   `ticks/ticks_valid/book_stale/book_missing/lost_triggers` 明细与恒等式；2026-09-16
+   修过「收尾 `rem` 截断使下一轮把刚跑完的窗判成迟到、多落一行 `skip=late`」，
+   主循环改按上一窗身份静默顺延，见 anchor 文档 §9.1），触底
    观测补 `spot_age_ms`（亚阈值陈旧是否污染 `dist_s` 从"零可观测"变为可审计）。
    ⚠️ `winstats_*` 必须独立于 `windows_*`：后者是 σ 预热数据源，混入统计行会以
    Amp=0 污染其后 18 窗（文件前缀 + `kind` 字段双保险）。
