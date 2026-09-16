@@ -80,17 +80,32 @@ func TestWindowStatsCounters(t *testing.T) {
 	}
 }
 
-// TestWindowStatsAnchorMissing 锚缺失窗口: 标位、零计数、不产出观测（镜像回测整窗跳过）。
+// TestWindowStatsAnchorMissing 锚未就绪窗口: 标位、照常分类计数、触底记
+// anchor_pending、不产出观测（未恢复时镜像回测整窗跳过，见 engine_test.go
+// TestAnchorPendingWindow 的恢复路径）。
 func TestWindowStatsAnchorMissing(t *testing.T) {
 	e := NewEngine(cfgOK())
-	e.BeginWindow(0, tHist) // anchor≤0 = 缺锚
+	e.BeginWindow(0, tHist) // anchor≤0 = 锚未就绪
 	feed(t, e, 3, 280, 0.19, 0.19)
 	st := e.WindowStats()
 	if !st.AnchorMissing {
-		t.Fatal("缺锚窗口应标 AnchorMissing")
+		t.Fatal("锚未就绪窗口应标 AnchorMissing")
 	}
-	if st.Ticks != 0 || st.TicksValid != 0 || st.BookStale != 0 || st.BookMissing != 0 || len(st.LostTriggers) != 0 {
-		t.Fatalf("缺锚窗口不占槽, 计数应全 0: %+v", st)
+	// 恢复通道可能稍后回填锚 → 窗口内照常占槽（crash 腿需要真实历史）,
+	// 计数与恒等式同正常窗口
+	if st.Ticks != 3 || st.TicksValid != 3 || st.BookStale != 0 || st.BookMissing != 0 {
+		t.Fatalf("锚未就绪窗口计数错: %+v", st)
+	}
+	if st.Ticks != st.TicksValid+st.BookStale+st.BookMissing {
+		t.Fatalf("恒等式破: %+v", st)
+	}
+	if len(st.LostTriggers) != 3 {
+		t.Fatalf("触底应逐 tick 留痕 anchor_pending: %+v", st.LostTriggers)
+	}
+	for i, lt := range st.LostTriggers {
+		if lt.Reason != LostReasonAnchorPending {
+			t.Fatalf("lost[%d].reason = %q, 期望 %q", i, lt.Reason, LostReasonAnchorPending)
+		}
 	}
 }
 

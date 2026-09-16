@@ -114,14 +114,30 @@ func TestTrigger(t *testing.T) {
 	}
 }
 
-// TestAnchorZeroWindow 锚缺失窗口（BeginWindow 收到 anchor=0，窗口级属性）整窗不观测：
-// 镜像回测 :69 锚缺失事件整体跳过——触底不落盘（含交叉态），rem==0 终 tick 照常转 Done。
+// TestAnchorZeroWindow 锚缺失窗口**始终未恢复**时整窗不产出观测（镜像回测 :69 锚缺失
+// 事件整体跳过）: 触底不落盘（含交叉态），只留 lost_triggers(anchor_pending) 痕迹，
+// rem==0 终 tick 照常转 Done。
+//
+// 窗口内 tick 照常占槽与计数（锚恢复通道的价值所在，见 TestAnchorPendingWindow），
+// 故 AnchorMissing 与计数可同时非 0——「锚缺失」的最终含义是窗口结束时锚仍未就绪。
 func TestAnchorZeroWindow(t *testing.T) {
 	e := NewEngine(cfgOK())
 	e.BeginWindow(0, tHist) // anchor 缺失
 	for i := 0; i < 3; i++ {
 		if o := e.ProcessTick(stdTick(250-i, 0.19, 0.18)); o != nil {
 			t.Fatalf("锚缺失窗口不应产出任何观测: %+v", o)
+		}
+	}
+	st := e.WindowStats()
+	if !st.AnchorMissing || st.Ticks != 3 || st.TicksValid != 3 {
+		t.Fatalf("锚未就绪应标 AnchorMissing 且照常分类计数: %+v", st)
+	}
+	if len(st.LostTriggers) != 3 {
+		t.Fatalf("恢复前的触底应逐 tick 留痕, 得到 %d 条: %+v", len(st.LostTriggers), st.LostTriggers)
+	}
+	for i, lt := range st.LostTriggers {
+		if lt.Reason != LostReasonAnchorPending {
+			t.Fatalf("lost[%d].reason = %q, 期望 %q", i, lt.Reason, LostReasonAnchorPending)
 		}
 	}
 	if got := e.State().String(); got != "Watching" {
@@ -132,6 +148,88 @@ func TestAnchorZeroWindow(t *testing.T) {
 	}
 	if got := e.State().String(); got != "Done" {
 		t.Fatalf("rem==0 后 state = %s, 期望 Done", got)
+	}
+	if a, _ := e.WindowAnchor(); a != 0 {
+		t.Fatalf("未恢复窗口锚应保持 0, 得到 %v", a)
+	}
+}
+
+// TestAnchorPendingWindow 锚恢复通道的核心契约（2026-09-16，docs/dog020_anchor_recovery_2026-09-16.md）:
+// 锚未就绪期 tick 照常占槽（crash 腿拿得到真实盘口历史），触底不产出观测（只留痕），
+// SetAnchor 回填后本窗照常判定——且 m_45 能看到**恢复前**的 ask（与回测 1:1，回测里锚恒可用）。
+func TestAnchorPendingWindow(t *testing.T) {
+	e := NewEngine(cfgOK())
+	e.BeginWindow(0, 0) // 锚与 σ 均未知（恢复时一并回填）
+
+	// 恢复前: 3 个历史 tick 构造急跌窗（ask 0.55 → 满足 m_45 ≥ 0.40）
+	for i := 0; i < 3; i++ {
+		tk := stdTick(280-i, 0.55, 0.55)
+		tk.BinPrice = 99_986 // −0.2σ（浅洞带内）
+		if o := e.ProcessTick(tk); o != nil {
+			t.Fatalf("锚未就绪不得产出观测: %+v", o)
+		}
+	}
+	// 恢复前触底: 不产出观测, 只留痕（不追溯——那时锚未知, 用陈旧 ask 成交无意义）
+	touch := stdTick(275, 0.19, 0.55)
+	touch.BinPrice = 99_986
+	if o := e.ProcessTick(touch); o != nil {
+		t.Fatalf("锚未就绪期的触底不得产出观测: %+v", o)
+	}
+	st := e.WindowStats()
+	if !st.AnchorMissing || st.Ticks != 4 || st.TicksValid != 4 {
+		t.Fatalf("锚未就绪期计数错: %+v", st)
+	}
+	if len(st.LostTriggers) != 1 || st.LostTriggers[0].Reason != LostReasonAnchorPending ||
+		st.LostTriggers[0].Side != SideYes {
+		t.Fatalf("恢复前触底留痕错: %+v", st.LostTriggers)
+	}
+
+	// 回填锚（恢复通道成功）: 锚/σ 就位、AnchorMissing 清除
+	e.SetAnchor(tAnchor, tHist)
+	if a, hb := e.WindowAnchor(); !approx(a, tAnchor) || !approx(hb, tHist) {
+		t.Fatalf("WindowAnchor = (%v, %v), 期望 (%v, %v)", a, hb, tAnchor, tHist)
+	}
+	if st := e.WindowStats(); st.AnchorMissing {
+		t.Fatalf("回填后应清除 AnchorMissing: %+v", st)
+	}
+	// 幂等: 二次回填不覆盖（先到者即真值）
+	e.SetAnchor(1, 1)
+	if a, _ := e.WindowAnchor(); !approx(a, tAnchor) {
+		t.Fatalf("SetAnchor 非幂等, anchor = %v", a)
+	}
+
+	// 回填后触底 → 正常判定: crash 腿看到恢复前的 ask（m_45 = 0.55）
+	tk := stdTick(270, 0.19, 0.55)
+	tk.BinPrice = 99_986
+	o := e.ProcessTick(tk)
+	if o == nil {
+		t.Fatal("锚回填后触底应产出观测")
+	}
+	if !o.OK || o.Side != SideYes || !approx(o.Fill, 0.19) {
+		t.Fatalf("观测错: %+v", o)
+	}
+	if !approx(o.M45, 0.55) {
+		t.Fatalf("m_45 = %v, 期望 0.55（恢复前占槽的 ask 必须留在 ring 里）", o.M45)
+	}
+	if !approx(o.Anchor, tAnchor) || !approx(o.HistBps, tHist) {
+		t.Fatalf("观测未带上恢复的锚/σ: anchor=%v hist_bps=%v", o.Anchor, o.HistBps)
+	}
+	if !approx(o.DistS, -0.2) {
+		t.Fatalf("dist_s = %v, 期望 -0.2", o.DistS)
+	}
+	if got := e.State().String(); got != "Done" {
+		t.Fatalf("判定后 state = %s, 期望 Done", got)
+	}
+}
+
+// TestSetAnchorInvalid 回填非法锚（≤0）不改变窗口状态（防线: 恢复通道只回填 >0 值）。
+func TestSetAnchorInvalid(t *testing.T) {
+	e := NewEngine(cfgOK())
+	e.BeginWindow(0, 0)
+	e.SetAnchor(0, tHist)
+	e.SetAnchor(-1, tHist)
+	if a, hb := e.WindowAnchor(); a != 0 || hb != 0 {
+		t.Fatalf("非法锚不得回填: (%v, %v)", a, hb)
 	}
 }
 

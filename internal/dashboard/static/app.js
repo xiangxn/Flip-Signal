@@ -173,16 +173,19 @@
       var lost = ws.lost_triggers || [];
       var lEl = $('whLost');
       if (ws.anchor_missing) {
-        lEl.textContent = '锚缺失，本窗不观测';
+        // 锚缺失: 窗口内正在走恢复通道（官方开盘价 3×20s + 边界窄窗口推送直采），
+        // 恢复成功即转为正常判定并清标记（见 flip.Engine.SetAnchor）
+        lEl.textContent = '锚缺失（恢复中），本窗暂不观测';
         lEl.className = 'lost warn';
       } else if (lost.length === 0) {
         lEl.textContent = '丢信号 0';
         lEl.className = 'lost';
       } else {
         var t = lost[lost.length - 1]; // 最近一笔（落盘明细见 winstats_*.jsonl）
+        var why = t.reason === 'stale_book' ? ' (book ' + t.book_lat_ms + 'ms)'
+          : t.reason === 'anchor_pending' ? ' (锚未就绪)' : ' (无快照)';
         lEl.textContent = '丢信号 ' + lost.length + ' 笔 · 最近 ' + t.side + ' rem=' + t.rem +
-          ' ask=' + t.ask.toFixed(2) +
-          (t.reason === 'stale_book' ? ' (book ' + t.book_lat_ms + 'ms)' : ' (无快照)');
+          ' ask=' + t.ask.toFixed(2) + why;
         lEl.className = 'lost warn';
       }
     }

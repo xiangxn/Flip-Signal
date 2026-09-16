@@ -12,7 +12,20 @@ const (
 	LostReasonStaleBook = "stale_book"
 	// LostReasonBookMissing 整簿四字段报价不全（无快照行）。
 	LostReasonBookMissing = "book_missing"
+	// LostReasonAnchorPending 锚未就绪（边界采样缺失/陈旧，恢复通道尚未回填）：
+	// 本 tick 连判定都进不去——dist_s 无锚无法计算，触底只能丢弃留痕。
+	LostReasonAnchorPending = "anchor_pending"
 )
+
+// lostReason 归一 tick 的丢信号理由: 锚未就绪时锚闸是主因（该 tick 无论盘口
+// 质量如何都判不了），记数据质量原因会掩盖「锚缺失期间全丢」这一事实；
+// 盘口质量问题本身的计数（BookStale/BookMissing）不受影响，两者不丢信息。
+func lostReason(anchorPending bool, qualityReason string) string {
+	if anchorPending {
+		return LostReasonAnchorPending
+	}
+	return qualityReason
+}
 
 // LostTrigger 是一个「本会触发但被数据质量闸挡掉」的 tick 明细。
 //
@@ -26,7 +39,7 @@ type LostTrigger struct {
 	Rem       int     `json:"rem"`         // 窗口剩余秒
 	Ask       float64 `json:"ask"`         // 该侧 ask（≤ TriggerAskMax）
 	BookLatMs int64   `json:"book_lat_ms"` // 该 tick 盘口延迟
-	Reason    string  `json:"reason"`      // stale_book | book_missing
+	Reason    string  `json:"reason"`      // stale_book | book_missing | anchor_pending
 }
 
 // WindowStats 是本窗 tick 健康度统计（每窗无条件落盘一行, 见 Recorder.LogWindowStats）。
@@ -34,7 +47,9 @@ type LostTrigger struct {
 // 只计数、不参与任何判定——btreplay 与 01_backtest_r1.py 逐位对账是红线，
 // 计数器禁止触碰 pushSlots / decide 的任何分支走向。
 type WindowStats struct {
-	// AnchorMissing 锚缺失: 整窗不观测（镜像回测锚缺失事件跳过），下方计数恒 0。
+	// AnchorMissing 锚缺失: 本窗**结束时**锚仍未就绪（整窗不观测，镜像回测锚缺失
+	// 事件跳过）。窗口内恢复通道回填锚后清除——恢复前占槽的 tick 照常计数，
+	// 故本标记与非 0 计数可同时出现（见 ProcessTick 锚未就绪分支）。
 	AnchorMissing bool `json:"anchor_missing,omitempty"`
 	// Ticks 进入有效性分类的 tick 数（不含 rem==0 终 tick、不含 Done 后的 tick）。
 	Ticks int `json:"ticks"`
@@ -58,8 +73,12 @@ type WindowStats struct {
 // 与回测「每事件仅首个观测、无重试」口径刻意一致。
 //
 // 判定输入全部经 Tick / BeginWindow 注入，本包零外部依赖、无副作用可测：
-//   - 锚缺失窗口（anchor ≤ 0，窗口级）整窗不观测不占槽——镜像回测 :69 锚缺失
-//     事件直接跳过（观测宇宙 1:1；missing_anchor 仅存 decide 纯函数防线，现网不可达）
+//   - 锚未就绪窗口（anchor ≤ 0，窗口级）**收集但闸住观测**：tick 照常占槽进
+//     ring（crash 腿 m_45 与回测 1:1——回测里锚恒可用），但不做触发判定
+//     （dist_s 无锚无法计算），期间触底记 lost_triggers(anchor_pending)。
+//     SetAnchor 回填锚后本窗恢复判定能力（cmd/flip 的恢复通道：官方开盘价
+//   - 边界级推送）；始终未回填 = 整窗不产出观测，镜像回测 :69 锚缺失事件
+//     跳过（观测宇宙 1:1；missing_anchor 仅存 decide 纯函数防线，现网不可达）
 //   - 有效 tick = BookLatMs ≤ Config.MaxBookLatMs（默认 300, 回测 MAX_LAT）且
 //     UP(=yes)/DOWN(=no) 双侧 bid/ask 报价齐全（整簿快照门控，镜像回测 :79；
 //     实测缺失为整行全空，只挡无快照行）
@@ -88,7 +107,8 @@ func NewEngine(cfg Config) *Engine {
 }
 
 // BeginWindow 重置引擎并注入窗口上下文（窗口起点瞬间采样）：
-// anchor 为开盘 Chainlink TWAP-60 值、histBps 为该时刻可用的 σ（bps），≤0 表示不可用。
+// anchor 为开盘 Chainlink TWAP-60 值、histBps 为该时刻可用的 σ（bps），≤0 表示不可用
+// （锚未就绪窗口可经 SetAnchor 在窗口内回填）。
 func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -98,6 +118,38 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.upAsks = e.upAsks[:0]
 	e.downAsks = e.downAsks[:0]
 	e.stats = WindowStats{} // 本窗健康度重新计数（LostTriggers 底层数组一并丢弃）
+}
+
+// SetAnchor 在锚未就绪窗口内回填锚值（cmd/flip 的恢复通道成功时调用）。
+//
+// 幂等: 窗口已有锚（边界采样或先前回填）即忽略——锚是窗口级常量，先到者即真值，
+// 恢复通道只有一个且先成功后退出，实际不会二次调用。
+//
+// 回填后本窗恢复判定能力，但**不追溯**恢复前的触底（那时锚未知，用陈旧的
+// 触发 ask 成交毫无意义；与「无效 tick 不触发、其后有效 tick 才算首触」同构）。
+// 恢复前占槽的 tick 已在 ring 中，故 crash 腿看到的仍是完整真实盘口历史。
+func (e *Engine) SetAnchor(anchor, histBps float64) {
+	if !(anchor > 0) {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.anchor > 0 {
+		return
+	}
+	e.anchor = anchor
+	e.histBps = histBps
+	e.stats.AnchorMissing = false
+}
+
+// WindowAnchor 返回本窗最终生效的锚与 σ（bps）：正常窗口 = BeginWindow 注入值，
+// 锚未就绪窗口 = 恢复回填值（始终未回填则 0, 0）。
+// 窗口结束时读取（σ 追加判定 + 健康度落盘），恢复 goroutine 可能已并发回填——
+// 调用方须先确保恢复通道已退出（cmd/flip 用 cancel + join 保证）。
+func (e *Engine) WindowAnchor() (anchor, histBps float64) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.anchor, e.histBps
 }
 
 // State 返回当前状态（Dashboard 展示用）。
@@ -127,11 +179,15 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 		e.state = stateDone // rem==0 终 tick：窗口结束
 		return nil
 	}
-	if e.anchor <= 0 {
-		// 锚缺失窗口（BeginWindow 时边界 TWAP 缺值）：整窗直接丢掉本 tick——
-		// 不观测、不占槽，镜像回测 :69 锚缺失事件整体跳过（无 missing_anchor 行）。
+
+	// 锚未就绪（边界采样缺失/陈旧，恢复通道可能稍后回填）：本 tick 照常占槽与
+	// 计数（无效 tick 仍压 0 占槽），只是不做触发判定——dist_s 无锚无法计算，
+	// 强判即失真。占槽保证锚回填后 crash 腿 m_45 看到的是完整真实盘口历史
+	// （回测里锚恒可用，此处对齐）；恢复前的触底不追溯，只留痕
+	// （lost_triggers.anchor_pending）。
+	anchorPending := e.anchor <= 0
+	if anchorPending {
 		e.stats.AnchorMissing = true
-		return nil
 	}
 
 	// 以下计数器只累加，不改变任何分支走向（btreplay 逐位对账红线）。
@@ -139,7 +195,7 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 	// tick 无效（延迟过高）：占槽不检——与回测一致，其后触发仍按索引计数。
 	if t.BookLatMs > e.cfg.MaxBookLatMs {
 		e.stats.BookStale++
-		e.lostTrigger(t, LostReasonStaleBook)
+		e.lostTrigger(t, lostReason(anchorPending, LostReasonStaleBook))
 		e.pushSlots(t)
 		return nil
 	}
@@ -148,11 +204,17 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 	// 任一侧报价不全 → 不参与触发（ask=0 本就无法触底）。
 	if !(t.UpBid > 0 && t.UpAsk > 0 && t.DownBid > 0 && t.DownAsk > 0) {
 		e.stats.BookMissing++
-		e.lostTrigger(t, LostReasonBookMissing)
+		e.lostTrigger(t, lostReason(anchorPending, LostReasonBookMissing))
 		e.pushSlots(t)
 		return nil
 	}
 	e.stats.TicksValid++
+	if anchorPending {
+		// 盘口有效但判不了：占槽（供恢复后 crash 腿回看）+ 触底留痕
+		e.lostTrigger(t, LostReasonAnchorPending)
+		e.pushSlots(t)
+		return nil
+	}
 
 	var obs *Observation
 	switch {

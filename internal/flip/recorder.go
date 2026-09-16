@@ -107,9 +107,14 @@ type WindowStatsEntry struct {
 	Slug        string  `json:"slug,omitempty"`
 	EventStart  int64   `json:"event_start,omitempty"`
 	Skip        string  `json:"skip,omitempty"` // 非空 = 本窗未采集（原因, 见 cmd/flip）
-	Anchor      float64 `json:"anchor"`         // 本窗 anchor（0 = 锚缺失/跳过）
+	Anchor      float64 `json:"anchor"`         // 本窗 anchor（0 = 锚缺失且未恢复/跳过）
 	HistBps     float64 `json:"hist_bps"`       // 本窗生效 σ（bps; 0 = 不可用）
-	WindowStats         // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
+	// AnchorSrc / AnchorRecoveredMs 是锚恢复诊断（2026-09-16，仅锚缺失窗口非空）:
+	// 来源（official = 官方开盘价 / push = 边界窄窗口推送）与边界后多久拿到，
+	// 用于统计恢复延迟分布与「恢复窗口的信号表现是否与常规窗口同质」。
+	AnchorSrc         string `json:"anchor_src,omitempty"`
+	AnchorRecoveredMs int64  `json:"anchor_recovered_ms,omitempty"` // 自窗口边界起算（毫秒）
+	WindowStats              // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
 }
 
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。

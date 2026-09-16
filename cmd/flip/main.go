@@ -73,6 +73,25 @@ const twapMaxStale = 2 * time.Minute
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
 const twapLookbackSeconds = 60
 
+// 锚恢复参数（2026-09-16，docs/dog020_anchor_recovery_2026-09-16.md）: 窗口边界
+// TWAP 采样缺失/陈旧时，官方 crypto-price 开盘价重试次数与间隔；单次请求超时
+// 由 ctx 兜底（SDK 内 429 退避可拖数分钟）。推送可用窗口复用
+// feed.max_twap_age_ms（边界 ±10s，与边界守卫 AnchorUsableAtBoundary 同容差）。
+// 与 prefetchLead/lateLimit 同为 main 常量，暂不配置化。
+const (
+	anchorRecoverAttempts     = 3
+	anchorRecoverInterval     = 20 * time.Second
+	anchorRecoverFetchTimeout = 10 * time.Second
+)
+
+// anchorRecovery 是本窗锚恢复结果的可见性字段（winstats 落盘用; 零值 = 未走恢复）。
+// 只由恢复 goroutine 写、collectLoop 之后（cancel + join 之后）读——channel close
+// 建立的 happens-before 保证无数据竞争。
+type anchorRecovery struct {
+	src  string // feed.AnchorSourceOfficial | feed.AnchorSourcePush
+	atMs int64  // 恢复时刻（unix 毫秒）
+}
+
 // localFreshMax 是 σ 本地预热的新鲜度上限: 最新已落盘窗口结束距今 ≤ 该值才可信
 // （= 引擎最近在跑，「马上重启」场景本地覆盖完整）；停机更久则本地缺停机期的
 // 窗口，回退官方网络预热（FetchTwapRanges 能取停机期间的窗口）。
@@ -339,11 +358,15 @@ func main() {
 	// 跑满」的证据；而 LostTriggers 明细是「延迟到底吃掉了多少信号」的唯一可见性
 	// 来源（此前无效 tick 走 pushSlots 直接 return，磁盘上零痕迹——
 	// docs/dog020_risk_latency_plan_2026-09-16.md §1.3）。失败只告警，不影响主循环。
-	logWinstats := func(condID, slug string, eventStart int64, anchor, hb float64, st flip.WindowStats, skip string) {
+	logWinstats := func(condID, slug string, eventStart int64, anchor, hb float64,
+		st flip.WindowStats, skip string, ar anchorRecovery) {
 		e := flip.WindowStatsEntry{
 			Ts: time.Now().UnixMilli(), ConditionID: condID, Slug: slug,
 			EventStart: eventStart, Skip: skip, Anchor: anchor, HistBps: hb,
-			WindowStats: st,
+			WindowStats: st, AnchorSrc: ar.src,
+		}
+		if ar.atMs > 0 {
+			e.AnchorRecoveredMs = ar.atMs - eventStart*1000 // 边界后多久拿到锚
 		}
 		if err := recorder.LogWindowStats(e); err != nil {
 			log.Printf("[Cycle] ⚠️ 窗口健康度落盘失败: %v", err)
@@ -372,7 +395,7 @@ func main() {
 				elapsed.Round(time.Second), lateLimit,
 				nextStart.UTC().Format(time.RFC3339))
 			runtime.clearWindow() // 本窗被跳过: 快照不留上一窗陈旧状态（跳到下一窗, 等待最长 ~5min）
-			logWinstats("", "", nextStart.Unix(), 0, 0, flip.WindowStats{}, "late")
+			logWinstats("", "", nextStart.Unix(), 0, 0, flip.WindowStats{}, "late", anchorRecovery{})
 			nextStart = nextStart.Add(windowSec * time.Second)
 		}
 		slug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
@@ -436,7 +459,7 @@ func main() {
 			if err != nil {
 				log.Printf("[Cycle] 获取市场失败: %v —— 跳过本窗口", err)
 				runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
-				logWinstats("", slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_market")
+				logWinstats("", slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_market", anchorRecovery{})
 				select {
 				case <-ctx.Done():
 					return
@@ -450,7 +473,7 @@ func main() {
 		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
 			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
-			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_token")
+			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "no_token", anchorRecovery{})
 			select {
 			case <-ctx.Done():
 				return
@@ -467,7 +490,7 @@ func main() {
 		if recorder.HasRecord(conditionID) {
 			log.Printf("[Cycle] ⚠️ 窗口 %s 已有落盘记录（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
 			runtime.clearWindow() // 本窗不跑（整窗等待）, 快照不留上一窗陈旧状态
-			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "dup_record")
+			logWinstats(conditionID, slug, nextStart.Unix(), 0, 0, flip.WindowStats{}, "dup_record", anchorRecovery{})
 			select {
 			case <-ctx.Done():
 				return
@@ -504,12 +527,13 @@ func main() {
 		// 1.14bps，口径文档已量化——记录在案，复验按分布对比不做逐笔对账）。
 		// 新鲜度守卫（2026-09-09 review）: 边界采样时刻 TWAP 断流会把陈旧流值
 		// 当锚, 整窗 dist_s/触发相对错锚失真——与窗口结束 σ 同一阈值
-		// （feed.max_twap_age_ms）, 超龄把 anchor 置 0 → 引擎整窗不观测 + 窗口结束
-		// 不计入 σ（既有 anchor≤0 分支, 镜像回测 :69 锚缺失事件跳过）。
+		// （feed.max_twap_age_ms）, 超龄把 anchor 置 0 → 引擎锚未就绪（不产出观测）
+		// + 窗口结束不计入 σ（未恢复时, 镜像回测 :69 锚缺失事件跳过）。
 		anchor, anchorAgeMs := twapAdapter.Latest()
-		if !flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, cfg.Feed.MaxTwapAgeMs) {
+		anchorUsable := flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, cfg.Feed.MaxTwapAgeMs)
+		if !anchorUsable {
 			if anchor > 0 {
-				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms），整窗按锚缺失跳过",
+				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms）",
 					conditionID, anchorAgeMs, cfg.Feed.MaxTwapAgeMs)
 			}
 			anchor = 0
@@ -519,6 +543,53 @@ func main() {
 		engine.BeginWindow(anchor, histBps)
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
 		endTime := nextStart.Add(windowSec * time.Second)
+
+		// 锚恢复（2026-09-16）: 锚缺失窗口起一条恢复通道——官方开盘价重试
+		// （3 次 × 20s）+ 边界窄窗口推送直采，成功即把锚回填进引擎（本窗照常判定）。
+		// 恢复期引擎照常收 tick 占槽，只闸住触发判定（见 engine.ProcessTick）；
+		// 3 次全失败 → 本窗按原样不产出观测（观测行 anchor 恒 >0, 06 复验硬检查）。
+		// 窗口级 ctx: 窗口结束即取消并 join（见 collectLoop 之后的收尾段）。
+		var (
+			rec        anchorRecovery
+			cancelAnch context.CancelFunc
+			anchorDone chan struct{}
+		)
+		if !anchorUsable {
+			log.Printf("[Cycle] ⚠️ 窗口 %s 锚缺失 → 启动恢复: 官方 open %d 次 × %v + 边界 ±%v 内推送直采",
+				conditionID, anchorRecoverAttempts, anchorRecoverInterval,
+				time.Duration(cfg.Feed.MaxTwapAgeMs)*time.Millisecond)
+			winCtx, cancel := context.WithCancel(ctx)
+			cancelAnch = cancel
+			anchorDone = make(chan struct{})
+			fetchOpen := func(fctx context.Context) float64 {
+				open, _ := client.FetchOpenPriceContext(fctx, sdk.BTC, nextStart.UTC(),
+					endTime.UTC(), sdk.Fiveminute, true, int(twapLookbackSeconds))
+				return open
+			}
+			go func() {
+				defer close(anchorDone)
+				r, ok := feed.RecoverAnchor(winCtx, fetchOpen, twapAdapter.LatestStamped, nextStart,
+					feed.AnchorRecoverOpts{
+						Attempts:     anchorRecoverAttempts,
+						Interval:     anchorRecoverInterval,
+						PushGrace:    time.Duration(cfg.Feed.MaxTwapAgeMs) * time.Millisecond,
+						FetchTimeout: anchorRecoverFetchTimeout,
+					})
+				if !ok {
+					if winCtx.Err() == nil { // ctx 取消 = 窗口正常收尾, 不重复告警
+						log.Printf("[Cycle] ⚠️ 窗口 %s 锚恢复失败（官方 %d 次均未就绪），本窗不观测",
+							conditionID, anchorRecoverAttempts)
+					}
+					return
+				}
+				hb := hist.Bps(r.Price)
+				engine.SetAnchor(r.Price, hb) // 回填后本窗恢复判定
+				rec = anchorRecovery{src: r.Source, atMs: r.AtMs}
+				log.Printf("[Cycle] ✅ 窗口 %s 锚恢复成功: src=%s anchor=%.2f hist_bps=%.2f（边界后 +%v）",
+					conditionID, r.Source, r.Price, hb,
+					time.Duration(r.AtMs-nextStart.UnixMilli())*time.Millisecond)
+			}()
+		}
 
 		log.Printf("[Cycle] event=%s 窗口开始 anchor=%.2f hist_bps=%.2f（%d 窗）",
 			conditionID, anchor, histBps, hist.Count())
@@ -573,11 +644,22 @@ func main() {
 			}
 		}
 
+		// 锚恢复通道收尾: 取消 + join。channel close 建立 happens-before——此后读
+		// rec / 引擎锚无数据竞争（正常窗口 cancelAnch 为 nil, 直接跳过）。
+		if cancelAnch != nil {
+			cancelAnch()
+			<-anchorDone
+		}
+		// 本窗最终锚/σ: 正常窗口 = 边界采样值; 锚缺失窗口 = 恢复回填值（未恢复 0, 0）。
+		anchor, histBps = engine.WindowAnchor()
+
 		// 步骤 6: 窗口结束 → σ 滚动窗追加本窗振幅（严格只用已结束窗口）。
 		// close 采自边界瞬间的 TWAP 流值（与官方收盘价口径差异已在文档量化）。
 		// 无触底的窗口无记录（回测 extract 同款语义），本窗结算注册已在触发时完成。
 		// 新鲜度守卫: 断流期陈旧流值会把本窗振幅放大成假 σ 污染其后 18 窗，
 		// 缺一窗可接受（阈值依据见 feed.max_twap_age_ms 的注释）。
+		// 锚缺失窗口恢复成功时 anchor > 0 → 本窗照常计入 σ（官方开盘价比边界流值
+		// 更贴回测口径）; 未恢复才落 anchor≤0 分支。
 		switch {
 		case anchor <= 0 || lastTick.TwapPrice <= 0:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)
@@ -599,7 +681,7 @@ func main() {
 
 		// 本窗 tick 健康度无条件落盘（含锚缺失/σ 未计的窗口——可见性优先于整洁:
 		// 「本窗为什么没信号」必须留下可查的痕迹, 见 logWinstats 注释）
-		logWinstats(conditionID, slug, nextStart.Unix(), anchor, histBps, engine.WindowStats(), "")
+		logWinstats(conditionID, slug, nextStart.Unix(), anchor, histBps, engine.WindowStats(), "", rec)
 
 		// live 首窗禁单解除: 首个完整跑完的窗口结束后置 false。窗口被跳过
 		// （continue）则顺延——保守多禁一窗, 防重启残留窗双单的缝隙优先于

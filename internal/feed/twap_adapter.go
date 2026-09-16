@@ -212,6 +212,20 @@ func (t *TwapAdapter) Swap(ch <-chan sdk.ExternalPrice) {
 	}
 }
 
+// LatestStamped 返回最新 TWAP 价格与**本地到达时刻**（unix 毫秒；尚无推送返回 (0, 0)）。
+//
+// 与 Latest 的区别是给出到达时刻本身而非距现在的龄: 锚恢复要判的是「这条推送
+// 距窗口边界多久」（见 anchor_recover.go），而不是「它现在有多旧」——一条在
+// 边界后 3s 到达、此刻已 30s 旧的推送，其值仍贴近边界真值，可用性取决于前者。
+func (t *TwapAdapter) LatestStamped() (price float64, arrivedAtMs int64) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if t.price == 0 {
+		return 0, 0
+	}
+	return t.price, t.lastUpdateAt
+}
+
 // Latest 返回最新 TWAP 价格与距上次推送的毫秒数。
 // 尚未收到任何推送时返回 (0, 0)。
 func (t *TwapAdapter) Latest() (price float64, ageMs int64) {
