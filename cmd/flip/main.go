@@ -376,6 +376,13 @@ func main() {
 	// ── 市场周期主循环 ──
 	// nextCache 跨窗口缓存下一窗市场信息（稳态预取，见 collectLoop 内 rem≤20 逻辑）
 	var nextCache *marketCache
+	// prevWindowStart 是上一轮迭代处理的窗口起点（unix 秒; 0 = 本进程还没处理过
+	// 任何窗口）。用途: 区分「刚跑完/刚跳过的窗口」与真·迟到——collectLoop 收尾是
+	// `if rem == 0 { break }` 而 rem 由 int() 截断取整，循环总在边界前 0~1s 回来，
+	// 此刻 floor(now/300) 仍指回刚结束的那一窗（见 docs/dog020_anchor_recovery_
+	// 2026-09-16.md §9.1）。按身份判定而非时间启发式: 那几毫秒内没有任何真实状态
+	// 变化, 唯一区别是「这窗我已经处理过了」。
+	var prevWindowStart int64
 	for {
 		select {
 		case <-ctx.Done():
@@ -391,13 +398,23 @@ func main() {
 		alignedTs := now.Unix() / windowSec * windowSec
 		nextStart := time.Unix(alignedTs, 0)
 		if elapsed := time.Since(nextStart); elapsed > lateLimit {
-			log.Printf("[Cycle] ⚠️ 已落后窗口边界 %v（>%v），跳过本窗口 %s",
-				elapsed.Round(time.Second), lateLimit,
-				nextStart.UTC().Format(time.RFC3339))
-			runtime.clearWindow() // 本窗被跳过: 快照不留上一窗陈旧状态（跳到下一窗, 等待最长 ~5min）
-			logWinstats("", "", nextStart.Unix(), 0, 0, flip.WindowStats{}, "late", anchorRecovery{})
+			// 例外: floor 指回的正是上一轮刚处理过的那一窗（收尾提前于边界几毫秒
+			// 回来, 见 prevWindowStart 注释）——不是迟到, 静默顺延到下一窗: 不告警
+			// 也不落 skip=late 空格行（否则 winstats 同 event_start 两行, 逐日行数
+			// ≈288「主循环跑满」的自查口径失效）。
+			if nextStart.Unix() != prevWindowStart {
+				log.Printf("[Cycle] ⚠️ 已落后窗口边界 %v（>%v），跳过本窗口 %s",
+					elapsed.Round(time.Second), lateLimit,
+					nextStart.UTC().Format(time.RFC3339))
+				runtime.clearWindow() // 本窗被跳过: 快照不留上一窗陈旧状态（跳到下一窗, 等待最长 ~5min）
+				logWinstats("", "", nextStart.Unix(), 0, 0, flip.WindowStats{}, "late", anchorRecovery{})
+			}
 			nextStart = nextStart.Add(windowSec * time.Second)
 		}
+		// 本轮迭代处理的窗口（含上面的顺延）: 后面每条出口——跳过通道 continue
+		// （no_market/no_token/dup_record/no_sigma）与跑满窗口的末路径——处理的都是
+		// 这一窗, 故此处一次赋值即覆盖全部出口（重启后 prevWindowStart=0 不复用）。
+		prevWindowStart = nextStart.Unix()
 		slug := fmt.Sprintf("%s-%d", cfg.Runtime.SlugPrefix, nextStart.Unix())
 
 		// 步骤 2: 市场信息（优先用本窗 tick 期间预取的缓存；未命中则按
