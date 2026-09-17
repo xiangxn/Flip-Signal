@@ -277,9 +277,13 @@ def load_paper(paper_dir):
             if r.get("event_type") != "touch":
                 continue
             w = win.get(r["event_start"])
-            if not w or w[1] == w[0]:
+            if not w:
                 continue
-            der = 0 if w[1] > w[0] else 1          # 0=Up 1=Down
+            # 0=Up 1=Down。平盘（close == anchor）归 **Up**（PM 口径 >= 算 UP，
+            # 2026-09-17 用户指正）；此前是 `w[1] > w[0]` 且平盘整行丢弃——
+            # 实测纸面 3400 个已完窗里平盘 0 个，故此改动对现有数据为零影响，
+            # 仅为口径正确性（新数据出现平盘时不再静默丢行）。
+            der = 0 if w[1] >= w[0] else 1
             r["settle_won"] = int((der == 0) if r["side"] == "yes" else (der == 1))
             # dist_s/dist_t 为 omitempty（缺失时不落键）→ 缺键按 NaN（不参与带判定）
             ds, dt = r.get("dist_s"), r.get("dist_t")
