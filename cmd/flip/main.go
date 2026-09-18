@@ -623,6 +623,11 @@ func main() {
 
 		ticker := time.NewTicker(time.Second)
 		lastTick := flip.Tick{}
+		// 上一条 tick 的**采样真实时刻**（wall clock）。必须与 lastTick.Ts 分开:
+		// Ts 是 ticker 的**计划**时刻（Go 的 sendTime 发的是 Now().Add(-delta)）,
+		// 循环被卡住时它会明显落后于真实时刻, 而窗末 close 的迟到判据恰恰要靠
+		// 真实时刻（见窗口结束后的 σ 段）。
+		var lastSampleAt time.Time
 
 	collectLoop:
 		for {
@@ -633,6 +638,8 @@ func main() {
 			case tickTime := <-ticker.C:
 				rem := int(endTime.Sub(tickTime).Seconds())
 				rem = max(rem, 0)
+				// 采样真实时刻（tickTime 是计划时刻, 卡顿时二者可差数秒——σ 迟到判据用这个）
+				lastSampleAt = time.Now()
 				lastTick = sampleTick(tickTime, rem, runtime, cfg.Feed.MaxSpotAgeMs)
 
 				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
@@ -691,6 +698,21 @@ func main() {
 		case lastTick.TwapAgeMs > cfg.Feed.MaxTwapAgeMs:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s TWAP 陈旧（龄 %dms），本窗不计入 σ",
 				conditionID, lastTick.TwapAgeMs)
+		case lastSampleAt.Sub(endTime) > time.Second:
+			// 采样迟到（2026-09-19 review）: tick 循环被卡住跨过边界（预取 HTTP、GC、
+			// 调度），恢复后第一条 tick 的**计划时刻**仍落在边界之前——于是 rem 算出 0、
+			// 本窗就此结束，但那条 tick 的数据是**此刻**读的, close 实际采到了**下一窗**
+			// 的 TWAP。TwapAgeMs 判据拦不住（推送每秒一条, 龄恒 ~1s）; 判据只能用采样
+			// 真实时刻（lastSampleAt, 不能用 lastTick.Ts——它正是被卡顿骗过的那个值）。
+			// 容差 1s 而非 0: 正常结束 tick 落在边界前 0~1s（ticker 网格相位）, 且迟到
+			// <1s 时 close 多数仍是同一条已到达的推送（推送每秒一条、到达延迟 ~2s,
+			// 口径变化在既有 ~1.5s open/close 不对称之内）。丢窗代价不对称——σ 长期变薄
+			// 会滑向 no_sigma 整窗跳过（零信号）, 比一窗 close 偏 1s 严重得多。
+			// 本窗不计入 σ: 假振幅会污染其后 18 窗的浅洞尺子, 且随 windows_*.jsonl 落盘
+			// 持久化（重启会重新 seed）。缺一窗由 RecentBlock 的 600s 缺口容差吸收,
+			// 与停机窗/no_sigma 窗同效。
+			log.Printf("[Cycle] ⚠️ 窗口结束 %s close 采样迟到（边界后 +%v, 循环卡顿跨窗），本窗不计入 σ",
+				conditionID, lastSampleAt.Sub(endTime).Round(time.Millisecond))
 		default:
 			amp := math.Abs(lastTick.TwapPrice - anchor)
 			hist.Push(amp)
@@ -905,8 +927,11 @@ func warnLiveStartup(r *flip.Recorder) {
 		log.Printf("[Trading] ⚠️ %d 条执行中断记录待人工核对（submitting/未知结果, 见上方逐条告警）—— 勿自动补单, 按 maker+时间窗去 data-api 核对", n)
 	}
 	// 混合目录提示: 当日已有 paper 行（ExecStatus 空）混入会污染信号频率口径与
-	// 日亏现算线——live 建议独立 -output 目录（如 data/v4live）。同日 live 行
-	// （崩溃重启续跑）不算混合。
+	// 日亏现算线——live 建议独立 runtime.output_dir 目录（如 data/v4live）。同日
+	// live 行（崩溃重启续跑）不算混合。
+	// ⚠️ 这里只能提配置键: 目录自 2026-09-16 配置重构起不再有 CLI flag（原 -output
+	// 已删除, main 只剩 -config/-dashboard/-mode/-stake）, 照旧文案照做会以
+	// "flag provided but not defined" 启动失败。
 	today := time.Now().UTC().Format("2006-01-02")
 	mixed := false
 	for _, rec := range r.Observations() {
@@ -916,7 +941,7 @@ func warnLiveStartup(r *flip.Recorder) {
 		}
 	}
 	if mixed {
-		log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（touches_%s.jsonl）—— live 建议独立 -output 目录（如 data/v4live）, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
+		log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（touches_%s.jsonl）—— live 建议独立 runtime.output_dir 目录（如 data/v4live）, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
 	}
 }
 
