@@ -129,7 +129,7 @@ type WindowStatsEntry struct {
 
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
 // loadPending 校验行 schema：event_type 非 "touch" 的行跳过并告警——
-// -output 指错目录时旧格式（v3 crosses_* 等）不会静默污染统计。
+// runtime.output_dir 指错目录时旧格式（v3 crosses_* 等）不会静默污染统计。
 // 窗口振幅日志（windows_*.jsonl）一并载入内存（σ 本地预热数据源）。
 func NewRecorder(dir string) (*Recorder, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -685,14 +685,32 @@ func (r *Recorder) Close() error {
 
 // ── 只读访问（Dashboard / 恢复用）──
 
-// Observations 返回全部观测（时间正序）。
+// copyRecords 深拷贝一批记录（调用方已持锁）。
+//
+// ⚠️ 只复制切片是不够的: `Resolve` 会在**结算轮询 goroutine** 里回填 Rec.Won /
+// PnL / ResolvedAt（持 r.mu 写），而 Dashboard（另一个 goroutine, 每几秒拉
+// /api/state）与 ExecState.LiveSummary 会读这些字段——只复制切片等于把这些字段
+// 的读写留在锁外, 是实打实的 data race（2026-09-19 review 用 -race 探针复现）。
+// 故所有对外的记录读口一律返回**字段副本**（仅剩 Ts/Date 等不可变字段共享值语义）。
+// 调用方只用返回值做展示/统计, 不写回——拷贝不影响 Recorder 内部按指针身份维护的
+// recs/pending（Resolve / rewriteDayLocked 仍操作原对象）。
+func copyRecords(recs []*Record) []*Record {
+	out := make([]*Record, 0, len(recs))
+	for _, rec := range recs {
+		c := *rec
+		out = append(out, &c)
+	}
+	return out
+}
+
+// Observations 返回全部观测的**副本**（时间正序; 见 copyRecords）。
 func (r *Recorder) Observations() []*Record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return append([]*Record(nil), r.recs...)
+	return copyRecords(r.recs)
 }
 
-// Signals 返回全部 ok 信号（时间正序）。
+// Signals 返回全部 ok 信号的**副本**（时间正序; 见 copyRecords）。
 func (r *Recorder) Signals() []*Record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -702,7 +720,7 @@ func (r *Recorder) Signals() []*Record {
 			out = append(out, rec)
 		}
 	}
-	return out
+	return copyRecords(out)
 }
 
 // RecentWindows 返回最近 n 个已完成窗口振幅行（时间正序；不足则返回全部）。
@@ -766,7 +784,8 @@ func (r *Recorder) NeedsReconcile() int {
 	return n
 }
 
-// PendingSignals 返回未结算的 ok 信号（重启后据此重新注册结算轮询）。
+// PendingSignals 返回未结算 ok 信号的**副本**（重启后据此重新注册结算轮询;
+// 见 copyRecords——pending 里的记录正是 Resolve 的写入对象）。
 func (r *Recorder) PendingSignals() []*Record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -775,7 +794,7 @@ func (r *Recorder) PendingSignals() []*Record {
 		out = append(out, rec)
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ts < out[j].Ts })
-	return out
+	return copyRecords(out)
 }
 
 // Counts 统计观测/信号/已赢笔数（Dashboard 状态栏）。

@@ -3,9 +3,11 @@ package flip
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -742,5 +744,83 @@ func TestGatedOnCrossDayAndRestart(t *testing.T) {
 	}
 	if r2.GatedOn("2026-09-03", GateDailyLoss) {
 		t.Fatal("重启后跨日仍应归零")
+	}
+}
+
+// ── 只读访问的并发安全（2026-09-19 review）──
+
+// TestReadAccessorsConcurrentResolve 钉住一个曾被 -race 探针复现的真实 data race:
+// 结算轮询 goroutine 调 Resolve（持 r.mu 写 rec.Won/PnL/ResolvedAt, live 还含
+// CompleteExecution 写 ExecStatus/OrderID/Cost/Shares）, 而 Dashboard 与
+// ExecState.LiveSummary 在**另一个 goroutine** 里通过 Observations/Signals/
+// PendingSignals 读同一批 Record——只复制切片挡不住字段读写（修法 = copyRecords
+// 深拷贝）。退回共享指针时本测试在 -race 下必失败, 无 -race 时恒过（验收红线
+// 见 CLAUDE.md: go test ./internal/... -race）。
+func TestReadAccessorsConcurrentResolve(t *testing.T) {
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ts, _, _ := testTs(t)
+
+	// 32 笔 paper 信号（ExecStatus 空 = 模拟成交, 全部入 pending 待结算）
+	const n = 32
+	for i := 0; i < n; i++ {
+		if _, err := r.RecordObservation(fmt.Sprintf("cond-%d", i), "slug", ts/1000,
+			mkObs(ts, SideYes, true, 0.2), 2); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// LiveSummary 走 live 分支（读 Won/PnL/ExecStatus 的那条路径）
+	ex := &ExecState{Rec: r, Ex: PaperExecutor{}, Stake: 2, MaxDailyLoss: -24, Live: true}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	wg.Add(1)
+	go func() { // 结算轮询 goroutine（cmd/flip: go resolutionPoller.Run）
+		defer wg.Done()
+		defer close(stop)
+		for i := 0; i < n; i++ {
+			r.Resolve(fmt.Sprintf("cond-%d", i), OutcomeUp, ts2time(ts))
+		}
+	}()
+	wg.Add(1)
+	go func() { // Dashboard / 摘要 goroutine: 拉满读口, 让竞争窗口最大化
+		defer wg.Done()
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			for _, rec := range r.Observations() {
+				_, _, _ = rec.Won, rec.PnL, rec.ResolvedAt
+				_, _ = rec.ExecStatus, rec.Shares
+			}
+			for _, rec := range r.Signals() {
+				_ = *rec // 整份拷贝, 字段级读的覆盖面
+			}
+			_ = len(r.PendingSignals())
+			_ = ex.LiveSummary()
+			_, _, _ = r.Counts()
+			_ = r.DailyPnl()
+		}
+	}()
+	wg.Wait()
+
+	// 语义不因拷贝而变: 结算回填照常可见（拷贝字段, 不拷贝身份）
+	settled := 0
+	for _, rec := range r.Signals() {
+		if rec.Won != nil {
+			settled++
+		}
+	}
+	if settled != n {
+		t.Fatalf("回填后可见 %d 笔已结算, 期望 %d", settled, n)
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatalf("全部结算后 pending 应为空, 实为 %d", len(r.PendingSignals()))
 	}
 }
