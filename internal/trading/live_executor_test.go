@@ -11,13 +11,20 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
-// fakeClient 脚本化 TradeClient（CreateOrder/PostOrder 结果由测试预设）。
+// fakeClient 脚本化 TradeClient（CreateOrder/PostOrder/GetOpenOrders/CancelOrder
+// 结果由测试预设）。
 type fakeClient struct {
 	createErr error
 	postResp  *gjson.Result
 	postErr   error
 	orderType orders.OrderType
 	got       *orders.UserOrder
+	ooResp    []orders.OpenOrder // GetOpenOrders 返回值（空 = 挂单表已无此单）
+	ooErr     error
+	ooCalls   int
+	cancelErr error
+	cancelled []string // 撤单成功收到的 orderID（按序）
+	cnlCalls  int
 }
 
 func (f *fakeClient) CreateOrder(u *orders.UserOrder, o orders.CreateOrderOptions) (*orders.SignedOrder, error) {
@@ -37,7 +44,17 @@ func (f *fakeClient) PostOrder(order *orders.SignedOrder, t orders.OrderType, de
 }
 
 func (f *fakeClient) GetOpenOrders(params *orders.OpenOrderParams, onlyFirstPage bool, nextCursor *string) ([]orders.OpenOrder, error) {
-	return nil, nil
+	f.ooCalls++
+	return f.ooResp, f.ooErr
+}
+
+func (f *fakeClient) CancelOrder(payload *orders.OrderPayload) (*gjson.Result, error) {
+	f.cnlCalls++
+	if f.cancelErr != nil {
+		return nil, f.cancelErr
+	}
+	f.cancelled = append(f.cancelled, payload.OrderID)
+	return &gjson.Result{}, nil
 }
 
 func mkExecObs(fill float64) *flip.Observation {
@@ -50,7 +67,7 @@ func parseJSON(s string) *gjson.Result {
 	return &r
 }
 
-// ── parseFill（响应成交解析, 本实现唯一需真盘验证点）──
+// ── parseFill（POST 响应即时成交解析, 本实现唯一需真盘验证点）──
 
 func TestParseFill(t *testing.T) {
 	req := 10.52 // floor2(2/0.19)
@@ -66,19 +83,29 @@ func TestParseFill(t *testing.T) {
 		unknown  bool // ExecNoteUnknown 前缀（人工核对类）
 	}{
 		{
-			name:    "全额成交 1e6 基单位",
+			name:    "即时全额成交 1e6 基单位 → filled 终态",
 			raw:     `{"success":true,"orderID":"o1","status":"matched","takingAmount":"10520000","makingAmount":"1998800"}`,
 			orderID: "o1", wantSt: flip.ExecStatusFilled, wantSh: 10.52, wantCost: 1.9988,
 		},
 		{
-			name:    "部分成交 原始小数",
+			name:    "即时部分成交 原始小数 → resting（余量在簿, 不是终态）",
 			raw:     `{"success":true,"orderID":"o2","status":"matched","takingAmount":"5","makingAmount":"0.95"}`,
-			orderID: "o2", wantSt: flip.ExecStatusPartial, wantSh: 5, wantCost: 0.95,
+			orderID: "o2", wantSt: flip.ExecStatusResting,
 		},
 		{
-			name:    "无对价未成交",
+			name:    "即时部分成交 1e6 基单位 → resting（旧刻度法在此误判人工核对）",
+			raw:     `{"success":true,"orderID":"o7","status":"live","takingAmount":"5000000","makingAmount":"950000"}`,
+			orderID: "o7", wantSt: flip.ExecStatusResting,
+		},
+		{
+			name:    "零成交 unmatched → resting（GTC 吃不到就挂着等, 非 FAK 的即撤）",
 			raw:     `{"success":true,"orderID":"o3","status":"unmatched","takingAmount":"0","makingAmount":"0"}`,
-			orderID: "o3", wantSt: flip.ExecStatusUnfilled, wantSh: 0, wantCost: 0,
+			orderID: "o3", wantSt: flip.ExecStatusResting,
+		},
+		{
+			name:    "纯挂单 live 无成交字段 → resting",
+			raw:     `{"success":true,"orderID":"o8","status":"live"}`,
+			orderID: "o8", wantSt: flip.ExecStatusResting,
 		},
 		{
 			name:    "两字段语义记反 → sanity 拒收转人工",
@@ -91,9 +118,14 @@ func TestParseFill(t *testing.T) {
 			orderID: "o5", wantSt: flip.ExecStatusRejected, unknown: true,
 		},
 		{
-			name:    "金额缺失不可解析 → 拒收转人工（可能成交, 不按 0 记）",
+			name:    "金额缺失但 status 不认识 → 拒收转人工（可能成交, 不按 0 记）",
 			raw:     `{"success":true,"orderID":"o6","status":"matched"}`,
 			orderID: "o6", wantSt: flip.ExecStatusRejected, unknown: true,
+		},
+		{
+			name:   "挂单但无 orderID → 无法跟踪, 转人工",
+			raw:    `{"success":true,"status":"live"}`,
+			wantSt: flip.ExecStatusRejected, unknown: true,
 		},
 	}
 	for _, c := range cases {
@@ -108,12 +140,18 @@ func TestParseFill(t *testing.T) {
 			if res.Shares != c.wantSh || res.Cost != c.wantCost {
 				t.Fatalf("shares/cost = %v/%v, 期望 %v/%v", res.Shares, res.Cost, c.wantSh, c.wantCost)
 			}
-			if res.Status == flip.ExecStatusFilled || res.Status == flip.ExecStatusPartial {
+			switch res.Status {
+			case flip.ExecStatusFilled, flip.ExecStatusPartial:
 				if avg := res.Cost / res.Shares; avg > price+0.005 || avg < price-0.005 {
 					t.Fatalf("成交均价 %.4f 偏离限价 %.3f", avg, price)
 				}
 				if res.FillPrice == 0 || res.OrderID == "" {
 					t.Fatalf("成交行缺 FillPrice/OrderID: %+v", res)
+				}
+			case flip.ExecStatusResting:
+				// resting 必须带 order_id: FillTracker 靠它查终态, 没有就是人工核对（见上一条）
+				if res.OrderID == "" {
+					t.Fatalf("resting 行缺 OrderID（无法跟踪）: %+v", res)
 				}
 			}
 		})
@@ -130,8 +168,8 @@ func TestExecuteFilled(t *testing.T) {
 	if res.Status != flip.ExecStatusFilled || res.OrderID != "o-live" {
 		t.Fatalf("Execute: %+v", res)
 	}
-	if fc.orderType != orders.FAK {
-		t.Fatalf("订单类型 = %s, 期望 FAK", fc.orderType)
+	if fc.orderType != orders.GTC {
+		t.Fatalf("订单类型 = %s, 期望 GTC", fc.orderType)
 	}
 	if fc.got == nil || fc.got.Price != 0.19 || fc.got.Size != 10.52 || fc.got.Side != orders.BUY || fc.got.TokenID != "tok-up" {
 		t.Fatalf("订单规格: %+v", fc.got)
@@ -174,10 +212,12 @@ func TestExecuteRejections(t *testing.T) {
 	}
 }
 
-func TestExecuteUnfilled(t *testing.T) {
+// GTC 下「0 成交」不再是 POST 能给出的结论: 吃不到就挂着等, 只有 FillTracker
+// 在 rem≤RemMin 撤单时定稿才知道它是 unfilled（见 fill_tracker_test.go）。
+func TestExecuteResting(t *testing.T) {
 	fc := &fakeClient{postResp: parseJSON(`{"success":true,"orderID":"o-none","status":"unmatched"}`)}
 	res := NewLiveExecutor(fc).Execute(mkExecObs(0.19), "tok", 2)
-	if res.Status != flip.ExecStatusUnfilled || res.OrderID != "o-none" {
+	if res.Status != flip.ExecStatusResting || res.OrderID != "o-none" {
 		t.Fatalf("Execute: %+v", res)
 	}
 }

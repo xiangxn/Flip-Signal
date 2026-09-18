@@ -4,12 +4,17 @@
 // Binance BTCUSDT spot（浅洞腿），每秒驱动 flip.Engine 状态机检测「触底观测」——
 // 某侧 ask 首次砸到 ≤0.20 的下狗机会：急跌(m_45) × 浅洞(dist_s) × 时间(rem) 三腿
 // 全过即 ok 信号。成交按 -mode 分流（默认 paper 模拟全额成交; live = 真实 CLOB
-// FAK 限价单 @ 触发 ask, 两阶段落盘 + 风控闸, 编排见 internal/flip ExecState), 官方结算后
-// 回填完整 P&L 到 JSONL（touches_YYYY-MM-DD.jsonl，按日切分）。成功与失败的观测
-// 都落盘（频率校准用）。
+// GTC 限价挂单 @ 触发 ask——即时能吃的吃掉、余量留在簿上等对手方, 到 rem ≤
+// 策略时间腿（flip.rem_min = 180s）由我们自己撤掉未成交余量。两阶段落盘 +
+// 风控闸, 编排见 internal/flip ExecState; 挂单终态由 trading.FillTracker 撤销时
+// 查询 size_matched 定稿）, 官方
+// 结算后回填完整 P&L 到 JSONL（touches_YYYY-MM-DD.jsonl，按日切分）。成功与失败的
+// 观测都落盘（频率校准用）。
 //
-// 结算轮询只注册实际成交信号（paper 恒成交; live 仅 filled/partial）；
-// 崩溃后重启按磁盘 pending 恢复注册, submitting/未知结果行打 ⚠️ 人工核对。
+// 结算轮询只注册确定持仓（paper 恒成交; live filled/partial——GTC 的 resting 行
+// 要等 FillTracker 定稿后才注册）；
+// 崩溃后重启按磁盘 pending 恢复注册, submitting/resting/未知结果行打 ⚠️ 人工核对
+// （resting 会被 FillTracker 接管自动定稿）。
 //
 // 配置见包 internal/config 与根目录 v4.config.yaml（全量默认值示例）：
 // 优先级 = CLI flag > 配置文件 > 代码默认值，**不读环境变量**（唯一例外是解密密文
@@ -322,6 +327,31 @@ func main() {
 		return upBook, downBook
 	}
 
+	// ── GTC 挂单跟踪（live 专用语义; paper 无挂单, 恒空转）──
+	// GTC 下单的成交量在 POST 之后仍可能增长（挂单在簿等对手方）,
+	// 故 resting 行的定稿走这里: 到 rem ≤ 策略时间腿（flip.rem_min）撤掉未成交
+	// 余量 → 查 CLOB size_matched → ApplyFillFinal 落盘 → 再注册结算轮询
+	// （顺序不可反: 结算按最终 shares/cost 记 P&L）。
+	// 撤单提前量取自配置（不是常量）: 它就是回测的时间腿判据 rem > RemMin——
+	// rem ≤ 它之后的成交不属于这条策略（触发瞬间必成交是回测前提）。
+	fillTracker := trading.NewFillTracker(&trading.SdkClient{Client: client},
+		time.Duration(cfg.Flip.RemMin)*time.Second, func(f flip.FillFinal) {
+			rec := runtime.Exec.ApplyFillFinal(f)
+			if rec != nil && rec.IsFilled() {
+				resolutionPoller.Register(rec.ConditionID, rec.Slug)
+			}
+		})
+	go fillTracker.Run(ctx)
+	// 重启接管: 进程死在挂单期间 → 磁盘上的 resting 行交回跟踪（撤单点早已过则
+	// 立即尝试撤单并定稿; 查不到的保持 resting + 人工核对标记, 绝不按 0 成交记）
+	if effMode == "live" {
+		for _, rec := range recorder.Observations() {
+			if rec.ExecStatus == flip.ExecStatusResting {
+				fillTracker.Register(rec, time.Unix(rec.EventStart, 0).Add(windowSec*time.Second), true)
+			}
+		}
+	}
+
 	// ── Dashboard（手机浏览器兼容的单页前端）──
 	if cfg.Runtime.DashboardAddr != "" {
 		// 三源新鲜度阈值下发（前端按阈值标红——book/twap 无颜色语义的缺口补上）
@@ -340,7 +370,8 @@ func main() {
 
 	log.Println("========================================")
 	if effMode == "live" {
-		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（FAK 限价单 @ 触发 ask, 日亏熔断 ≤%.1fU）", cfg.Risk.MaxDailyLoss)
+		log.Printf(" Dog@0.2 触底策略 — 🔒 实盘交易（GTC 限价挂单 @ 触发 ask, rem≤%ds 撤未成交余量, 日亏熔断 ≤%.1fU）",
+			cfg.Flip.RemMin, cfg.Risk.MaxDailyLoss)
 	} else {
 		// 纸面同样打印熔断线: 闸判据两模式同源（方案 A）——纸面被闸行照记照结算,
 		// 只多 gate_reason 字段（分析脚本需过滤, 见 plan §3.5/§3.7）
@@ -643,11 +674,17 @@ func main() {
 				lastTick = sampleTick(tickTime, rem, runtime, cfg.Feed.MaxSpotAgeMs)
 
 				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
-				// 结算只注册实际成交（paper 行 ExecStatus 空恒成交; live 仅
-				// filled/partial; unfilled/rejected/风控停单不注册——无持仓无结算）
+				// 结算只注册确定持仓（paper 行 ExecStatus 空恒成交; live filled/partial;
+				// unfilled/rejected/风控停单不注册）。GTC 的 resting 行仓位未定
+				// （挂单在簿）——交 FillTracker 定稿, 由它的回调注册结算。
 				if o := engine.ProcessTick(lastTick); o != nil {
-					if rec := runtime.Exec.HandleObservation(o, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK && rec.IsFilled() {
-						resolutionPoller.Register(conditionID, slug)
+					if rec := runtime.Exec.HandleObservation(o, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK {
+						switch {
+						case rec.ExecStatus == flip.ExecStatusResting:
+							fillTracker.Register(rec, endTime, false)
+						case rec.IsFilled():
+							resolutionPoller.Register(conditionID, slug)
+						}
 					}
 				}
 				if rem == 0 {
@@ -916,7 +953,8 @@ func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.
 	if len(addr) > 12 {
 		addr = addr[:6] + "…" + addr[len(addr)-4:]
 	}
-	log.Printf("[Trading] 🔒 live 就绪: maker=%s（FAK 限价单 @ 触发 ask, 绝不超价; 首窗禁单）", addr)
+	// 撤单点由 FillTracker 自己的启动日志打印（它拿得到配置里的时间腿）
+	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 触发 ask, 绝不超价, 到策略时间腿撤未成交余量; 首窗禁单）", addr)
 	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client})
 }
 

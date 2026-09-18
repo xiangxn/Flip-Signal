@@ -124,7 +124,7 @@ type WindowStatsEntry struct {
 	AnchorExact       bool   `json:"anchor_exact"`
 	AnchorSrc         string `json:"anchor_src,omitempty"`
 	AnchorRecoveredMs int64  `json:"anchor_recovered_ms,omitempty"`
-	WindowStats               // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
+	WindowStats              // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
 }
 
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
@@ -240,16 +240,17 @@ func (r *Recorder) loadFileLocked(path string) (int, int, error) {
 		}
 		r.recs = append(r.recs, &rec)
 		// 崩溃恢复: pending 重建只收「真实持仓待结算」行（ok 信号 && 未结算 &&
-		// paper 或 live filled/partial——unfilled/rejected/submitting 无真实持仓,
-		// 不注册结算轮询; submitting/unknown-rejected 行打 ⚠️ 人工核对）
+		// paper 或 live filled/partial——unfilled/rejected/submitting/resting 无
+		// 确定持仓, 不注册结算轮询; submitting/resting/unknown 行打 ⚠️ 提示）
 		if rec.OK && rec.Won == nil && rec.ConditionID != "" {
 			if isSettlable(&rec) {
 				r.pending[rec.ConditionID] = &rec // 重启后重新注册结算轮询
-			} else if rec.ExecStatus == ExecStatusSubmitting ||
-				(rec.ExecStatus == ExecStatusRejected && strings.HasPrefix(rec.ExecNote, ExecNoteUnknown)) {
-				// 执行中断（下单后崩溃/POST 结果不明）: order_id 大概率不可得,
-				// 不自动补单——按 maker+时间窗去 data-api 核对该窗是否真成交
-				log.Printf("⚠️ [Recorder] %s: condition=%s exec=%s 执行中断需人工核对——勿自动补单, 按 maker+时间窗去 data-api 核对。slug=%s event_start=%d ts=%d side=%s fill=%.3f stake=%.1f note=%q",
+			} else if rec.ExecStatus == ExecStatusSubmitting || rec.ExecStatus == ExecStatusResting ||
+				strings.HasPrefix(rec.ExecNote, ExecNoteUnknown) {
+				// 执行中断: 下单后崩溃（submitting, order_id 大概率不可得）/ GTC 挂单
+				// 遗留（resting, cmd/flip live 会把它交回 FillTracker 定稿）/ 成交结果
+				// 不明——一律不自动补单, 定不了稿的按 maker+order_id 去 data-api 核对
+				log.Printf("⚠️ [Recorder] %s: condition=%s exec=%s 执行中断待定稿——勿自动补单, 按 maker+order_id 去 data-api 核对。slug=%s event_start=%d ts=%d side=%s fill=%.3f stake=%.1f note=%q",
 					filepath.Base(path), rec.ConditionID, rec.ExecStatus,
 					rec.Slug, rec.EventStart, rec.Ts, rec.Side, rec.Fill, rec.Stake, rec.ExecNote)
 			}
@@ -374,14 +375,19 @@ func (r *Recorder) GatedToday(date, reason string) int {
 // 响应后立即调用）: 更新 ExecStatus/OrderID/FillPrice/Shares/Cost/ExecNote,
 // filled/partial（真实持仓）且 ok 时入 pending; rewriteDayLocked 原子回填当日
 // 文件（temp+rename, 崩溃不产生半行）。Shares 仅成交时覆盖为实际股数
-// （unfilled/rejected 保留目标股数供分析）。返回更新后记录与是否已成交。
+// （unfilled/rejected/resting 保留目标股数供分析）。返回更新后记录与是否已成交。
 // submitting 行不存在或状态不符 → error（重启缝隙/重复回填, 告警不静默）。
+//
+// GTC（2026-09-19）: 状态可能是 resting——挂单在簿、成交量未定（POST 响应里的
+// 即时成交只是过程值）。此时**不写 Shares/Cost/FillPrice**（写了就等于把半个
+// 仓位当持仓, 中途 Resolve 会按它记账）, 只记 order_id 与 note, 终态由
+// FillTracker 在 rem ≤ 策略时间腿撤单时查到的 size_matched 走 CompleteRestingFill 回填。
 func (r *Recorder) CompleteExecution(conditionID string, res ExecResult) (*Record, bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	switch res.Status {
-	case ExecStatusFilled, ExecStatusPartial, ExecStatusUnfilled, ExecStatusRejected:
+	case ExecStatusFilled, ExecStatusPartial, ExecStatusUnfilled, ExecStatusRejected, ExecStatusResting:
 	default:
 		return nil, false, fmt.Errorf("CompleteExecution: %s 非法状态 %q", conditionID, res.Status)
 	}
@@ -415,6 +421,60 @@ func (r *Recorder) CompleteExecution(conditionID string, res ExecResult) (*Recor
 		log.Printf("⚠️ [Recorder] 执行回填重写失败: %v", err)
 	}
 	return rec, filled, nil
+}
+
+// CompleteRestingFill 回填一笔 GTC 挂单的终态成交（FillTracker 在 rem ≤ 策略
+// 时间腿撤单时查 CLOB size_matched 得到, 见 trading.FillTracker doc）——与 CompleteExecution
+// 并列的第二条 live 回填路径, 把 resting 行定稿:
+//   - filled/partial: 写实际 Shares/Cost/FillPrice → isSettlable 入 pending
+//     （调用方据此注册结算轮询。注册晚于 POST 但早于 gamma 结算——后者分钟级,
+//     口径不受影响）;
+//   - unfilled: 0 成交, 保留目标股数（与 CompleteExecution 同口径）;
+//   - resting: **仍未确认**（查询失败/重启遗留从未观测到该单）——只更新
+//     ExecNote 说明原因, 行保持 resting: 不入 pending、不注册结算、
+//     NeedsReconcile 继续计它为待核对（宁可悬着, 不按 0 成交记）。
+//
+// 行不存在或状态非 resting → error（重复回填/行损坏, 告警不静默）。
+func (r *Recorder) CompleteRestingFill(f FillFinal) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	switch f.Status {
+	case ExecStatusFilled, ExecStatusPartial, ExecStatusUnfilled, ExecStatusResting:
+	default:
+		return nil, fmt.Errorf("CompleteRestingFill: %s 非法终态 %q", f.ConditionID, f.Status)
+	}
+	if (f.Status == ExecStatusFilled || f.Status == ExecStatusPartial) && f.Shares <= 0 {
+		return nil, fmt.Errorf("CompleteRestingFill: %s 成交状态 %q 但股数 %.4f ≤ 0", f.ConditionID, f.Status, f.Shares)
+	}
+	var rec *Record
+	for _, x := range r.recs {
+		if x.ConditionID == f.ConditionID {
+			rec = x
+			break
+		}
+	}
+	if rec == nil {
+		return nil, fmt.Errorf("CompleteRestingFill: %s 无落盘行（重启缝隙?）", f.ConditionID)
+	}
+	if rec.ExecStatus != ExecStatusResting {
+		return nil, fmt.Errorf("CompleteRestingFill: %s 行状态 %q 非 resting（重复回填或行损坏）", f.ConditionID, rec.ExecStatus)
+	}
+
+	rec.ExecStatus = f.Status
+	rec.ExecNote = f.Note
+	if f.Status == ExecStatusFilled || f.Status == ExecStatusPartial {
+		rec.Shares = f.Shares // 目标股数 → 实际成交股数
+		rec.Cost = f.Cost
+		rec.FillPrice = f.Cost / f.Shares
+	}
+	if isSettlable(rec) {
+		r.pending[f.ConditionID] = rec
+	}
+	if err := r.rewriteDayLocked(rec.Date); err != nil {
+		log.Printf("⚠️ [Recorder] 挂单终态回填重写失败: %v", err)
+	}
+	return rec, nil
 }
 
 // Resolve 结算一个 ok 信号：按官方 outcome 判定狗侧输赢并回填记录，
@@ -737,7 +797,8 @@ func (r *Recorder) RecentWindows(n int) []WindowEntry {
 
 // isSettlable 判断记录是否应挂结算（真实持仓 + 未结算）: ok 信号 && 未结算 &&
 // paper 行（ExecStatus 空, 模拟成交）或 live filled/partial。unfilled/rejected/
-// submitting 行无真实持仓——不入 pending、不注册结算轮询。
+// submitting/resting 行无确定持仓——不入 pending、不注册结算轮询（resting 是
+// GTC 挂单在簿, 仓位未定, 等 CompleteRestingFill 定稿后才可能入）。
 func isSettlable(rec *Record) bool {
 	if !rec.OK || rec.Won != nil || rec.ConditionID == "" {
 		return false
@@ -764,21 +825,24 @@ func (r *Recorder) HasRecord(conditionID string) bool {
 	return false
 }
 
-// NeedsReconcile 返回执行中断待人工核对的行数（live: submitting = 下单后崩溃;
-// rejected 且 note 以 ExecNoteUnknown 开头 = POST 结果不明, 可能已成交）。
+// NeedsReconcile 返回执行中断待人工核对的行数（live）:
+//   - submitting = 下单后崩溃（order_id 大概率不可得）;
+//   - resting    = GTC 挂单遗留（进程死在挂单期间）——重启后由 FillTracker 接管
+//     自动定稿, 这里只在接管前计一次; 定稿不了（查不到该单）会保持 resting;
+//   - note 以 ExecNoteUnknown 开头 = 成交结果不明（POST 传输错误、或挂单终态
+//     从未观测到）, 任何状态都算。
+//
 // 重启后 cmd/flip 据此汇总告警——不自动补单、不自动注册。
 func (r *Recorder) NeedsReconcile() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	n := 0
 	for _, rec := range r.recs {
-		switch rec.ExecStatus {
-		case ExecStatusSubmitting:
+		switch {
+		case rec.ExecStatus == ExecStatusSubmitting, rec.ExecStatus == ExecStatusResting:
 			n++
-		case ExecStatusRejected:
-			if strings.HasPrefix(rec.ExecNote, ExecNoteUnknown) {
-				n++
-			}
+		case strings.HasPrefix(rec.ExecNote, ExecNoteUnknown):
+			n++
 		}
 	}
 	return n

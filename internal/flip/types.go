@@ -99,20 +99,32 @@ type Tick struct {
 
 // ExecStatus* 是 live 执行状态（Record.ExecStatus 取值; paper 行无 exec 字段,
 // 空串 = 纸面模拟成交）。
-// 两阶段生命周期（2026-09-10 实盘接入）: 下单前落 submitting 行 → POST 同步响应
-// 后回填 filled/partial/unfilled/rejected。filled/partial 为真实持仓, 才注册结算。
+// 生命周期（2026-09-10 实盘接入; 2026-09-19 起下单为 GTC, 多一个 resting 中间态）:
+//
+//	submitting ──(POST 返回)──┬─→ filled（即时全额成交, 终态）
+//	                          ├─→ resting（挂单在簿, 成交量未定）
+//	                          └─→ rejected（未受理: 风控闸/CLOB 拒绝/网络错误）
+//	resting ──(FillTracker: rem≤RemMin 撤单 + 查询终态)──→ filled / partial / unfilled
+//
+// ⚠️ resting ≠ 终态: 仓位大小要等挂单走完（到 rem ≤ 策略时间腿被我们撤掉, 或闭市
+// 自动撤回）才能定稿, 故 resting 行**不入 pending、不注册结算**——否则中途结算会
+// 按半个仓位记账。filled/partial 为真实持仓, 才注册结算轮询。
 const (
 	ExecStatusSubmitting = "submitting" // 已写行、POST 未回填（崩溃缝隙, 重启人工核对）
+	ExecStatusResting    = "resting"    // GTC 挂单在簿, 成交量未定（终态由 FillTracker 回填）
 	ExecStatusFilled     = "filled"     // 全额成交（实际 shares == 目标）
-	ExecStatusPartial    = "partial"    // 部分成交（深度不足, 实际 shares < 目标）
+	ExecStatusPartial    = "partial"    // 部分成交（实际 shares < 目标）
 	ExecStatusUnfilled   = "unfilled"   // 0 成交（引擎已 Done, 不重试）
 	ExecStatusRejected   = "rejected"   // 未下单（风控闸/CLOB 拒绝/网络错误）
 )
 
-// ExecNoteUnknown 是 rejected Note 的「POST 结果不明」标记前缀: 网络错误/超时
-// 不等同于未受理, 订单可能已成交——该行与 submitting 同属重启人工核对类
-// （Recorder 载入扫描判据, 勿自动补单）。HTTP ≥400 拒单有服务端明确失败响应,
-// 不属此类。
+// ExecNoteUnknown 是 ExecNote 的「成交结果不明」标记前缀: 网络错误/超时不等同于
+// 未受理, 订单可能已成交——该行与 submitting 同属重启人工核对类（Recorder 载入
+// 扫描与 NeedsReconcile 的判据, 勿自动补单）。两种来源:
+//   - rejected 行: POST 传输错误/超时（订单可能已受理）;
+//   - GTC 挂单终态行: 闭市后查询不到该单、也从未观测到过（成交量无从确认）。
+//
+// HTTP ≥400 拒单有服务端明确失败响应, 不属此类。
 const ExecNoteUnknown = "未知结果"
 
 // ExecResult 是一次实盘下单的终态结果（internal/trading LiveExecutor.Execute 产出,
@@ -125,6 +137,18 @@ type ExecResult struct {
 	Shares    float64 // 实际成交股数（0 = 未成交）
 	Cost      float64 // 实际花费 USDC（0 = 未成交/拒绝）
 	Note      string  // 拒绝原因; ExecNoteUnknown 开头 = POST 结果不明
+}
+
+// FillFinal 是一笔 GTC 挂单的**终态成交**（trading.FillTracker 在闭市前查询
+// CLOB `size_matched` 后产出, ExecState.ApplyFillFinal 消费落盘）。
+// 与 ExecResult 的分工: ExecResult = POST 那一刻的即时结果（可能只是挂单在簿）;
+// FillFinal = 挂单走完全部生命后的累计成交——仓位大小与结算 P&L 以它为准。
+type FillFinal struct {
+	ConditionID string  // 定位落盘行（一窗至多一笔信号, 与 CompleteExecution 同键）
+	Shares      float64 // 累计成交股数（CLOB size_matched）
+	Cost        float64 // 累计花费 USDC（= Shares × 限价, 保守口径见 FillTracker doc）
+	Status      string  // ExecStatus*: filled/partial/unfilled; resting = 仍未确认（只更新 note）
+	Note        string  // 终态说明（写 ExecNote; ExecNoteUnknown 前缀 = 需人工核对）
 }
 
 // ── 输出 ──
@@ -194,7 +218,8 @@ type Record struct {
 }
 
 // IsFilled 判断记录是否实际成交（须注册结算轮询）: paper 行（ExecStatus 空 =
-// 恒模拟全额成交）与 live filled/partial 为真; unfilled/rejected/submitting 为假。
+// 恒模拟全额成交）与 live filled/partial 为真; unfilled/rejected/submitting/
+// resting 为假（resting = 挂单在簿成交量未定, 注册结算须等 FillTracker 回填）。
 func (r *Record) IsFilled() bool {
 	switch r.ExecStatus {
 	case "", ExecStatusFilled, ExecStatusPartial:

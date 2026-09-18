@@ -16,9 +16,12 @@ func floor2(x float64) float64 {
 // OrderSpecForObs 把 ok 观测映射为 live 限价单规格（纯函数, v4 口径）:
 //
 //	price  = obs.Fill —— 触发 tick 狗侧 ask（引擎已保证 ≤0.20 且为有效盘口价,
-//	         按 tick 格点报价）; FAK 限价单只吃 ≤ 该档的 resting ask, 绝不超价
+//	         按 tick 格点报价）; GTC 挂单只在此价或更优成交, 绝不超价
 //	shares = floor2(stake/price) —— 向下取整到 0.01, 保证 cost = shares×price
 //	         ≤ stake（与回测 shares=stake/fill 同口径, 差额 ≤ 0.01 股不投）
+//
+// price 还有一个身份: GTC 挂单的**成交价上界**——即时吃单与后续挂单成交都不会
+// 高于它, FillTracker 就按它折算成本（见其 doc）。
 //
 // 不做「跳档 0.19 之类超价补足」——折价保护优先于满额投入。
 func OrderSpecForObs(obs *flip.Observation, stake float64) (price, shares float64, err error) {

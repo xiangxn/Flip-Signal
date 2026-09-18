@@ -139,7 +139,9 @@ FlipSignal/
 │   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
 │   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest(精确)/CacheStat
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 构造注入）
-│       ├── live_executor.go          # LiveExecutor 真实 FAK 下单（实现 flip.Executor, 唯一 POST 点）
+│       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
+│       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin 撤单 + 查 size_matched 定稿回调（决策 #16）
+│       ├── prefetch.go               # 每窗预热 tickSize/negRisk/feeRate（下单路径零额外网调）
 │       └── resolution_poller.go      # 官方结算轮询（gamma umaResolutionStatus）
 ├── docs/                             # 策略文档（v4 方案/口径映射）
 ├── python/
@@ -178,7 +180,8 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
              风控闸 gate（paper/live 同判据: 首窗禁单 + 日亏熔断锁存）
                          │
                          ▼
-             Executor (PaperExecutor 模拟成交; live = LiveExecutor FAK)
+             Executor (PaperExecutor 模拟成交; live = LiveExecutor GTC 挂单
+                       → trading.FillTracker: rem≤RemMin 撤单 + 查 size_matched 定稿, 见决策 #16)
                          │
                          ▼
    Recorder (touches_* 观测 + windows_* 窗口振幅 + winstats_* 健康度, 按日切分 + P&L)
@@ -201,7 +204,9 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
    20s 未命中 → 本窗不产出观测、不计入 σ，见决策 #15）
 4. 首个触底 tick（ask≤0.20）→ 四腿判定 → 观测落盘（ok 与失败都记，即时落盘）
 5. ok 信号 → 风控闸（live 命中拦 POST 记 rejected；paper 命中记 gate_reason 照常结算）
-   → PaperExecutor 执行 → Register 结算轮询（窗口内完成，无窗末补判）
+   → Executor 执行（paper 即时定稿; live = GTC 挂单 → resting 交 FillTracker 每 2s
+   查询, **到 rem ≤ RemMin 撤掉未成交余量并定稿**）→ **定稿后** Register 结算轮询
+   （结算在闭市后数分钟, 口径不变）
 6. 窗口结束（rem=0）→ 收尾取锚通道（cancel + join）→ |close−anchor| 追加进 σ 滚动窗
    并落盘 windows_*.jsonl（重启 σ 预热本地优先：windows_* 新鲜即毫秒级恢复，
    不足/过旧回退官方网络预热 FetchTwapRanges——停机期窗口只有官方能取）；
@@ -286,8 +291,10 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
 ## 关键设计决策
 
 1. **纸面/实盘同源**：成交执行抽象为 `Executor` 接口，`mode: paper|live` 配置区分。
-   阶段一仅 `PaperExecutor`（校验 fill>0，无其它边界）；live（FAK）接口与配置已预留，
-   纸面验证通过后从 eth 分支历史恢复实盘路径接入。
+   纸面 = `PaperExecutor`（校验 fill>0，无其它边界，成交即时定稿）；live =
+   `LiveExecutor`（**GTC 限价挂单**）+ `trading.FillTracker`（rem≤RemMin 撤单 + 定稿，
+   见决策 #16）。
+   两者共用同一 `ExecState` 编排与风控闸，main 单点经接口调用，不散落两条路径。
 2. **口径与回测 1:1**：触发/急跌窗/浅洞（侧别带 yes −0.6 / no −1.0）/时间腿/σ/P&L
    全部映射回测 `01_backtest_r1.py`（详见 `docs/dog020_mapping_2026-09-02.md`），
    观测 JSONL 字段对齐回测 CSV——对照基准 `trades_r1_combo.csv`（组合版），
@@ -470,6 +477,56 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
    - **不是 P&L 杠杆**：btreplay 625 笔逐位一致（回测路径只喂 `BeginWindow(ev.TwapOpen,
      σ)`，不碰 `internal/feed`）、01 四条基线不变；σ 的 close 口径仍取
      `lastTick.TwapPrice`（**到达**口径，与 open 的评估口径有 ~1.5s 不对称，已知未做）。
+16. **live 下单 = GTC 限价挂单 + `rem ≤ RemMin` 撤单 + 撤单时定稿**（2026-09-19，
+    用户决定「保住盈亏比」）。FAK（taker-limit：POST 那一刻吃 ≤ 限价的档位、余量
+    立即撤）已删除，`orders.GTC` 是唯一提交路径。动机是**脆弱性**：tick 采样 → POST
+    到达有 1~3s 延迟，触发那一瞬挂在 0.20 的卖单常已被吃走/撤走，FAK 只能吃零头或
+    整单落空；GTC 挂着等，谁在窗口内砸出来就接住谁。
+    - **挂单只挂到 rem ≤ 180s**（策略时间腿 `flip.rem_min`，`cmd/flip` 传给
+      FillTracker；**不是硬编码常量**）：到点由我们自己发 `DELETE /order` 撤掉未成交
+      余量（新增 `TradeClient.CancelOrder`）。用户口径：**回测前提是「触发瞬间必成
+      交」**，rem ≤ 180 之后才成交的样本不是这条策略要的（砸到 0.2 后一路拖到窗口
+      尾盘才被吃掉的那批，正是逆向选择最重的子样本）。撤单是**尽力而为**：失败每
+      2s 重试到成功或硬截止，撤单没成功的行照常按实际成交落盘（note 里不会有
+      「余量已撤」）。撤单点之前不撤（挂单继续等对手方），已满额成交不撤（没余量，
+      省一次废请求）；**查询失败时照撤**（漏撤的代价远大于一次废请求）。
+    - **POST 不再是终态**：GTC 响应只描述 POST 那一瞬（`status=live` 即「已挂上簿」，
+      `taking/making` 是当下已成交部分）。新状态 **`ExecStatusResting`** ＝ 订单在簿、
+      成交量待定稿；`filled` 只留给「即时全额成交」（sanity 全过且 shares ≈ 请求量）。
+      **`unfilled` 不再是 POST 能给出的结论**——只有定稿（撤单后读到 `size_matched`）
+      才知道它是 0 成交。
+    - **`trading.FillTracker`**（新文件，长驻 goroutine 同 ResolutionPoller 形制）:
+      `Register`（POST 返回 resting / live 启动接管磁盘残留）→ 每 **2s**
+      `GetOpenOrders(Id)` 读 `size_matched` + 到点撤单 → 定稿回调
+      `ExecState.ApplyFillFinal` → `Recorder.CompleteRestingFill` 落盘。终态判据五条：
+      ① `status ∈ {MATCHED, CANCELED}`；② **挂单表已无此单**（我们撤单生效 / 闭市撤
+      回）——仅在**本进程至少见过一次**该单（`sighted`）或**重启接管**（`adopted`）时
+      才可推定，否则「查不到」可能只是索引延迟；③ `size_matched ≥ 请求股数`；
+      ④ 撤单成功却仍在簿 → **撤单确认宽限 15s** 用尽即按末次观测定稿（note 标注）；
+      ⑤ 硬截止 = 闭市 + **60s** 宽限（撤单一直失败的兜底；先查询后判截止，重启接管
+      也能拿到真值）。任一未定 ⇒ 保持 `resting`。
+    - **接管遗留行**: 重启扫盘登记的 resting 行撤单点通常早已过去——第一轮查询若发现
+      它还活在簿上就立即撤掉（崩溃前挂的单不该继续吃成交）；查不到则照旧转人工。
+    - **绝不臆造仓位**：无法确认（从未查到 / `size_matched` 语义不明）⇒ 行留
+      `resting` + `ExecNoteUnknown`，只更新 note 让 `NeedsReconcile` 捞出来人工核对
+      （按 `order_id` 去 data-api/UI）。**成本口径 `cost = shares × 限价`**：挂单成交
+      必是 maker 成交 = 限价本身，即时 taker 那部分只会**更便宜** ⇒ 成本至多略微高估
+      （保守，且与回测 `shares = stake/fill` 同口径）。
+    - **结算注册后移**：resting 行 `IsFilled()==false`、不进结算轮询；改由定稿回调
+      在 `ApplyFillFinal` 之后注册（gamma 结算在闭市后数分钟，口径不受影响）。
+      重启时 main 扫盘把残留 resting 行按 `adopted` 重新登记。
+    - **已知样本偏差**（不是免费午餐）：挂单越久，成交样本越偏向「价格继续下探」的
+      那批——反弹回去的单子根本不会成交。回测 WR 24.6% 对应「触发瞬间拿到位置」，
+      挂单成交的子样本会系统性更差；撤在 rem ≤ 180 只是把偏差**截短**，不消除它，
+      真答案仍要等实盘样本（撤单点越早、样本越接近回测口径，但也越难成交）。
+    - **GTD 不可用**（试过，放弃）：CLOB 的 GTD 规则是「stated expiration 前 60s 就
+      被安全阈值撤」，且 expiration 必须 ≥ now+180s ⇒ 最小有效挂单期 ~2 分钟——对
+      5 分钟窗口（触发时 rem 只剩 ~3 分钟）几乎等于挂到闭市；更硬的一层是 SDK
+      `PostOrder` 把 expiration 硬编码为 `"0"`（`orders.OrderToDTO(..., "0")`）且它
+      不在 EIP-712 签名结构里，客户端要用上 GTD 得改 SDK。故撤单由我们自己发。
+      **下单路径仍是单次网调**：`CreateOrder` 只查 tickSize/negRisk，两者由
+      `PrefetchTokenInfo` 每窗预热（SDK 内部不读 feeRate，`ResolveFeeRateBps` 无调用
+      点），`PostOrder` 无附加请求；撤单是独立的 `DELETE /order`（一分钟一笔量级）。
 
 ---
 
@@ -505,6 +562,7 @@ go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 
 | 配置键 | 默认 | 含义 |
 |------|------|------|
+| `flip.rem_min` | 180 | 策略时间腿：仅 `rem > 180` 的触底才判定（与回测 1:1）。**同时是 live 撤单点**——`cmd/flip` 把它传给 FillTracker，到 rem ≤ 180 撤掉未成交挂单（决策 #16） |
 | `flip.max_book_lat_ms` | 300 | PM 盘口延迟闸：`book_latency_ms` 超此值的 tick 无效（**回测 `MAX_LAT` 同值，收紧是负收益**，见 `docs/dog020_risk_latency_plan_2026-09-16.md` §1.2b） |
 | `feed.max_spot_age_ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
 | `feed.max_twap_age_ms` | 10000 | TWAP-60 新鲜度：**只**管窗末 close（锚走精确匹配，不吃到达龄），超龄按缺失处理。历史上与 `anchorPickTol`(10s) 同值但语义无关，后者已随决策 #15 废除 |

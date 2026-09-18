@@ -16,7 +16,7 @@ import (
 //   - 判定/成交计算/P&L 公式全部同源（engine 状态机 + recorder Resolve）,
 //     mode 永不进入判定;
 //   - Ex 实现即唯一差异点——paper: PaperExecutor（不真实 POST, 模拟全额 filled）;
-//     live: LiveExecutor（真实 FAK 下单 + 响应 sanity 解析）;
+//     live: LiveExecutor（真实 GTC 限价挂单 + 响应 sanity 解析）;
 //   - 风控闸（gate）两模式共用同一判据（2026-09-16 起）: live 命中即拦下 POST
 //     （rejected 行, 无持仓）; paper 命中只写 gate_reason（方案 A, plan §3.5）
 //     ——「被闸」同样是真实市场状态, 纸面砍掉会丢失反事实与频率口径;
@@ -47,13 +47,17 @@ type ExecState struct {
 //     单行落盘——paper 行无 exec 字段，行为与接入 live 前一致;
 //   - live: SubmitLiveObservation 先写 exec_status=submitting 行（下单前落盘——
 //     崩溃时真单可能已受理的恢复语义）→ 统一 Execute（= LiveExecutor 真实
-//     FAK 下单）→ CompleteExecution 回填终态（filled/partial/unfilled/rejected
-//   - 实际 fill/cost/order_id，原子重写当日文件）。
+//     GTC 限价挂单）→ CompleteExecution 回填即时结果（filled/resting/unfilled/
+//     rejected - 实际 fill/cost/order_id，原子重写当日文件）。
+//     ⚠️ GTC 下单可能只到 resting（挂单在簿, 成交量未定）——此行的定稿不在本
+//     函数: trading.FillTracker 在闭市前查 size_matched, 经 ApplyFillFinal 回填
+//     终态与结算注册（见该方法 doc）。
 //
 // 拦截/未成交/失败均不重试（引擎已 Done，事件内不再检测）。
 //
 // 返回落盘记录（落盘失败返回 nil）。结算轮询注册由调用方按
-// rec.OK && rec.IsFilled() 决定——live 未成交/被拒行不注册（无持仓无结算）。
+// rec.OK && rec.IsFilled() 决定——live 未成交/被拒行不注册（无持仓无结算）;
+// GTC 的 resting 行不满足 IsFilled, 由调用方改交 trading.FillTracker 定稿后再注册。
 func (x *ExecState) HandleObservation(o *Observation, conditionID, slug string, eventStart int64) *Record {
 	// done 包装落盘: 失败记日志并返回 nil（调用方按 nil 不注册结算）
 	done := func(rec *Record, err error) *Record {
@@ -124,6 +128,28 @@ func (x *ExecState) HandleObservation(o *Observation, conditionID, slug string, 
 		log.Printf("[Trading] ⚠️ 信号未执行: %s（仍记录观测）", res.Note)
 	}
 	return done(x.Rec.RecordObservation(conditionID, slug, eventStart, o, x.Stake))
+}
+
+// ApplyFillFinal 回填一笔 GTC 挂单的终态成交（trading.FillTracker 在闭市前查询
+// CLOB size_matched 后经回调送到这里, 见其类型 doc）。返回值同 HandleObservation:
+// 落盘记录（回填失败返回 nil）。调用方据此注册结算轮询——注册时点从「POST 返回」
+// 推到「挂单定稿」, 但 gamma 结算远在其后（分钟级）, 口径不受影响。
+//
+// Status=resting 是合法的「仍未确认」终态（查询失败/重启遗留从未观测到该单）:
+// 行保持 resting + note 说明原因, 不入 pending、不注册结算、NeedsReconcile 继续
+// 计它——宁可悬着等人工核对, 也不按 0 成交记。
+func (x *ExecState) ApplyFillFinal(f FillFinal) *Record {
+	rec, err := x.Rec.CompleteRestingFill(f)
+	if err != nil {
+		log.Printf("[Trading] ⚠️ 挂单终态回填失败: %v", err)
+		return nil
+	}
+	log.Printf("[Trading] 🎯 GTC 挂单终态: exec=%s shares=%.2f cost=%.2f fill=%.4f note=%s",
+		rec.ExecStatus, rec.Shares, rec.Cost, rec.FillPrice, rec.ExecNote)
+	if strings.HasPrefix(f.Note, ExecNoteUnknown) {
+		log.Printf("[Trading] ⚠️ 挂单成交未确认（order=%s）—— 请去 data-api 按 order_id 核对该窗实际成交, 勿重复下单", rec.OrderID)
+	}
+	return rec
 }
 
 // gate 风控闸（模式无关的判据与顺序, docs §3.3）: 返回命中原因与是否拦截。

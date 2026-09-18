@@ -30,6 +30,7 @@ type Config struct {
 	DistLoNo  float64 `mapstructure:"dist_lo_no"`
 	DistHi    float64 `mapstructure:"dist_hi"`
 	// 时间腿: 仅 rem > 此值 的触发有效（180, REM_MIN）
+	// live 兼作撤单点: rem ≤ 此值撤掉 GTC 挂单未成交余量（cmd/flip 传给 FillTracker）
 	RemMin int `mapstructure:"rem_min"`
 	// 每信号投入 USDC（2）
 	Stake float64 `mapstructure:"stake"`
