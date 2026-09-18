@@ -379,8 +379,7 @@ func TestWindowStatsLog(t *testing.T) {
 			Skip: w.skip, Anchor: 100000, HistBps: 7, WindowStats: w.st,
 		}
 		if i == 0 { // 仅首行带锚来源（末行 = 无锚窗口, 验证零值仍显式落盘）
-			e.AnchorInit, e.AnchorPickMs = 99998.5, -1000
-			e.AnchorSrc, e.AnchorRecoveredMs = "stream", 1640
+			e.AnchorExact, e.AnchorSrc, e.AnchorRecoveredMs = true, "stream", 1640
 		}
 		if err := r.LogWindowStats(e); err != nil {
 			t.Fatalf("LogWindowStats[%d]: %v", i, err)
@@ -417,17 +416,16 @@ func TestWindowStatsLog(t *testing.T) {
 		got.LostTriggers[0].Reason != LostReasonStaleBook {
 		t.Fatalf("统计字段未平铺落盘: %+v", got)
 	}
-	// 锚来源字段（2026-09-18 锚升级通道）
-	if got.AnchorInit != 99998.5 || got.AnchorPickMs != -1000 ||
-		got.AnchorSrc != "stream" || got.AnchorRecoveredMs != 1640 {
+	// 锚来源字段（2026-09-19 精确取锚）
+	if !got.AnchorExact || got.AnchorSrc != "stream" || got.AnchorRecoveredMs != 1640 {
 		t.Fatalf("锚来源字段未落盘: %+v", got)
 	}
-	// anchor_pick_ms / anchor_init 不得被省略: pick_ms=0（边界那一秒的评估值）与
-	// init=0（无初值）都是有效取值——省略会让「字段不存在」与「值为 0」不可区分。
-	if !strings.Contains(first, `"anchor_pick_ms":`) || !strings.Contains(first, `"anchor_init":`) {
-		t.Fatalf("anchor_pick_ms/anchor_init 应恒出现（无 omitempty）: %s", first)
+	// anchor_exact 不得被省略: false（本窗未取到锚）也是有效取值, 且它是 python 侧
+	// 区分「09-19 新口径行」的哨兵键——省略会让新旧行无法分辨。
+	if !strings.Contains(first, `"anchor_exact":`) {
+		t.Fatalf("anchor_exact 应恒出现（无 omitempty）: %s", first)
 	}
-	// 无锚窗口（第三行）: src 空、pick_ms=0 仍显式落盘
+	// 无锚窗口（第三行）: src 空、exact=false 仍显式落盘
 	b3, err := os.ReadFile(statsFilePath(dir, "2026-09-03"))
 	if err != nil {
 		t.Fatal(err)
@@ -437,11 +435,11 @@ func TestWindowStatsLog(t *testing.T) {
 	if err := json.Unmarshal([]byte(third), &noAnchor); err != nil {
 		t.Fatalf("解析健康度行(无锚): %v", err)
 	}
-	if noAnchor.AnchorSrc != "" || noAnchor.AnchorPickMs != 0 || noAnchor.AnchorInit != 0 {
+	if noAnchor.AnchorSrc != "" || noAnchor.AnchorExact || noAnchor.AnchorRecoveredMs != 0 {
 		t.Fatalf("无锚窗口锚来源字段错: %+v", noAnchor)
 	}
-	if !strings.Contains(third, `"anchor_pick_ms":0`) {
-		t.Fatalf("无锚窗口也应显式落 anchor_pick_ms:0: %s", third)
+	if !strings.Contains(third, `"anchor_exact":false`) {
+		t.Fatalf("无锚窗口也应显式落 anchor_exact:false: %s", third)
 	}
 	// 跳窗行也保留一行（逐日行数 = 主循环跑满与否的证据）
 	if l := countLines(t, statsFilePath(dir, "2026-09-02")); l != 2 {

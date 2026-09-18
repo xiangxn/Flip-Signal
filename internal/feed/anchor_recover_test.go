@@ -1,6 +1,6 @@
-// 2026-09-18 锚升级通道测试（docs/dog020_anchor_upgrade_2026-09-18.md）。
-// 全部注入假 fetcher / 假缓存取数（零网络）；Schedule 与轮询节拍都压到毫秒级
-// （opts.PickInterval），用「请求时刻相对边界」核验节奏，不真实等待 +2/+5/+40s。
+// 2026-09-19 精确取锚通道测试（docs/dog020_anchor_exact_open_2026-09-19.md）。
+// 全部注入假 fetcher / 假缓存取数（零网络）；节拍与预算都压到毫秒级（opts），
+// 用「调用时刻相对边界」核验节奏，不真实等待 +2/+5/+40s。
 package feed
 
 import (
@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// seqFetch 返回按调用次序取值的假 fetcher（越界复用最后一个）与调用时刻/入参记录。
+// seqFetch 返回按调用次序取值的假 fetcher（越界复用最后一个）与调用时刻记录。
 func seqFetch(prices ...float64) (OpenPriceFetcher, *[]time.Time) {
 	var mu sync.Mutex
 	var calls []time.Time
@@ -42,29 +42,37 @@ func blockingFetch(price float64, block time.Duration) (OpenPriceFetcher, *[]tim
 	}, &calls
 }
 
-// pickStep 是脚本化取数的一条: 价格 + 评估偏移。
+// pickStep 是脚本化取锚的一条: 价格 + 该条的本地到达时刻（unix 毫秒）;
+// miss=true 表示这一次没命中（边界那一秒的推送还没到）。
 type pickStep struct {
-	price  float64
-	pickMs int64
+	price     float64
+	arrivedMs int64
+	miss      bool
 }
 
-// scriptPick 按调用次序循环给出 (price, pickMs)，并记录收到的容差。
-func scriptPick(seq []pickStep) (PushPicker, *[]time.Duration) {
+// scriptPick 按调用次序给出结果（每调用一次消耗一条, 越界后恒不命中）。
+func scriptPick(seq []pickStep) (PushPicker, *[]time.Time) {
 	var mu sync.Mutex
-	var tols []time.Duration
+	var calls []time.Time
 	i := 0
-	return func(_ time.Time, tol time.Duration) (float64, int64, bool) {
+	return func(_ time.Time) (float64, int64, bool) {
 		mu.Lock()
 		defer mu.Unlock()
-		tols = append(tols, tol)
-		s := seq[i%len(seq)]
+		calls = append(calls, time.Now())
+		if i >= len(seq) {
+			return 0, 0, false
+		}
+		s := seq[i]
 		i++
-		return s.price, s.pickMs, true
-	}, &tols
+		if s.miss {
+			return 0, 0, false
+		}
+		return s.price, s.arrivedMs, true
+	}, &calls
 }
 
-// nopPick 恒不命中（缓存空/超容差）。
-func nopPick(time.Time, time.Duration) (float64, int64, bool) { return 0, 0, false }
+// nopPick 恒不命中（缓存里没有边界那一秒的条目）。
+func nopPick(time.Time) (float64, int64, bool) { return 0, 0, false }
 
 // drain 收完通道（关闭即返回），超时即失败。
 func drain(t *testing.T, ch <-chan AnchorRecovery, timeout time.Duration) []AnchorRecovery {
@@ -84,23 +92,102 @@ func drain(t *testing.T, ch <-chan AnchorRecovery, timeout time.Duration) []Anch
 	}
 }
 
-// opts 造一份毫秒级节拍的测试参数。
+// opts 造一份毫秒级节拍的测试参数: 精确取锚默认只试 1 次（立即, 不等待）——
+// 官方段用例要的是「没有流值锚」这一前提, 不想被重试预算拖时间。
 func opts(sched ...time.Duration) AnchorUpgradeOpts {
 	return AnchorUpgradeOpts{
+		Attempts:     1,
+		Interval:     2 * time.Millisecond,
 		Schedule:     sched,
-		PickTol:      50 * time.Millisecond,
 		FetchTimeout: 200 * time.Millisecond,
-		PickInterval: 2 * time.Millisecond,
 	}
 }
 
-// TestRecoverAnchorOfficialLastWins 官方**每次成功都采纳**（last-wins）: 不再以首次
-// 成功为终局——官方值本身在头十几秒仍在收敛（docs §9），最后一次采样即最终锚。
+// TestRecoverAnchorExactHitIsFinal 命中即终局: 只送一条（stream）, 通道立刻关闭,
+// 不再消耗剩余预算（精确匹配下不可能有更好的取值）。
+func TestRecoverAnchorExactHitIsFinal(t *testing.T) {
+	boundary := time.Now()
+	arrived := boundary.Add(2 * time.Second).UnixMilli()
+	// 前两次未命中（边界那一秒还没到）, 第三次命中
+	pick, calls := scriptPick([]pickStep{{miss: true}, {miss: true}, {price: 98_500, arrivedMs: arrived}})
+	o := opts()
+	o.Attempts, o.Interval = 20, 10*time.Millisecond // 预算 190ms; 命中在第 3 次（~20ms）
+
+	var got []AnchorRecovery
+	el := waitMs(t, 15*time.Millisecond, 100*time.Millisecond, func() {
+		got = drain(t, RecoverAnchor(context.Background(), nil, pick, boundary,
+			boundary.Add(5*time.Minute), o), 2*time.Second)
+	})
+
+	if len(got) != 1 || got[0].Source != AnchorSourceStream || got[0].Price != 98_500 {
+		t.Fatalf("应只送一条 stream 结果, 得到 %+v", got)
+	}
+	if got[0].AtMs != arrived {
+		t.Fatalf("AtMs 应为该推送的本地到达时刻 %d, 得到 %d", arrived, got[0].AtMs)
+	}
+	if n := len(*calls); n != 3 {
+		t.Fatalf("命中后不应继续取, 取数次数 = %d（期望 3）", n)
+	}
+	if el > 100*time.Millisecond {
+		t.Fatalf("命中后应立即关通道（不耗完预算）, 实际 %v", el)
+	}
+}
+
+// TestRecoverAnchorBudgetExhausted 预算耗尽: 恰好 Attempts 次取数、按 Interval 节拍、
+// 一条不送、通道关闭（调用方保留 anchor=0 → 本窗不产出观测）。
+func TestRecoverAnchorBudgetExhausted(t *testing.T) {
+	boundary := time.Now()
+	pick, calls := scriptPick(nil) // 永不命中
+	o := opts()
+	o.Attempts, o.Interval = 5, 10*time.Millisecond // 首次立即 + 4 次等待 = ~40ms
+
+	var got []AnchorRecovery
+	el := waitMs(t, 30*time.Millisecond, 200*time.Millisecond, func() {
+		got = drain(t, RecoverAnchor(context.Background(), nil, pick, boundary,
+			boundary.Add(5*time.Minute), o), 2*time.Second)
+	})
+
+	if len(got) != 0 {
+		t.Fatalf("预算耗尽不应送出任何结果, 得到 %+v", got)
+	}
+	if n := len(*calls); n != 5 {
+		t.Fatalf("应取数 %d 次, 得到 %d", 5, n)
+	}
+	for i, c := range *calls {
+		want := time.Duration(i) * 10 * time.Millisecond
+		if d := c.Sub(boundary.Add(want)); d < -10*time.Millisecond || d > 40*time.Millisecond {
+			t.Fatalf("第 %d 次取数距边界 %v, 期望 %v", i, d, want)
+		}
+	}
+	if el > 150*time.Millisecond {
+		t.Fatalf("预算耗尽后应立即关通道, 实际 %v", el)
+	}
+}
+
+// TestRecoverAnchorOfficialDormant 官方路径默认休眠: Schedule 为空时——即使接了
+// fetcher——一次请求都不发（需求: 官方 +40s 才收敛, 本窗机会早过）。
+func TestRecoverAnchorOfficialDormant(t *testing.T) {
+	boundary := time.Now()
+	fetch, calls := seqFetch(99_000)
+	pick, _ := scriptPick([]pickStep{{price: 98_500, arrivedMs: boundary.UnixMilli()}})
+
+	got := drain(t, RecoverAnchor(context.Background(), fetch, pick, boundary,
+		boundary.Add(5*time.Minute), opts() /* 空 Schedule */), 2*time.Second)
+
+	if n := len(*calls); n != 0 {
+		t.Fatalf("官方路径应休眠（0 次请求）, 得到 %d 次", n)
+	}
+	if len(got) != 1 || got[0].Source != AnchorSourceStream {
+		t.Fatalf("应只送精确取锚结果, 得到 %+v", got)
+	}
+}
+
+// TestRecoverAnchorOfficialLastWins（官方段, 休眠路径的回归）: **每次成功都采纳**
+// （last-wins）——官方值本身在头十几秒仍在收敛, 最后一次采样即最终锚。
+// SettleAfter=0 = 无收敛门。
 func TestRecoverAnchorOfficialLastWins(t *testing.T) {
 	boundary := time.Now()
-	// 三个采样点各返回不同价（模拟官方收敛: 99_000 → 99_200 → 99_300）
-	// SettleAfter=0 = 无收敛门（生产由 main 置 +20s）
-	fetch, calls := seqFetch(99_000, 99_200, 99_300)
+	fetch, calls := seqFetch(99_000, 99_200, 99_300) // 三点各返回不同价（模拟收敛）
 	got := drain(t, RecoverAnchor(context.Background(), fetch, nopPick, boundary,
 		boundary.Add(5*time.Minute),
 		opts(10*time.Millisecond, 30*time.Millisecond, 60*time.Millisecond)), 2*time.Second)
@@ -124,24 +211,25 @@ func TestRecoverAnchorOfficialLastWins(t *testing.T) {
 	}
 }
 
-// TestRecoverAnchorSettleGuard 收敛门: 已有流值锚时, 收敛点（+20s）之前的官方成功值
-// 只作兜底、不覆盖流值（否则会把已知精确的边界那一秒推送换成收敛中的临时值）。
+// TestRecoverAnchorSettleGuard 收敛门: 已有精确锚时, 收敛点之前的官方成功值只作兜底、
+// 不覆盖流值（否则会把已知精确的边界那一秒推送换成收敛中的临时值）。
 func TestRecoverAnchorSettleGuard(t *testing.T) {
 	boundary := time.Now()
 	sched := []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 60 * time.Millisecond}
 
-	// ① 有 t=0 流值种子 → +10ms/+30ms 两点丢弃, +60ms（≥ 收敛点 50ms）采纳
+	// ① 精确取锚已命中 → +10ms/+30ms 两点丢弃, +60ms（≥ 收敛点 50ms）采纳
 	o := opts(sched...)
 	o.SettleAfter = 50 * time.Millisecond
-	o.SeedPickMs, o.SeedOK = -1000, true
 	fetch, _ := seqFetch(99_000, 99_200, 99_300)
-	got := drain(t, RecoverAnchor(context.Background(), fetch, nopPick, boundary,
+	pick, _ := scriptPick([]pickStep{{price: 98_500, arrivedMs: boundary.UnixMilli()}})
+	got := drain(t, RecoverAnchor(context.Background(), fetch, pick, boundary,
 		boundary.Add(5*time.Minute), o), 2*time.Second)
-	if len(got) != 1 || got[0].Source != AnchorSourceOfficial || got[0].Price != 99_300 {
+	if len(got) != 2 || got[0].Source != AnchorSourceStream ||
+		got[1].Source != AnchorSourceOfficial || got[1].Price != 99_300 {
 		t.Fatalf("收敛门内应只采纳最后一个采样点（99300）, 得到 %+v", got)
 	}
 
-	// ② 无流值（SeedOK=false 且缓存不命中）→ 早期点照常采纳（兜底, 好过整窗无锚）
+	// ② 无精确锚（缓存不命中）→ 早期点照常采纳（兜底, 好过整窗无锚）
 	// 注意必须换新 boundary: ① 已跑掉 ~60ms, 复用会把三个采样点压成「一次性」。
 	boundary2 := time.Now()
 	o2 := opts(sched...)
@@ -150,34 +238,18 @@ func TestRecoverAnchorSettleGuard(t *testing.T) {
 	got2 := drain(t, RecoverAnchor(context.Background(), fetch2, nopPick, boundary2,
 		boundary2.Add(5*time.Minute), o2), 2*time.Second)
 	if len(got2) != 3 {
-		t.Fatalf("无流值时早期官方值应作兜底全部采纳, 得到 %+v", got2)
-	}
-}
-
-// TestRecoverAnchorSettleGuardStreamHit 收敛门同样认可**重选命中**（不只是 t=0 种子）:
-// 升级通道自己送出过 stream 后, 早期官方点即不再覆盖。
-func TestRecoverAnchorSettleGuardStreamHit(t *testing.T) {
-	boundary := time.Now()
-	pick, _ := scriptPick([]pickStep{{98_500, 0}}) // 首拍即命中「边界那一秒」
-	o := opts(10*time.Millisecond, 40*time.Millisecond)
-	o.SettleAfter = 100 * time.Millisecond // 两点都在收敛点之前
-	fetch, _ := seqFetch(99_000, 99_200)
-	got := drain(t, RecoverAnchor(context.Background(), fetch, pick, boundary,
-		boundary.Add(5*time.Minute), o), 2*time.Second)
-
-	if len(got) != 1 || got[0].Source != AnchorSourceStream {
-		t.Fatalf("有重选命中时早期官方点不应覆盖流值, 得到 %+v", got)
+		t.Fatalf("无精确锚时早期官方值应作兜底全部采纳, 得到 %+v", got2)
 	}
 }
 
 // TestRecoverAnchorAllFail 官方全失败: 每个 Schedule 点各试一次（±40ms 节奏），
-// 一条都不送出、通道关闭（调用方保留流值锚）。
+// 一条都不送出、通道关闭。
 func TestRecoverAnchorAllFail(t *testing.T) {
 	boundary := time.Now()
 	sched := []time.Duration{10 * time.Millisecond, 30 * time.Millisecond, 60 * time.Millisecond}
 	fetch, calls := seqFetch(0)
 	var got []AnchorRecovery
-	el := waitMs(t, 60*time.Millisecond, 2*time.Second, func() {
+	waitMs(t, 50*time.Millisecond, 2*time.Second, func() {
 		got = drain(t, RecoverAnchor(context.Background(), fetch, nopPick, boundary,
 			boundary.Add(5*time.Minute), opts(sched...)), 2*time.Second)
 	})
@@ -193,9 +265,6 @@ func TestRecoverAnchorAllFail(t *testing.T) {
 		if d := (*calls)[i].Sub(want); d < -40*time.Millisecond || d > 40*time.Millisecond {
 			t.Fatalf("第 %d 次请求距边界 %v, 期望 %v（±40ms）", i, d, sched[i])
 		}
-	}
-	if el > 500*time.Millisecond {
-		t.Fatalf("最后一个点失败后应立即结束, 实际 %v", el)
 	}
 }
 
@@ -223,82 +292,12 @@ func TestRecoverAnchorFetchTimeoutSkipsPassedPoints(t *testing.T) {
 	}
 }
 
-// TestRecoverAnchorPickMonotone 缓存重选的单调门: |评估偏移| 严格变小才送，
-// 并列或变差一律不送（防重连补发/乱序把锚带偏）。
-func TestRecoverAnchorPickMonotone(t *testing.T) {
-	boundary := time.Now()
-	// 循环脚本: −1000 → −500 → 0 → −900（变差）→ 0（并列, 不送）
-	pickFn, _ := scriptPick([]pickStep{
-		{98_000, -1000}, {98_001, -500}, {98_002, 0}, {98_003, -900}, {98_004, 0},
-	})
-	o := opts() // 空 Schedule: 只跑重选, 硬停 = 边界 + PickTol + 2×节拍
-	o.SeedPickMs, o.SeedOK = -1200, true
-	got := drain(t, RecoverAnchor(context.Background(), fetchNil(), pickFn, boundary,
-		boundary.Add(5*time.Minute), o), 2*time.Second)
-
-	want := []int64{-1000, -500, 0}
-	if len(got) != len(want) {
-		t.Fatalf("应送出 %d 条升级, 得到 %d（%+v）", len(want), len(got), got)
-	}
-	for i, w := range want {
-		if got[i].Source != AnchorSourceStream || got[i].PickMs != w {
-			t.Fatalf("第 %d 条 = %+v, 期望 stream/pick=%d", i, got[i], w)
-		}
-	}
-	if got[0].Price != 98_000 || got[2].Price != 98_002 {
-		t.Fatalf("价格未随 pick 传递: %+v", got)
-	}
-}
-
-// TestRecoverAnchorPickSeedGate 单调门基准 = t=0 初值: 无种子（SeedOK=false）时
-// 首个命中即胜出; 有种子时并列不升级。
-func TestRecoverAnchorPickSeedGate(t *testing.T) {
-	boundary := time.Now()
-	pick, _ := scriptPick([]pickStep{{98_000, -1000}})
-
-	// 无种子: 首条命中直接送出
-	got := drain(t, RecoverAnchor(context.Background(), fetchNil(), pick, boundary,
-		boundary.Add(5*time.Minute), opts()), 2*time.Second)
-	if len(got) != 1 || got[0].PickMs != -1000 {
-		t.Fatalf("无种子时应采纳首条命中: %+v", got)
-	}
-
-	// 种子 = −1000（与 pick 并列）: 不升级
-	o := opts()
-	o.SeedPickMs, o.SeedOK = -1000, true
-	if got := drain(t, RecoverAnchor(context.Background(), fetchNil(), pick, boundary,
-		boundary.Add(5*time.Minute), o), 2*time.Second); len(got) != 0 {
-		t.Fatalf("并列不应升级: %+v", got)
-	}
-
-	// 种子 = −1000 但符号相反（+1000）: |偏移| 并列, 同样不升级
-	o.SeedPickMs = 1000
-	if got := drain(t, RecoverAnchor(context.Background(), fetchNil(), pick, boundary,
-		boundary.Add(5*time.Minute), o), 2*time.Second); len(got) != 0 {
-		t.Fatalf("并列（异号）不应升级: %+v", got)
-	}
-}
-
-// TestRecoverAnchorPickTolPassedThrough 容差原样透传给取数器（容差判定在
-// TwapAdapter.PushNearest 内, 此处只保证不被改写）。
-func TestRecoverAnchorPickTolPassedThrough(t *testing.T) {
-	boundary := time.Now()
-	pick, tols := scriptPick([]pickStep{{98_000, -1000}})
-	o := opts()
-	o.PickTol = 150 * time.Millisecond // 取一个与默认/节拍都不重合的值
-	drain(t, RecoverAnchor(context.Background(), fetchNil(), pick, boundary,
-		boundary.Add(5*time.Minute), o), 2*time.Second)
-
-	if len(*tols) == 0 || (*tols)[0] != 150*time.Millisecond {
-		t.Fatalf("容差未透传: %v", *tols)
-	}
-}
-
 // TestRecoverAnchorContextCancel 窗口收尾取消 ctx → 立即关通道、不 panic、
-// 不再发官方请求（首个点已失败, 后点未到）。
+// 不再发起后续取数（首个官方点已失败, 后点未到）。
 func TestRecoverAnchorContextCancel(t *testing.T) {
 	boundary := time.Now()
 	fetch, calls := seqFetch(0)
+	pick, pickCalls := scriptPick(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go func() {
@@ -307,46 +306,33 @@ func TestRecoverAnchorContextCancel(t *testing.T) {
 	}()
 	var got []AnchorRecovery
 	waitMs(t, 0, 500*time.Millisecond, func() {
-		got = drain(t, RecoverAnchor(ctx, fetch, nopPick, boundary,
+		got = drain(t, RecoverAnchor(ctx, fetch, pick, boundary,
 			boundary.Add(5*time.Minute), opts(2*time.Millisecond, time.Hour)), time.Second)
 	})
 	if len(got) != 0 {
 		t.Fatalf("取消前不应有结果: %+v", got)
 	}
 	if n := len(*calls); n != 1 {
-		t.Fatalf("取消前只应发出首个点的请求, 得到 %d", n)
+		t.Fatalf("取消前只应发出首个点的官方请求, 得到 %d", n)
+	}
+	// 精确取锚在预算内每秒(2ms)一直未命中, 取消即停（远小于预算 40 次）
+	if n := len(*pickCalls); n >= anchorRetryAttempts {
+		t.Fatalf("ctx 取消应立即停取, 取数次数 = %d", n)
 	}
 }
 
-// TestRecoverAnchorNilFetch 未配 fetcher（nil）不 panic: 按失败处理，通道照样关闭。
+// TestRecoverAnchorNilFetch 未配 fetcher（nil）不 panic: 精确取锚照常工作, 通道照常关闭。
 func TestRecoverAnchorNilFetch(t *testing.T) {
 	boundary := time.Now()
+	pick, _ := scriptPick([]pickStep{{price: 98_500, arrivedMs: boundary.UnixMilli()}})
 	waitMs(t, 0, 500*time.Millisecond, func() {
-		drain(t, RecoverAnchor(context.Background(), nil, nopPick, boundary,
+		got := drain(t, RecoverAnchor(context.Background(), nil, pick, boundary,
 			boundary.Add(5*time.Minute), opts(5*time.Millisecond)), time.Second)
+		if len(got) != 1 {
+			t.Fatalf("nil fetcher 不应影响精确取锚: %+v", got)
+		}
 	})
 }
-
-// TestRecoverAnchorHardStop 空 Schedule 也必须终止（硬停 = 边界 + 容差 + 2×节拍）:
-// 防「无官方点 → 循环永不退出」的 goroutine 泄漏。
-func TestRecoverAnchorHardStop(t *testing.T) {
-	boundary := time.Now()
-	o := opts() // Schedule 为空
-	o.PickTol = 20 * time.Millisecond
-	el := waitMs(t, 15*time.Millisecond, time.Second, func() {
-		drain(t, RecoverAnchor(context.Background(), fetchNil(), nopPick, boundary,
-			boundary.Add(5*time.Minute), o), time.Second)
-	})
-	if el > 200*time.Millisecond {
-		t.Fatalf("空 Schedule 应立即硬停, 实际 %v", el)
-	}
-}
-
-// fetchNil 返回 nil fetcher（配合空 Schedule 用: 有 Schedule 才会调它）。
-func fetchNil() OpenPriceFetcher { return nil }
-
-// msAgo 返回 d 之前的 unix 毫秒（保留给时间戳类断言用）。
-func msAgo(d time.Duration) int64 { return time.Now().Add(-d).UnixMilli() }
 
 // waitMs 断言 f 的耗时落在 [lo, hi]（执行越界即节奏错）。
 func waitMs(t *testing.T, lo, hi time.Duration, f func()) time.Duration {

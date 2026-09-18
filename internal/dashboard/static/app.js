@@ -199,9 +199,10 @@
       var lost = ws.lost_triggers || [];
       var lEl = $('whLost');
       if (ws.anchor_missing) {
-        // 锚缺失: 窗口内正在走恢复通道（官方开盘价 3×20s + 边界窄窗口推送直采），
-        // 恢复成功即转为正常判定并清标记（见 flip.Engine.SetAnchor）
-        lEl.textContent = '锚缺失（恢复中），本窗暂不观测';
+        // 锚待精确命中: 窗口起 0~20s 内取锚通道在等「评估时刻 == 边界」的那条推送
+        // （实测 p50 边界后 +2.0s 到达; 命中即转为正常判定并清标记, 取不到则本窗不产出
+        // 观测）。每窗开头都会短暂出现, **不是异常**。
+        lEl.textContent = '锚待精确命中（边界推送 p50 +2.0s 到达），本窗判定暂缓';
         lEl.className = 'lost warn';
       } else if (lost.length === 0) {
         lEl.textContent = '丢信号 0';

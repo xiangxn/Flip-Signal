@@ -64,27 +64,34 @@
   主因仍是触底时点后移（`rem_low` 占比升高）；24U 线在纸面 14 天回放里 Δ+64.9U 且 4 次
   触发全落在亏损日、10 个盈利日零误伤。
 - 🧭 **2026-09-16 追加：锚缺失恢复**（`docs/dog020_anchor_recovery_2026-09-16.md`）——
-  ⚠️ **取值口径已被 09-18 的锚升级取代（见下条 / 决策 #14）**，其锚缺失成因/镜像红线/
-  频率实测/σ 冷启动部分仍有效。边界采样不到 TWAP-60 流值时不再直接丢整窗：官方
+  ⚠️ **取值口径已被 09-18 升级、再被 09-19 精确取锚取代（见下两条 / 决策 #14、#15）**，
+  其锚缺失成因/镜像红线/频率实测/σ 冷启动部分仍有效。边界采样不到 TWAP-60 流值时不再直接丢整窗：官方
   `FetchOpenPrice` 重试 3 次 × 20s + 边界 ±10s 内推送直采（`feed.RecoverAnchor`），
   恢复期 tick 照常占槽只闸触发判定，3 次失败才整窗不观测。**是保险不是频率修复**——
   paper 12 天里锚缺失槽位占比 ≤0.57% 且全落在 ≥10min 断档内（= 上界，真实值待 winstats
   区分），09-15 频率缺口归因仍是 `rem_low` 后移。实测口径差：官方 open vs 边界流值
   p50 0.056bps（≈0.006σ），而迟到 30s 的推送 p90 达 0.41σ（10s 宽限的取值依据）。
-- 🧭 **2026-09-18 追加：锚升级（口径修正，取代上条的取值口径）**
-  （`docs/dog020_anchor_upgrade_2026-09-18.md`）。锚 = 结算线，必须对齐**官方那一秒**：
-  官方 `openPrice` 就是「边界那一秒」的推送值（3753 窗里 1717 窗逐位相等，该推送到达
-  p50 +1.64s），而 t=0 的 `Latest()` 是**最新到达**的一条 → 实际拿到「边界前一秒」的值，
-  与官方差 p90 0.24bps、|差|>0.5bps 占 7.3%。改为：推送**缓存 100 条**按**评估时刻**
-  重选（+1s 起每秒，偏移严格变小才升级）+ 官方 open 在 **+2/+5/+10/+20/+40s** 轮询，
-  **每窗都跑**（不再是「锚缺失才起」）；官方全失败 → 流值锚照常判定，
-  连初值都没有 → 本窗不观测。**当日追加实测**：官方 `openPrice` 头几十秒是**未收敛的
-  临时值**（+6.9s≠+33s；17 窗配对 13/17 不等, |差| p90 1.18bps ≈ 9.5 美元，比要修的
-  t=0 误差还大），而**对齐推送与收敛官方只差 3 厘美元**——故只有 **+40s 收敛点**那次作
-  权威覆盖，更早的采样只在无流值锚时兜底（改掉了当日早些时候的「官方首次成功即终局」）。
-  **不是 P&L 杠杆**（625 条信号换锚后掉出 11/新增 9 ≈ 中性），
-  是口径正确 + 锚缺失窗不再白丢 + 锚偏差首次逐窗落盘（`anchor_init`/`anchor_pick_ms`/
-  `anchor_src=official|stream`）。见决策 #14。
+- 🧭 **2026-09-18 追加：锚升级**（`docs/dog020_anchor_upgrade_2026-09-18.md`）——
+  ⚠️ **取值口径已被 09-19 的精确取锚取代（见下条 / 决策 #15）**，其「官方 open 收敛实测」
+  与「对齐推送 == 收敛官方」的证据仍是今天口径的直接依据。简史：锚 = 结算线，必须对齐
+  **官方那一秒**——官方 `openPrice` 就是「边界那一秒」的推送值（3753 窗里 1717 窗逐位
+  相等），而 t=0 的 `Latest()` 是**最新到达**的一条 → 实际拿到「边界前一秒」的值，与官方
+  差 p90 0.24bps。09-18 的做法是「缓存 100 条按评估时刻重选 + 官方 open 在
+  +2/+5/+10/+20/+40s 轮询、只有 +40s 收敛点那次作权威覆盖」；当日实测：官方 `openPrice`
+  头几十秒是**未收敛的临时值**（+6.9s≠+33s；17 窗配对 13/17 不等, |差| p90 1.18bps ≈
+  9.5 美元，比要修的 t=0 误差还大），而**对齐推送与收敛官方只差 3 厘美元**。
+  **不是 P&L 杠杆**（625 条信号换锚后掉出 11/新增 9 ≈ 中性）。
+- 🧭 **2026-09-19 追加：锚 = 边界那一秒的推送（精确取锚，取代上条的取值口径）**
+  （`docs/dog020_anchor_exact_open_2026-09-19.md`）。既然「评估时刻 == 边界」的那条推送
+  就是官方 open（8/8 窗逐位相同），就只留精确那一条：`PushNearest` **精确等值匹配**（删
+  容差/删「取最近」），取锚通道按 **500ms × 40 = 20s** 重试（该推送到达 p50 **+2.0s**、
+  观测到最晚 +12.1s），命中即终局；窗口开局 **`BeginWindow(0, 0)` 不设过渡锚**——锚未到手
+  期间 tick 照常占槽、`lost_triggers(anchor_pending)` 留痕、只闸住触发判定，**20s 取不到
+  则本窗不产出观测**（宁可丢窗也不拿近似锚判定）；官方 HTTP 路径**休眠**（+40s 才收敛，
+  本窗机会早过；工具代码保留可随时接回）。winstats 改 `anchor_exact` + `anchor_recovered_ms`
+  （改为该推送**本地到达时刻**距边界 = 发布延迟的无偏观测），删 `anchor_init`/`anchor_pick_ms`。
+  历史 625 笔里最早信号 `rem=295`（边界后 5s）⇒ 正常路径（+2s 到手）**零损失**。
+  见决策 #15。
 - 已证伪：flip「自信崩溃」家族（v3，分支 v3 保留）、v1/v2 follow/wait 族、0.2 深度
   全市场扫、双层版单独 TWAP 腿等——历史分析/代码在 git 其他分支可查。
 
@@ -118,19 +125,19 @@ FlipSignal/
 │   │   ├── exec_state.go             # ExecState 编排: 风控闸（两模式共用）→ paper 单步 / live submitting 两阶段 → 统一 Execute
 │   │   ├── recorder.go               # JSONL 观测记录 + windows_* 窗口振幅日志 + winstats_* 健康度（按日切分）+ P&L 回填
 │   │   ├── risk.go                   # CanTrade 日亏熔断判定（纯函数; 锁存在 exec_state.breakerTripped）
-│   │   ├── sigma.go                  # HistState（σ 滚动窗）+ RecentBlock 截断纯函数 + AnchorUsableAtBoundary
+│   │   ├── sigma.go                  # HistState（σ 滚动窗）+ RecentBlock 截断纯函数
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
-│   │   └── *_test.go                 # engine/recorder/exec_state/risk/anchor/preheat + mirrorcheck 镜像回归
+│   │   └── *_test.go                 # engine/recorder/exec_state/risk/latency/preheat/winstats + mirrorcheck 镜像回归
 │   ├── dashboard/
 │   │   ├── server.go                 # HTTP server（go:embed static/）
 │   │   ├── handlers.go               # /api/state, /api/observations, /api/signals, /api/config
 │   │   ├── state.go                  # 运行时组件引用
 │   │   └── static/                   # index.html, app.js, style.css（兼容手机浏览器）
 │   ├── feed/
-│   │   ├── anchor_recover.go         # 锚升级通道（官方 open 间隔轮询 + 推送缓存按评估时刻重选；HTTP 取数下沉于此）
+│   │   ├── anchor_recover.go         # 取锚通道（精确命中边界那一秒的推送, 500ms×40 重试；官方 open HTTP 段保留但休眠）
 │   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
 │   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
-│   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest
+│   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest(精确)/CacheStat
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 构造注入）
 │       ├── live_executor.go          # LiveExecutor 真实 FAK 下单（实现 flip.Executor, 唯一 POST 点）
 │       └── resolution_poller.go      # 官方结算轮询（gamma umaResolutionStatus）
@@ -159,7 +166,8 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
    │ (UP/DOWN books)│       │ (anchor/σ)   │          │ (浅洞腿输入)      │
    └──────┬──────┘          └──────┬───────┘          └───────┬──────────┘
           ▼                        ▼                          ▼
-    UP/DOWN 盘口 1s     边界 TWAP 值 + 推送缓存      最后价 + 本地接收龄(>2s 判 stale)
+    UP/DOWN 盘口 1s     推送缓存(精确取边界那一秒)      最后价 + 本地接收龄(>2s 判 stale)
+                        + 窗末 close + σ 预热
           │                        │                          │
           └──────────────┬─────────┴──────────┬───────────────┘
                          ▼
@@ -184,20 +192,21 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
 ```
 1. 计算下个 5分钟对齐时间戳；预取 gamma 市场信息（边界前 20s）
 2. 边界对齐 → 准入闸（σ < `flip.HistMin` 窗即整窗跳过 `skip=no_sigma`，决策 #13）
-   → 注入窗口上下文（anchor=t=0 采样值、σ）→ 订阅 UP/DOWN token
-   → **并行起锚升级通道**（每窗都起；决策 #14）
+   → 注入窗口上下文（**anchor=0、σ=0，不设过渡锚**）→ 订阅 UP/DOWN token
+   → **并行起取锚通道**（每窗都起；决策 #15）
 3. 每秒 1s tick：读 UP/DOWN 盘口 + Binance spot + TWAP → ProcessTick(状态机)
-   （升级通道同时每秒按**评估时刻**从推送缓存重选锚、并在 +2/+5/+10/+20/+40s 轮询官方
-   open，拿到更可信值即 `UpgradeAnchor` 回填；产出观测后冻结。官方全失败 → 沿用流值锚；
-   连 t=0 初值都没有且全窗无可用值 → 本窗不产出观测，见决策 #14）
+   （取锚通道同时**精确**`PushNearest` 命中「评估时刻 == 边界」的那条推送——立即试一次后
+   每 500ms 一次、最多 40 次 = 20s，命中即 `UpgradeAnchor(price, σ)` 回填并关通道；
+   锚未到手期间 tick 照常占槽、`lost_triggers(anchor_pending)` 留痕、只闸住触发判定。
+   20s 未命中 → 本窗不产出观测、不计入 σ，见决策 #15）
 4. 首个触底 tick（ask≤0.20）→ 四腿判定 → 观测落盘（ok 与失败都记，即时落盘）
 5. ok 信号 → 风控闸（live 命中拦 POST 记 rejected；paper 命中记 gate_reason 照常结算）
    → PaperExecutor 执行 → Register 结算轮询（窗口内完成，无窗末补判）
-6. 窗口结束（rem=0）→ 收尾升级通道（cancel + join）→ |close−anchor| 追加进 σ 滚动窗
+6. 窗口结束（rem=0）→ 收尾取锚通道（cancel + join）→ |close−anchor| 追加进 σ 滚动窗
    并落盘 windows_*.jsonl（重启 σ 预热本地优先：windows_* 新鲜即毫秒级恢复，
    不足/过旧回退官方网络预热 FetchTwapRanges——停机期窗口只有官方能取）；
    同刻本窗 tick 健康度落盘 winstats_*.jsonl（含被延迟闸挡掉的丢信号明细与
-   锚初值/来源/评估偏移/升级时刻）→ 下一窗口
+   锚命中/来源/到达延迟）→ 下一窗口
 ```
 
 ### 引擎状态机
@@ -208,13 +217,13 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
    └────────── 窗口结束(rem==0) ◀───────────┘
 ```
 
-- **Watching**: 1s tick 更新两侧状态；锚未就绪窗口（anchor≤0，恢复通道可能稍后
-  SetAnchor 回填）**照常占槽计数、只闸住触发判定**——恢复成功即转正常判定，
-  始终未回填则整窗不产出观测（镜像回测 :69 锚缺失事件跳过）；有效 tick
+- **Watching**: 1s tick 更新两侧状态；锚未就绪期（**每窗开局必经历，正常 ~2s**）anchor≤0，
+  取锚通道可能稍后 `UpgradeAnchor` 回填——期间**照常占槽计数、只闸住触发判定**，
+  命中即转正常判定，始终未回填（20s 预算耗尽）则整窗不产出观测；有效 tick
   （latency≤300 且 UP/DOWN 双侧报价齐全——整簿快照门控，实测缺失为整行全空）
   上检查 up/down ask 是否 ≤0.20
 - **判定顺序**（一次完成）：rem_low → no_hist → missing_spot → no_crash → dist_out
-  （missing_anchor / no_hist 现网不可达——锚恢复通道与 σ 未就绪整窗跳过在前，
+  （missing_anchor / no_hist 现网不可达——取锚通道与 σ 未就绪整窗跳过在前，
   二者仅 decide 纯函数防线）；全过 → ok（shares = stake/fill）
 - **Done**: 事件内不再检测（与回测每事件仅首个观测一致，无 fallback 重试）；
   锚未就绪期占槽的 tick 不追溯触发，只记 lost_triggers(anchor_pending)
@@ -349,10 +358,11 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
      只覆盖两处：`OwnerKey` 清空（SDK 给占位私钥 `1111…`，会被「非空即密文」判成
      密文，且 main 以空串为「只读纸面」判据）、`RateLimit*` 复位 0（SDK 的
      3 次/500ms 会盖掉它自己的内建兜底 6 次/1000ms，≤0 才走兜底）。
-12. ⚠️ **已被决策 #14 取代（2026-09-18）**——「锚缺失才恢复」不再是独立分支，取值口径
-   与「到达龄 abs」判据都已换掉（见 #14）。本条保留作为**历史与理由**：其 §1（锚缺失
-   成因）、§5.1（镜像红线）、§6（频率实测）、§9（σ 冷启动 / 假 late）仍然有效；
-   其中「迟到 30s 的推送带 0.3-0.5σ 漂移」正是今天 `anchorPickTol` 仍取 10s 的依据。
+12. ⚠️ **已被决策 #14 / #15 相继取代（2026-09-18 / 09-19）**——「锚缺失才恢复」不再是
+   独立分支，取值口径与「到达龄 abs」判据都已换掉（见 #14/#15）。本条保留作为**历史与
+   理由**：其 §1（锚缺失成因）、§5.1（镜像红线）、§6（频率实测）、§9（σ 冷启动 / 假 late）
+   仍然有效；其中「迟到 30s 的推送带 0.3-0.5σ 漂移」是 09-18 `anchorPickTol` 取 10s 的
+   依据（已随精确匹配废除），也是今天**只用精确那一秒**的动机之一。
    原文：**锚缺失恢复：官方 3×20s 重试 + 边界窄窗口推送直采**（2026-09-16，见
    `docs/dog020_anchor_recovery_2026-09-16.md`）：边界采样不到 TWAP-60 流值时不再直接
    丢整窗——起 `feed.RecoverAnchor`（窗口级 ctx，`cmd/flip` 常量 3 次/20s/10s 超时），
@@ -387,7 +397,12 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
      **现网不可达**，`decide` 分支保留为纯函数防线。
    - 频率：全量纸面数据 3544 条观测里 `hist_bps=0` 仅 2 行（09-03 15:40Z /
      09-16 13:10Z），均为冷启动窗；修后不再新增（历史两行留在数据里，复查须知）。
-14. **锚升级：推送缓存按「评估时刻」重选 + 官方 open 间隔轮询**（2026-09-18，见
+14. ⚠️ **取值口径已被决策 #15 取代（2026-09-19）**——「`Latest()` 初值 + 按评估时刻重选
+   （容差内取最近）+ 官方 +40s 覆盖」整套已被**精确匹配那一秒**取代；`anchorPickTol`、
+   `AnchorUsableAtBoundary`、`anchor_init`/`anchor_pick_ms` 均已删除。本条保留作为
+   **历史与实测依据**：其「官方 open 头几十秒是临时值、+40s 才收敛」（p90 1.18bps ≈ 9.5
+   美元）与「对齐推送 == 收敛官方（8 窗逐位相同）」正是 #15 的直接依据。
+   ~~**锚升级：推送缓存按「评估时刻」重选 + 官方 open 间隔轮询**~~（2026-09-18，见
    `docs/dog020_anchor_upgrade_2026-09-18.md`，取代决策 #12 的取值口径）。起因：锚是
    结算线口径，而 t=0 的 `Latest()` 是**最新到达**的那条推送——服务器发布延迟 ~1.3-2.3s，
    所以它拿到的是「边界**前**一秒」的评估值。实测：官方 `openPrice` **就是边界那一秒的
@@ -426,6 +441,35 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
      是口径正确 + 锚缺失窗口不再白丢 + 「锚偏了多少」首次逐窗落盘。**σ 的 close 口径
      未改**（仍 `lastTick.TwapPrice`，到达口径）——open/close 有 ~1.5s 不对称，已知未做。
      验收红线不变：btreplay 625 笔逐位一致 + `go test ./internal/... -race` 全绿。
+15. **锚 = 边界那一秒的 TWAP 推送（精确取锚）**（2026-09-19，见
+   `docs/dog020_anchor_exact_open_2026-09-19.md`，取代决策 #14 的取值口径）。既然
+   「评估时刻 == 边界」那条推送就是官方 `openPrice`（8/8 窗逐位相同，差 ≤0.0006bps ≈
+   3 厘美元），就**只留精确那一条**，不再有近似锚、不再有官方 HTTP 覆盖：
+   - **精确匹配**：`PushNearest(windowStart)` 只认 `tsMs == windowStart.UnixMilli()`
+     （整秒格），删容差/删「取最近」；返回 `(price, arrivedMs, ok)`，`arrivedMs` 是**该条
+     推送的本地到达时刻**（发布延迟的无偏观测——用轮询时刻会被 500ms 相位虚高）；
+     重复时间戳取**后到者**。新增 `CacheStat()` 诊断快照（条数 / 最新一条评估偏移 /
+     缺时间戳条数），专供失败日志区分**服务器没发 / 我们收晚了 / 时间戳缺失**。
+   - **取锚通道**（`feed.RecoverAnchor`，每窗都起、**主循环零等待**）：① 精确段——
+     立即试一次后每 **500ms** 一次、最多 **40 次 = 20s**（该推送到达 p50 **+2.0s**、
+     实测最晚 +12.1s），**命中即终局**并关通道；② 官方段——代码原样保留但**生产休眠**
+     （`Schedule` 为空即零请求，回归测试 `TestRecoverAnchorOfficialDormant` 钉住），
+     将来允许 40s+ 延迟时在 `cmd/flip` 接回 fetcher + `Schedule` 即可。
+   - **不设过渡锚**：窗口开局 `BeginWindow(0, 0)`（不再取 `Latest()`，`Latest()` 仅剩
+     看门狗/dashboard 用途）；锚未到手期间 tick 照常占槽与计数、
+     `lost_triggers(anchor_pending)` 留痕、**只闸住触发判定**（决策 #12/#13 同原则，
+     **不加新闸**）；**20s 未命中 = 本窗不产出观测、不计入 σ**（明确取舍：宁可丢窗，
+     也不拿近似锚判定）。代价上界有硬数据：625 笔组合信号最早 `rem=295`（边界后 +5s）
+     且 `rem≥290` 仅 2 笔 ⇒ 正常路径（+2s 到手）**历史样本零损失**。
+   - **可见性**：`winstats_*` 删 `anchor_init`/`anchor_pick_ms`、增 **`anchor_exact`**
+     （**不带 `omitempty`**：false = 本窗无锚，且它是 python 侧区分 09-18/09-19 行的
+     哨兵键）；`anchor_src` 保留（官方休眠时恒 `stream`）；`anchor_recovered_ms` 语义
+     改为「该推送本地到达时刻距边界」。`stats.AnchorMissing` 语义随之变化：**每窗开头
+     都会短暂为真**，期末仍为真才是「整窗无锚」——`07_source_health_check.py` 的
+     「锚缺」列据此改判**期末**（新行看 `anchor_exact`，老行回退 `anchor_missing`）。
+   - **不是 P&L 杠杆**：btreplay 625 笔逐位一致（回测路径只喂 `BeginWindow(ev.TwapOpen,
+     σ)`，不碰 `internal/feed`）、01 四条基线不变；σ 的 close 口径仍取
+     `lastTick.TwapPrice`（**到达**口径，与 open 的评估口径有 ~1.5s 不对称，已知未做）。
 
 ---
 
@@ -463,7 +507,7 @@ go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 |------|------|------|
 | `flip.max_book_lat_ms` | 300 | PM 盘口延迟闸：`book_latency_ms` 超此值的 tick 无效（**回测 `MAX_LAT` 同值，收紧是负收益**，见 `docs/dog020_risk_latency_plan_2026-09-16.md` §1.2b） |
 | `feed.max_spot_age_ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
-| `feed.max_twap_age_ms` | 10000 | TWAP-60 新鲜度：窗口起 anchor 与窗末 close 共用，超龄按缺失处理。**与锚升级的 `anchorPickTol`(10s) 数值相同但语义无关**（评估时刻偏移 ≠ 本地到达龄），刻意不做耦合，见决策 #14 |
+| `feed.max_twap_age_ms` | 10000 | TWAP-60 新鲜度：**只**管窗末 close（锚走精确匹配，不吃到达龄），超龄按缺失处理。历史上与 `anchorPickTol`(10s) 同值但语义无关，后者已随决策 #15 废除 |
 | `risk.max_daily_loss` | **−24** | 日亏熔断线（负值）：当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存；两模式同源（paper 只标记不拦单） |
 | `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录，见启动时的 paper/live 混行告警） |
 | `runtime.slug_prefix` | `btc-updown-5m` | 市场 slug 前缀 |

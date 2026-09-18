@@ -62,7 +62,8 @@ type RuntimeConfig struct {
 type FeedConfig struct {
 	// MaxSpotAgeMs Binance spot 距本地接收超过此值判现货缺失（置 0 → missing_spot 否决）
 	MaxSpotAgeMs int64 `mapstructure:"max_spot_age_ms"`
-	// MaxTwapAgeMs Chainlink TWAP-60 新鲜度: 窗口起 anchor 与窗末 close 共用
+	// MaxTwapAgeMs Chainlink TWAP-60 新鲜度: **只**用于窗末 close 采样（2026-09-19 起
+	// 窗口起 anchor 改由 feed.RecoverAnchor 精确匹配边界那一秒的推送, 不再看到达龄）
 	MaxTwapAgeMs int64 `mapstructure:"max_twap_age_ms"`
 }
 

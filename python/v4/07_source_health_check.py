@@ -131,6 +131,19 @@ def split_gated(rows, include_gated):
 
 # ─────────────────────────── A 本窗 tick 健康度 ───────────────────────────
 
+def anchor_missing_at_end(r):
+    """本窗**结束时**是否仍无锚（= 本窗不产出观测）。
+
+    2026-09-19 起锚由取锚通道精确命中「评估时刻 == 边界」的推送后回填, 窗口内短暂的
+    「锚待命中」（每窗开头必然出现 ~2s, 实测到达 p50 +2.0s）不算缺失——故新行按
+    anchor_exact 判定（见 A2）; 09-19 之前的老行没有 anchor_exact 键, 回退
+    anchor_missing（当时它恰是「期末仍无锚」语义: 恢复通道成功即清除）。
+    """
+    if "anchor_exact" in r:
+        return not r.get("anchor_exact")
+    return bool(r.get("anchor_missing"))
+
+
 def sec_a():
     print("\n【A】本窗 tick 健康度（winstats_*.jsonl, 2026-09-16 起落盘）")
     rows = load_winstats()
@@ -142,7 +155,7 @@ def sec_a():
     for r in rows:
         by_day[r.get("date", "")].append(r)
 
-    print(f"  {'日期':<12s} {'窗':>4s} {'跳过':>4s} {'锚缺':>4s} {'ticks':>6s} "
+    print(f"  {'日期':<12s} {'窗':>4s} {'跳过':>4s} {'无锚':>4s} {'ticks':>6s} "
           f"{'有效':>6s} {'陈旧':>6s} {'缺簿':>5s} {'无效%':>6s} {'丢信号':>6s}")
     tot = Counter()
     bad_ident = 0
@@ -154,7 +167,7 @@ def sec_a():
         m = sum(r.get("book_missing", 0) for r in g)
         lost = sum(len(r.get("lost_triggers") or []) for r in g)
         skip = sum(1 for r in g if r.get("skip"))
-        amiss = sum(1 for r in g if r.get("anchor_missing"))
+        amiss = sum(1 for r in g if anchor_missing_at_end(r))
         bad_ident += sum(1 for r in g if r.get("ticks", 0) !=
                          r.get("ticks_valid", 0) + r.get("book_stale", 0) + r.get("book_missing", 0)
                          and not r.get("skip"))
@@ -170,7 +183,7 @@ def sec_a():
     print(f"  恒等式 ticks == 有效+陈旧+缺簿: {ident}")
     if tot["win"]:
         print(f"  窗覆盖: {tot['win']} 窗（{tot['win']/288:.2f} 日当量, 288 = 满覆盖）; "
-              f"跳过 {tot['skip']} / 锚缺失 {tot['amiss']}")
+              f"跳过 {tot['skip']} / 期末仍无锚 {tot['amiss']}")
 
     # 丢信号明细: stale vs missing, 以及其中"本会真成为信号"的部分（rem>180）
     lost = [t for r in rows for t in (r.get("lost_triggers") or [])]
@@ -189,50 +202,56 @@ def sec_a():
     return dict(rows=rows, tot=tot, lost=lost)
 
 
-# ─────────────────── A2 锚来源（2026-09-18 锚升级通道）───────────────────
+# ─────────────────── A2 精确取锚（2026-09-19）───────────────────
 
 def sec_a2(rows):
-    """锚来源分解: t=0 初值 vs 最终锚的位移（bps）、来源占比、评估偏移自检。
+    """精确取锚健康度: 命中率、发布延迟（到达时刻距边界）、来源分解、未命中窗清单。
 
-    只读 winstats_*.jsonl 的锚诊断字段（anchor_init/anchor_src/anchor_pick_ms,
-    2026-09-18 起落盘; docs/dog020_anchor_upgrade_2026-09-18.md）——旧行无这些字段,
-    按「无字段」计数并跳过。位移 >0.5bps 一档是 09-18 实测里「旧锚明显偏」的比例
-    （官方 open 与边界流值之差, 见该文档 §1）。
+    只读 winstats_*.jsonl 的锚诊断字段（anchor_exact/anchor_src/anchor_recovered_ms,
+    2026-09-19 起落盘; docs/dog020_anchor_exact_open_2026-09-19.md）——旧行没有
+    anchor_exact 这个键, 按「新口径行」之外计数并跳过（不能用 anchor_src 过滤:
+    09-18 的老行也带该字段）。
+
+    验收线（09-19 文档）: 命中率 ≥99%、到达 p90 ≤3s。**skip 行必须排除**——
+    被跳过的窗口（no_sigma/no_market…）本来就不取锚, 计进去会假性拉低命中率。
     """
     if not rows:
         return
-    has = [r for r in rows if "anchor_pick_ms" in r]
-    print("\n【A2】锚来源（winstats_*.jsonl, 2026-09-18 起落盘）")
+    has = [r for r in rows if "anchor_exact" in r]
+    print("\n【A2】精确取锚（winstats_*.jsonl, 2026-09-19 起落盘）")
     if not has:
-        print("  无锚诊断字段（该功能 2026-09-18 上线, 需引擎跑过至少 1 个窗口）")
-        print("  —— 用途: t=0 初值 vs 最终锚的位移、升级来源、评估偏移整千倍数自检")
+        print("  无 anchor_exact 字段（该口径 2026-09-19 上线, 需引擎跑过至少 1 个窗口）")
+        print("  —— 用途: 命中率、边界那一秒推送的到达延迟分布、未命中窗清单")
         return
+    live = [r for r in has if not r.get("skip")]   # 排除跳过窗（本就不取锚）
+    hit = [r for r in live if r.get("anchor_exact")]
+    print(f"  行数 {len(has)}（新口径 {len(live)} 行实跑 + {len(has)-len(live)} 行跳过;"
+          f" 无字段旧行 {len(rows)-len(has)}）")
+
+    if live:
+        print(f"  命中率: {len(hit)}/{len(live)} = {pct(len(hit), len(live)):.1f}%"
+              f"（验收线 ≥99%; 未命中 {len(live)-len(hit)} 窗——引擎 anchor≤0, 不产出观测）")
+    miss = [r for r in live if not r.get("anchor_exact")]
+    if miss:
+        for r in miss[:10]:
+            print(f"    ✗ {r.get('slug','')} event_start={r.get('event_start')}"
+                  f" anchor={r.get('anchor')} ticks={r.get('ticks')}")
+        if len(miss) > 10:
+            print(f"    …（其余 {len(miss)-10} 窗）")
+
     src = Counter(r.get("anchor_src") or "无锚" for r in has)
-    print(f"  行数 {len(has)}（无字段旧行 {len(rows) - len(has)}）  来源 "
+    print("  来源占比（含跳过行, 跳过行无锚属正常）: "
           + "  ".join(f"{k}={v}" for k, v in src.most_common()))
 
-    diffs, picks = [], []
-    for r in has:
-        a, i = r.get("anchor") or 0, r.get("anchor_init") or 0
-        if a > 0 and i > 0:
-            diffs.append((a - i) / i * 1e4)          # 最终锚 − t=0 初值（bps）
-        if r.get("anchor_src") == "stream":
-            picks.append(r.get("anchor_pick_ms") or 0)
-    if diffs:
-        ad = [abs(v) for v in diffs]
-        over = sum(1 for v in ad if v > 0.5)
-        print(f"  |最终锚 − t=0 初值|（有初值的窗）: p50 {pctl(ad, 50):.3f}  "
-              f"p90 {pctl(ad, 90):.3f}  p99 {pctl(ad, 99):.3f}  max {max(ad):.3f} bps"
-              f"   >0.5bps {over} 行（{pct(over, len(ad)):.1f}%）")
-        print(f"  位移方向: 下移 {sum(1 for v in diffs if v < 0)}  零 "
-              f"{sum(1 for v in diffs if v == 0)}  上移 {sum(1 for v in diffs if v > 0)}")
-    if picks:
-        odd = [v for v in picks if v % 1000 != 0]
-        note = "✅ 全部整千" if not odd else f"⚠️ {len(odd)} 行非整千（时钟漂移？）"
-        print(f"  anchor_pick_ms（流值锚评估偏移）: p10 {pctl(picks, 10):.0f}  "
-              f"p50 {pctl(picks, 50):.0f}  p90 {pctl(picks, 90):.0f} ms"
-              f"（0 = 边界那一秒的评估值, 最好档）")
-        print(f"  整千倍数自检（本地整秒边界 − 服务器评估格）: {note}")
+    lag = [r.get("anchor_recovered_ms") or 0 for r in hit]
+    if lag:
+        print(f"  到达延迟（命中窗: 该推送本地到达时刻 − 窗口边界）: "
+              f"p10 {pctl(lag, 10):.0f}  p50 {pctl(lag, 50):.0f}  p90 {pctl(lag, 90):.0f}  "
+              f"p99 {pctl(lag, 99):.0f}  max {max(lag):.0f} ms（验收线 p90 ≤3000; "
+              f"取锚预算 20s）")
+        slow = [v for v in lag if v > 5000]
+        if slow:
+            print(f"  ⚠️ >5s 的迟到窗 {len(slow)} 个（取锚照常捞回, 但窗口开头判定被闸）")
 
 
 # ─────────────────────────── B 三源龄 + spot_age 分桶 ───────────────────────────

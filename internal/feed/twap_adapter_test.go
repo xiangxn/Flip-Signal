@@ -80,7 +80,7 @@ func TestTwapAdapter_NoData(t *testing.T) {
 	}
 }
 
-// ── 推送缓存 / PushNearest（2026-09-18 锚升级通道）──
+// ── 推送缓存 / PushNearest（2026-09-19 精确取锚）──
 
 // pushEval 发一条带**评估时刻**的 TWAP-60 推送（tsMs = payload.timestamp）。
 func pushEval(ch chan<- sdk.ExternalPrice, price float64, tsMs int64) {
@@ -91,13 +91,14 @@ func pushEval(ch chan<- sdk.ExternalPrice, price float64, tsMs int64) {
 // TestPushNearest_EmptyCache 空缓存不命中。
 func TestPushNearest_EmptyCache(t *testing.T) {
 	a := NewTwapAdapterWithChannel(make(chan sdk.ExternalPrice), "BTC", 60)
-	if price, pickMs, ok := a.PushNearest(time.Now(), 10*time.Second); ok || price != 0 || pickMs != 0 {
-		t.Fatalf("空缓存应未命中, 得到 (%.2f, %d, %v)", price, pickMs, ok)
+	if price, arrivedMs, ok := a.PushNearest(time.Now()); ok || price != 0 || arrivedMs != 0 {
+		t.Fatalf("空缓存应未命中, 得到 (%.2f, %d, %v)", price, arrivedMs, ok)
 	}
 }
 
-// TestPushNearest_ExactHitAndUnit 单位钉死（毫秒）: 评估时刻恰好等于边界的条目
-// 命中且 pickMs=0——若 Timestamp 被当成秒处理, 这条永远命不中。
+// TestPushNearest_ExactHitAndUnit 精确匹配 + 单位钉死（毫秒）: 只有评估时刻**恰好
+// 等于边界**的那条命中（±1s 的两条在缓存里但不得命中）——若 Timestamp 被当成秒处理,
+// 精确条永远命不中, 而 ±1s 会被误命中。
 func TestPushNearest_ExactHitAndUnit(t *testing.T) {
 	ch := make(chan sdk.ExternalPrice, 8)
 	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
@@ -106,41 +107,31 @@ func TestPushNearest_ExactHitAndUnit(t *testing.T) {
 	a.Start(ctx)
 
 	boundary := time.Now().Truncate(time.Second)
-	pushEval(ch, 50_000, boundary.Add(-2*time.Second).UnixMilli()) // 边界前 2s（t=0 采样能看到的那条）
-	pushEval(ch, 50_010, boundary.UnixMilli())                     // 边界那一秒 = 官方 open 口径
+	t0 := time.Now().UnixMilli()
+	pushEval(ch, 50_000, boundary.Add(-time.Second).UnixMilli()) // 边界前一秒（t=0 口径能拿到的那条）
+	pushEval(ch, 50_010, boundary.UnixMilli())                   // 边界那一秒 = 官方 open 口径
 	pushEval(ch, 50_020, boundary.Add(time.Second).UnixMilli())
 	waitPrice(t, a, 50_020)
 
-	price, pickMs, ok := a.PushNearest(boundary, 10*time.Second)
-	if !ok || price != 50_010 || pickMs != 0 {
-		t.Fatalf("应命中边界那一秒, 得到 (%.2f, %d, %v)", price, pickMs, ok)
+	price, arrivedMs, ok := a.PushNearest(boundary)
+	if !ok || price != 50_010 {
+		t.Fatalf("应精确命中边界那一秒, 得到 (%.2f, %v)", price, ok)
+	}
+	if arrivedMs < t0 || arrivedMs > time.Now().UnixMilli() {
+		t.Fatalf("arrivedMs 应为本地到达时刻（%d 不在 [%d, now]）", arrivedMs, t0)
+	}
+	// ±1s 的两条各自精确匹配得到自己的值（证明不是「取最近」）
+	if p, _, ok := a.PushNearest(boundary.Add(-time.Second)); !ok || p != 50_000 {
+		t.Fatalf("边界前一秒应命中 50000, 得到 (%.2f, %v)", p, ok)
+	}
+	if p, _, ok := a.PushNearest(boundary.Add(time.Second)); !ok || p != 50_020 {
+		t.Fatalf("边界后一秒应命中 50020, 得到 (%.2f, %v)", p, ok)
 	}
 }
 
-// TestPushNearest_SelectsByEvalNotArrival 选条按**评估时刻**而非到达时刻:
-// 刚到达但评估时刻在边界前 5s 的推送, 在 2s 容差下未命中（按到达口径会命中）。
-func TestPushNearest_SelectsByEvalNotArrival(t *testing.T) {
-	ch := make(chan sdk.ExternalPrice, 4)
-	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	a.Start(ctx)
-
-	boundary := time.Now().Truncate(time.Second)
-	pushEval(ch, 50_000, boundary.Add(-5*time.Second).UnixMilli()) // 刚到达, 但评估在边界前 5s
-	waitPrice(t, a, 50_000)
-
-	if _, pickMs, ok := a.PushNearest(boundary, 2*time.Second); ok {
-		t.Fatalf("超容差不得命中, 得到 pickMs=%d", pickMs)
-	}
-	price, pickMs, ok := a.PushNearest(boundary, 6*time.Second)
-	if !ok || price != 50_000 || pickMs != -5000 {
-		t.Fatalf("放宽容差应命中并给出负偏移, 得到 (%.2f, %d, %v)", price, pickMs, ok)
-	}
-}
-
-// TestPushNearest_TieBreakLaterArrival |评估偏移| 并列时取后到者（重连补发的确定化）。
-func TestPushNearest_TieBreakLaterArrival(t *testing.T) {
+// TestPushNearest_NoApproximation 缓存里没有边界那一秒的条目时**不命中**（哪怕
+// 边界前后都有条目）: 精确取锚宁可让调用方继续重试, 也不拿近似值充数。
+func TestPushNearest_NoApproximation(t *testing.T) {
 	ch := make(chan sdk.ExternalPrice, 4)
 	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
 	ctx, cancel := context.WithCancel(context.Background())
@@ -149,12 +140,32 @@ func TestPushNearest_TieBreakLaterArrival(t *testing.T) {
 
 	boundary := time.Now().Truncate(time.Second)
 	pushEval(ch, 50_000, boundary.Add(-time.Second).UnixMilli())
-	pushEval(ch, 50_100, boundary.Add(time.Second).UnixMilli()) // 与上一条 |偏移| 并列, 后到
+	pushEval(ch, 50_020, boundary.Add(time.Second).UnixMilli())
+	waitPrice(t, a, 50_020)
+
+	if price, _, ok := a.PushNearest(boundary); ok {
+		t.Fatalf("不得用近似条目充数, 得到 (%.2f, %v)", price, ok)
+	}
+}
+
+// TestPushNearest_TieBreakLaterArrival 同一评估时刻出现多条（重连补发/乱序重放）
+// 时取**后到者**: 结果钉死为确定值。
+func TestPushNearest_TieBreakLaterArrival(t *testing.T) {
+	ch := make(chan sdk.ExternalPrice, 4)
+	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.Start(ctx)
+
+	boundary := time.Now().Truncate(time.Second)
+	ts := boundary.UnixMilli()
+	pushEval(ch, 50_000, ts)
+	pushEval(ch, 50_100, ts) // 同一评估时刻, 后到 → 应胜出
 	waitPrice(t, a, 50_100)
 
-	price, pickMs, ok := a.PushNearest(boundary, 10*time.Second)
-	if !ok || price != 50_100 || pickMs != 1000 {
-		t.Fatalf("并列应取后到者, 得到 (%.2f, %d, %v)", price, pickMs, ok)
+	price, _, ok := a.PushNearest(boundary)
+	if !ok || price != 50_100 {
+		t.Fatalf("重复评估时刻应取后到者, 得到 (%.2f, %v)", price, ok)
 	}
 }
 
@@ -172,37 +183,61 @@ func TestPushNearest_NonPositiveNotCached(t *testing.T) {
 	pushEval(ch, -1, boundary.Add(time.Second).UnixMilli())
 	time.Sleep(100 * time.Millisecond) // 等消费（Latest 不更新, 无可轮询的目标）
 
-	if price, pickMs, ok := a.PushNearest(boundary, 10*time.Second); !ok || price != 50_000 || pickMs != -3000 {
-		t.Fatalf("非正价格应被丢弃, 得到 (%.2f, %d, %v)", price, pickMs, ok)
+	if price, _, ok := a.PushNearest(boundary); ok || price != 0 {
+		t.Fatalf("非正价格应被丢弃, 得到 (%.2f, %v)", price, ok)
 	}
 	if p, _ := a.Latest(); p != 50_000 {
 		t.Fatalf("非正价格不应刷新 Latest: %.2f", p)
 	}
 }
 
-// TestPushNearest_MissingTimestampFallback 缺 payload.timestamp 时按本地到达兜底
-// （唯一静默失败模式, 必须有兜底而非丢条）。
-func TestPushNearest_MissingTimestampFallback(t *testing.T) {
+// TestPushNearest_MissingTimestampNotCached 缺 payload.timestamp 的条目不进缓存
+// （按到达时刻兜底的条目在精确口径下永远命不中, 留着只会污染 CacheStat 诊断）,
+// 但 Latest 照常刷新——它是看门狗/dashboard 的输入, 与锚无关。
+func TestPushNearest_MissingTimestampNotCached(t *testing.T) {
 	ch := make(chan sdk.ExternalPrice, 4)
 	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	a.Start(ctx)
 
-	boundary := time.Now()
+	boundary := time.Now().Truncate(time.Second)
 	pushEval(ch, 50_000, 0) // 无评估时刻
 	waitPrice(t, a, 50_000)
 
-	price, pickMs, ok := a.PushNearest(boundary, 5*time.Second)
-	if !ok || price != 50_000 {
-		t.Fatalf("缺时间戳应兜底命中, 得到 (%.2f, %d, %v)", price, pickMs, ok)
+	if price, _, ok := a.PushNearest(boundary); ok {
+		t.Fatalf("缺时间戳的条目不应入缓存, 得到 (%.2f, %v)", price, ok)
 	}
-	if pickMs < -1000 || pickMs > 5000 {
-		t.Fatalf("兜底偏移应贴近 0（本地到达）, 得到 %d", pickMs)
+	if n, _, noTs := a.CacheStat(); n != 0 || noTs != 1 {
+		t.Fatalf("CacheStat 应为 (0 条, 1 条缺时间戳), 得到 (%d, %d)", n, noTs)
 	}
 }
 
-// TestPushNearest_RingCap 缓存按容量淘汰最老条目（twapPushCap 条之外不可见）。
+// TestCacheStat 诊断快照: 条目数 + 最新一条的评估偏移（负值 = 评估在过去）。
+func TestCacheStat(t *testing.T) {
+	ch := make(chan sdk.ExternalPrice, 4)
+	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	a.Start(ctx)
+
+	now := time.Now().Truncate(time.Second)
+	pushEval(ch, 50_000, now.Add(-3*time.Second).UnixMilli())
+	pushEval(ch, 50_010, now.Add(-time.Second).UnixMilli())
+	waitPrice(t, a, 50_010)
+
+	n, off, noTs := a.CacheStat()
+	if n != 2 || noTs != 0 {
+		t.Fatalf("CacheStat 条目数/缺时间戳数错: (%d, %d)", n, noTs)
+	}
+	// 最新一条评估于边界 −1s，now 距它应落在 [−1000, +4000]ms（机器慢时放宽）
+	if off > -500 || off < -4000 {
+		t.Fatalf("最新评估偏移应在 −1s 附近, 得到 %+dms", off)
+	}
+}
+
+// TestPushNearest_RingCap 缓存按容量淘汰最老条目: 被挤出的边界条目再也取不回
+// （故 twapPushCap 必须覆盖取锚重试预算, 见其注释）。
 func TestPushNearest_RingCap(t *testing.T) {
 	ch := make(chan sdk.ExternalPrice, twapPushCap+8)
 	a := NewTwapAdapterWithChannel(ch, "BTC", 60)
@@ -211,20 +246,17 @@ func TestPushNearest_RingCap(t *testing.T) {
 	a.Start(ctx)
 
 	boundary := time.Now().Truncate(time.Second)
-	// 第一条评估时刻最贴边界（最该被选中）, 随后灌满容量把它挤出去
-	pushEval(ch, 11_111, boundary.UnixMilli())
+	pushEval(ch, 11_111, boundary.UnixMilli()) // 边界那一秒, 随后灌满容量把它挤出去
 	for i := 1; i <= twapPushCap; i++ {
 		pushEval(ch, 50_000+float64(i), boundary.Add(time.Duration(i)*time.Second).UnixMilli())
 	}
 	waitPrice(t, a, 50_000+float64(twapPushCap))
 
-	price, _, ok := a.PushNearest(boundary, time.Hour)
-	if !ok || price == 11_111 {
-		t.Fatalf("最老条目应被淘汰, 得到 (%.2f, %v)", price, ok)
+	if price, _, ok := a.PushNearest(boundary); ok {
+		t.Fatalf("被挤出的边界条目不应再命中, 得到 (%.2f, %v)", price, ok)
 	}
-	// 环内最老者 = 第 2 条（评估 +1s）
-	if price != 50_001 {
-		t.Fatalf("应选中环内最贴边界的存活条目, 得到 %.2f", price)
+	if n, _, _ := a.CacheStat(); n != twapPushCap {
+		t.Fatalf("缓存应恰为容量 %d 条, 得到 %d", twapPushCap, n)
 	}
 }
 
@@ -243,10 +275,10 @@ func TestPushNearest_SwapIsolation(t *testing.T) {
 
 	a.Swap(ch2)
 	pushEval(ch1, 99_999, boundary.UnixMilli()) // 旧通道: 应被忽略
-	pushEval(ch2, 50_100, boundary.Add(time.Second).UnixMilli())
+	pushEval(ch2, 50_100, boundary.UnixMilli())
 	waitPrice(t, a, 50_100)
 
-	if price, _, ok := a.PushNearest(boundary, time.Hour); !ok || price == 99_999 {
+	if price, _, ok := a.PushNearest(boundary); !ok || price != 50_100 {
 		t.Fatalf("旧通道推送不应入环, 得到 (%.2f, %v)", price, ok)
 	}
 }

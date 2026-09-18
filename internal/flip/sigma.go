@@ -83,11 +83,8 @@ func RecentBlock(wins []WindowEntry, gapMs int64) []WindowEntry {
 	return wins
 }
 
-// AnchorUsableAtBoundary 判定窗口边界 anchor 采样是否可用: TWAP 尚未收到推送
-// （price≤0）或推送陈旧（龄 > freshMs——阈值由调用方传入: cmd/flip 与窗口结束
-// σ 采样共用 feed.max_twap_age_ms，正常推送龄 p99≈1.7s，10s 余量充足）判不可用。
-// 不可用时调用方把 anchor 置 0 → 引擎按锚缺失整窗跳过（镜像回测 :69），
-// σ 亦不计入（既有 anchor≤0 分支，零额外路径）。
-func AnchorUsableAtBoundary(price float64, ageMs, freshMs int64) bool {
-	return price > 0 && ageMs <= freshMs
-}
+// 窗口边界锚的可用性判定（原 AnchorUsableAtBoundary: anchor 由 `Latest()` 采样 +
+// 到达龄闸）已随「精确取锚」于 2026-09-19 删除——锚不再取近似值, 而是由
+// feed.RecoverAnchor 精确匹配边界那一秒的推送（详见
+// docs/dog020_anchor_exact_open_2026-09-19.md）; 取不到则 anchor 恒 0 走引擎既有的
+// anchor≤0 路径（只占槽、闸住触发判定、不产出观测）。

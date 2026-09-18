@@ -47,9 +47,10 @@ type LostTrigger struct {
 // 只计数、不参与任何判定——btreplay 与 01_backtest_r1.py 逐位对账是红线，
 // 计数器禁止触碰 pushSlots / decide 的任何分支走向。
 type WindowStats struct {
-	// AnchorMissing 锚缺失: 本窗**结束时**锚仍未就绪（整窗不观测，镜像回测锚缺失
-	// 事件跳过）。窗口内恢复通道回填锚后清除——恢复前占槽的 tick 照常计数，
-	// 故本标记与非 0 计数可同时出现（见 ProcessTick 锚未就绪分支）。
+	// AnchorMissing 锚未就绪: 窗口内出现过「锚 ≤0」的 tick。2026-09-19 起锚由取锚
+	// 通道精确命中后回填（每窗开头 0~20s 都会短暂为真, 命中即清除），**不是异常**;
+	// 本窗结束时仍为真 = 整窗未取到锚（不产出观测, 镜像回测锚缺失事件跳过）。
+	// 未就绪期占槽的 tick 照常计数, 故本标记与非 0 计数可同时出现。
 	AnchorMissing bool `json:"anchor_missing,omitempty"`
 	// Ticks 进入有效性分类的 tick 数（不含 rem==0 终 tick、不含 Done 后的 tick）。
 	Ticks int `json:"ticks"`
@@ -107,8 +108,9 @@ func NewEngine(cfg Config) *Engine {
 }
 
 // BeginWindow 重置引擎并注入窗口上下文（窗口起点瞬间采样）：
-// anchor 为开盘 Chainlink TWAP-60 值、histBps 为该时刻可用的 σ（bps），≤0 表示不可用
-// （初值不够准时可由 UpgradeAnchor 在窗口内升级/回填）。
+// anchor 为开盘 Chainlink TWAP-60 值、histBps 为该时刻可用的 σ（bps），≤0 表示尚不可用
+// ——2026-09-19 起 cmd/flip 恒以 (0, 0) 开局（不设过渡锚），锚一律由 UpgradeAnchor
+// 在窗口内精确命中后注入。
 func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -120,19 +122,20 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.stats = WindowStats{} // 本窗健康度重新计数（LostTriggers 底层数组一并丢弃）
 }
 
-// UpgradeAnchor 把本窗锚升级到更可信来源（推送缓存重选 / 官方开盘价），返回是否被采纳。
+// UpgradeAnchor 注入/升级本窗锚（2026-09-19 起是**唯一**的取锚路径: 窗口开局 anchor=0,
+// 由取锚通道精确命中边界那一秒的推送后回填），返回是否被采纳。
 //
-// 相对「窗口级常量锚」的唯一让步: 锚在**产出观测前**可变（2026-09-18 锚升级通道，
-// 见 docs/dog020_anchor_upgrade_2026-09-18.md）。判定入口即冻结——state != Watching
+// 相对「窗口级常量锚」的唯一让步: 锚在**产出观测前**可变（见
+// docs/dog020_anchor_exact_open_2026-09-19.md）。判定入口即冻结——state != Watching
 // 覆盖两种 Done（产出观测、rem==0 终 tick），已落盘的观测行不可追溯改写，其后到达
 // 的新值一律丢弃并返回 false。
 //
 // anchor 与 histBps 必须同源（histBps = 调用方用同一个 anchor 算出的 σ）: dist_s 的
 // 分子是锚、分母是 σ，只换其一会让本窗判定基准自相矛盾。
 //
-// 升级**不追溯**升级前的触底（那些 tick 判定用的还是旧锚；与「无效 tick 不触发」同构）。
-// 锚缺失窗口（anchor ≤ 0）首次升级后本窗恢复判定能力——语义同原 SetAnchor: 升级前
-// 占槽的 tick 仍在 ring 中，故 crash 腿看到的仍是完整真实盘口历史。
+// 注入**不追溯**注入前的触底（那些 tick 锚未就绪、根本没做判定；与「无效 tick 不触发」同构）。
+// 锚未就绪窗口（anchor ≤ 0）首次注入后本窗恢复判定能力: 注入前占槽的 tick 仍在 ring 中，
+// 故 crash 腿看到的仍是完整真实盘口历史。
 func (e *Engine) UpgradeAnchor(anchor, histBps float64) bool {
 	if !(anchor > 0) {
 		return false
@@ -186,10 +189,10 @@ func (e *Engine) ProcessTick(t Tick) *Observation {
 		return nil
 	}
 
-	// 锚未就绪（边界采样缺失/陈旧，恢复通道可能稍后回填）：本 tick 照常占槽与
-	// 计数（无效 tick 仍压 0 占槽），只是不做触发判定——dist_s 无锚无法计算，
-	// 强判即失真。占槽保证锚回填后 crash 腿 m_45 看到的是完整真实盘口历史
-	// （回测里锚恒可用，此处对齐）；恢复前的触底不追溯，只留痕
+	// 锚未就绪（取锚通道尚未命中边界那一秒的推送，通常窗口起 +2s 内到）：本 tick
+	// 照常占槽与计数（无效 tick 仍压 0 占槽），只是不做触发判定——dist_s 无锚无法
+	// 计算，强判即失真。占槽保证锚注入后 crash 腿 m_45 看到的是完整真实盘口历史
+	// （回测里锚恒可用，此处对齐）；注入前的触底不追溯，只留痕
 	// （lost_triggers.anchor_pending）。
 	anchorPending := e.anchor <= 0
 	if anchorPending {

@@ -37,7 +37,7 @@ type TwapAdapter struct {
 	price        float64
 	lastUpdateAt int64      // 最近一次有效推送的本地到达时间（unix 毫秒）
 	pushes       []twapPush // 推送环形缓存（见 twapPushCap / PushNearest）
-	tsFallback   bool       // 已有条目因缺 payload.timestamp 回退到本地到达时刻（日志只打一次）
+	tsDropped    int        // 因缺 payload.timestamp 而不入缓存的推送数（告警只打一次, 计数供 CacheStat 诊断）
 
 	updates <-chan sdk.ExternalPrice        // 当前推送通道（consume goroutine 内热替换）
 	swapCh  chan (<-chan sdk.ExternalPrice) // 热替换通道（括号防 <-chan 歧义解析）
@@ -56,21 +56,22 @@ type twapLifecycle struct {
 
 const defaultTwapCheckInterval = 15 * time.Second
 
-// twapPushCap 是推送环形缓存容量（条）。@1 条/s ≈ 100s，需覆盖锚升级通道的最晚
-// 官方尝试点（cmd/flip `anchorRefineSchedule` 末点 +40s）外加 FetchTimeout(10s)
-// 的余量——拉长 Schedule 时同步放大此值，否则边界那一秒的推送会被后面刷掉。
+// twapPushCap 是推送环形缓存容量（条）。@1 条/s ≈ 100s，需覆盖精确取锚通道的
+// 重试预算（cmd/flip `anchorExactAttempts × anchorExactInterval` = 20s）外加余量
+// ——边界那一秒的推送若晚到而缓存已把它挤出，本窗就再也取不回锚，
+// 拉长预算时同步放大此值。
 const twapPushCap = 100
 
 // twapPush 是缓存的一条 TWAP-60 推送。
 //
 // tsMs 是 `payload.timestamp` = **TWAP 评估时刻**（服务器侧 1 秒整格, unix 毫秒），
-// 与 arrivedMs（本地收到时刻）相差一个服务器发布延迟（实测 1.0~1.5s）。
-// 取值必须按 tsMs 而非 arrivedMs: 窗口边界那一秒的评估值要等 ~1.6s 才到，
+// 与 arrivedMs（本地收到时刻）相差一个服务器发布延迟（实测 p50 ≈ 2.0s）。
+// 取值必须按 tsMs 而非 arrivedMs: 窗口边界那一秒的评估值要等 ~2s 才到，
 // 按到达时刻取只能拿到「边界前那一秒」的值（官方 open 是前者的口径）。
 type twapPush struct {
 	price     float64
-	tsMs      int64 // 评估时刻（缺 payload.timestamp 时回退 = arrivedMs）
-	arrivedMs int64 // 本地到达时刻
+	tsMs      int64 // 评估时刻（缺 payload.timestamp 的条目不进缓存, 见 consume）
+	arrivedMs int64 // 本地到达时刻（= 发布延迟的无偏观测量, 由 PushNearest 返回）
 }
 
 // NewTwapAdapter 创建 TWAP 适配器。client 供重建订阅用；
@@ -133,28 +134,32 @@ func (t *TwapAdapter) consume(ctx context.Context) {
 				continue // 非正值不入缓存（否则 PushNearest 会以 ok=true 送回 0 锚）
 			}
 			now := time.Now().UnixMilli()
-			tsMs, fallback := ep.Timestamp, false
-			if tsMs <= 0 {
-				tsMs, fallback = now, true // 无评估时刻 → 本条退化为到达口径
-			}
+			// 缺评估时刻的条目不进缓存: 精确取锚是按 tsMs 等值匹配的（PushNearest），
+			// 兜底成到达时刻的条目永远不可能命中, 留在环里只会污染 CacheStat 诊断。
+			// 最新值照常刷新——Latest 是看门狗/dashboard 的输入, 与锚无关。
+			noTs := ep.Timestamp <= 0
 			t.mu.Lock()
 			first := t.price == 0
-			firstFallback := fallback && !t.tsFallback
-			t.tsFallback = t.tsFallback || fallback
+			if noTs {
+				t.tsDropped++
+			}
+			firstDrop := noTs && t.tsDropped == 1
 			t.price = ep.Price
 			t.lastUpdateAt = now
-			t.pushes = append(t.pushes, twapPush{price: ep.Price, tsMs: tsMs, arrivedMs: now})
-			if n := len(t.pushes) - twapPushCap; n > 0 {
-				t.pushes = append(t.pushes[:0], t.pushes[n:]...) // 整体前移，防底层数组无限增长
+			if !noTs {
+				t.pushes = append(t.pushes, twapPush{price: ep.Price, tsMs: ep.Timestamp, arrivedMs: now})
+				if n := len(t.pushes) - twapPushCap; n > 0 {
+					t.pushes = append(t.pushes[:0], t.pushes[n:]...) // 整体前移，防底层数组无限增长
+				}
 			}
 			t.mu.Unlock()
 			if first {
 				log.Printf("[Twap] 📡 首条 TWAP-%ds 推送: %s=%.2f 评估时刻=%d（unix 毫秒）",
 					t.windowSec, t.symbol, ep.Price, ep.Timestamp)
 			}
-			if firstFallback {
-				log.Printf("[Twap] ⚠️ TWAP 推送缺 payload.timestamp，缓存条目按本地到达时刻兜底"+
-					"（该窗锚精度下降，注意 winstats 的 anchor_pick_ms）")
+			if firstDrop {
+				log.Printf("[Twap] ⚠️ TWAP 推送缺 payload.timestamp，该条不入缓存（精确取锚失效）——"+
+					"本条仍刷新 Latest（看门狗/dashboard 用）")
 			}
 		}
 	}
@@ -250,39 +255,43 @@ func (t *TwapAdapter) Swap(ch <-chan sdk.ExternalPrice) {
 	}
 }
 
-// PushNearest 返回缓存中**自带时间戳（评估时刻）**距 windowStart 最近的一条推送:
-// 价格、该评估时刻相对 windowStart 的偏移（毫秒，可负）、以及是否命中。
+// PushNearest 返回**评估时刻恰好等于 windowStart** 的那条推送: 价格 + 该条的
+// 本地到达时刻（unix 毫秒）。命中即 ok=true; 未命中返回 (0, 0, false)。
 //
-// 未命中（ok=false）的三种情形: 缓存为空、最近一条的 |偏移| > tol、tol < 0。
+// 无容差、不取「最近」（2026-09-19）: 锚是结算线口径, 要的就是边界那一秒的评估值
+// ——它正是官方 openPrice（实测 8/8 窗逐位相同, 差 ≤0.0006bps ≈ 3 厘美元,
+// docs/dog020_anchor_exact_open_2026-09-19.md）。缓存里同时存着边界前后各一秒的
+// 条目, 按「最近」取会在边界那一秒尚未到达（服务器发布延迟 p50 ≈ 2.0s）时命中
+// **错的那条**（正是 t=0 口径偏差的来源）。故未命中就是没有, 由调用方按
+// 500ms 节拍重试到预算耗尽（见 anchor_recover.go 的精确取锚通道）。
 //
-// 与 Latest 的区别是选条口径: Latest 按**本地到达**给值（服务器发布延迟 1.0~1.5s，
-// 窗口边界当场只能取到「边界前那一秒」的评估值），PushNearest 按**评估时刻**给值
-// ——官方 open 正是边界那一秒的评估值，它在边界后 ~1.6s 才到达，故调用方要按 1s
-// 粒度连续取（见 anchor_recover.go 的升级通道）。
+// 与 Latest 的区别是选条口径: Latest 按**本地到达**给值（最新到达的那条, 边界当场
+// 只能看到「边界前那一秒」的评估值）, PushNearest 按**评估时刻**精确匹配。
 //
-// |偏移| 并列时取**后到者**（重连补发/乱序下把结果钉死为确定值）。
-func (t *TwapAdapter) PushNearest(windowStart time.Time, tol time.Duration) (price float64, pickMs int64, ok bool) {
-	tolMs := tol.Milliseconds()
-	if tolMs < 0 {
-		return 0, 0, false
-	}
+// 同一评估时刻出现多条（重连补发/乱序重放）时取**后到者**: 反序扫描（缓存时间正序）
+// 首个命中即返回, 把结果钉死为确定值。
+func (t *TwapAdapter) PushNearest(windowStart time.Time) (price float64, arrivedMs int64, ok bool) {
 	target := windowStart.UnixMilli()
-	best := int64(math.MaxInt64)
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	for _, p := range t.pushes {
-		d := p.tsMs - target
-		if d < 0 {
-			d = -d
-		}
-		if d <= best { // 等于时后来者覆盖 = 后到者优先
-			best, price, pickMs = d, p.price, p.tsMs-target
+	for i := len(t.pushes) - 1; i >= 0; i-- {
+		if p := t.pushes[i]; p.tsMs == target {
+			return p.price, p.arrivedMs, true
 		}
 	}
-	if best > tolMs {
-		return 0, 0, false
+	return 0, 0, false
+}
+
+// CacheStat 返回推送缓存的诊断快照: 条目数、最新一条的评估时刻相对此刻的偏移
+// （毫秒, 应为负——评估发生在过去）、以及因缺 payload.timestamp 未入缓存的条数。
+// 供「取不到边界那一秒」的失败日志区分成因: 服务器没发 / 我们收晚了 / 时间戳缺失。
+func (t *TwapAdapter) CacheStat() (n int, newestOffsetMs int64, noTs int) {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	if len(t.pushes) == 0 {
+		return 0, 0, t.tsDropped
 	}
-	return price, pickMs, true
+	return len(t.pushes), t.pushes[len(t.pushes)-1].tsMs - time.Now().UnixMilli(), t.tsDropped
 }
 
 // Latest 返回最新 TWAP 价格与距上次推送的毫秒数。

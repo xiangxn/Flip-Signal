@@ -73,44 +73,26 @@ const twapMaxStale = 2 * time.Minute
 // twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
 const twapLookbackSeconds = 60
 
-// 锚升级参数（2026-09-18，docs/dog020_anchor_upgrade_2026-09-18.md）: 窗口开始后把锚
-// 从「边界瞬间最新到达的推送」升级到更可信来源——推送缓存按**评估时刻**重选（+1s
-// 起每秒，单调逼近边界那一秒）+ 官方开盘价轮询（权威值, 端点见 feed.NewOpenPriceFetcher）。
-// 官方尝试时刻取 +2/+5/+10/+20/+40s: 边界那一秒的推送实测 p50 +1.64s / p90 +2.28s
-// 到达，+2s 首点已覆盖多数窗口；其后拉开间隔吸收上游限流（单次超时 10s，失败即
-// 跳过已流过的点，不补发）。**不以首次成功为终局**——官方值本身还在收敛（见
-// anchorSettleAfter）: +40s 之前的采样只在无流值锚时兜底, +40s 那次才作权威覆盖,
-// 每个收敛点后的成功采样都覆盖上一个（last-wins）。与 prefetchLead/lateLimit
-// 同为 main 常量，暂不配置化。
+// 精确取锚参数（2026-09-19, docs/dog020_anchor_exact_open_2026-09-19.md）: 锚 =
+// **边界那一秒**的 Chainlink TWAP-60 评估值——实测它与官方 openPrice 收敛值逐位相同
+// （8/8 窗, 差 ≤0.0006bps ≈ 3 厘美元）, 故它既是最准的口径, 又不必等官方。
+// 该条推送实测 p50 +2.0s / p90 +2.3s 到达（观测到最晚 +12.1s）, 20s 预算（40 × 500ms）
+// 即 p50 的 10 倍余量; 命中即终局。预算耗尽 = 本窗无锚（引擎 anchor ≤0 只占槽不判定、
+// 不产出观测）, 且**不设过渡锚**——宁可丢窗也不拿近似锚判定。
+// 官方 HTTP 路径**已休眠**（+40s 才收敛, 本窗机会早过）: 工具代码保留在 feed 包,
+// 将来若允许 40s+ 延迟, 接上 feed.NewOpenPriceFetcher 并给 opts 填 Schedule 即可。
+// 与 prefetchLead/lateLimit 同为 main 常量，暂不配置化。
 const (
-	// anchorRefineFetchTimeout 是单次官方请求超时（SDK 内 429 退避可拖数分钟, 必须兜底）。
-	anchorRefineFetchTimeout = 10 * time.Second
-	// anchorPickTol 是缓存重选的容差 |评估偏移| ≤。数值等于 feed.max_twap_age_ms 但
-	// 语义独立（评估时刻偏移 ≠ 本地到达龄），刻意不与之耦合。
-	anchorPickTol = 10 * time.Second
-	// anchorSettleAfter 是**官方值可压过流值锚**的起点 = 最后一个采样点。官方 open 接口在
-	// 边界后头几十秒返回的仍是收敛中的临时值: 同一窗口 +6.9s=80718.92 而 +33.3s/+62.9s
-	// =80721.40；另一窗 +2.8s 与 +10.3s 同为 80721.68、到 +40.4s 才跳到 80722.35（= 对齐
-	// 推送）。17 窗配对检验里「早期官方 vs 收敛官方」13/17 不等, |差| p90 1.18bps（≈9.5 美元）
-	// ——比它要修掉的 t=0 误差（p90 0.59bps）还大。而**对齐推送（评估时刻 == 边界）与收敛
-	// 官方差 0.0002-0.0006bps = 3 厘美元**, 就是同一个值。
-	// 故: 收敛点之前的官方成功值只作「无流值兜底」, 只有 +40s 那次作权威覆盖。
-	anchorSettleAfter = 40 * time.Second
+	anchorExactAttempts = 40                     // 精确取锚尝试次数（× 间隔 = 20s 预算）
+	anchorExactInterval = 500 * time.Millisecond // 精确取锚尝试间隔
 )
 
-// anchorRefineSchedule 是官方开盘价的尝试时刻（自窗口边界起算）。
-var anchorRefineSchedule = []time.Duration{
-	2 * time.Second, 5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second,
-}
-
-// anchorInfo 是本窗锚的来源可见性字段（winstats 落盘用）。
-// 只由升级 goroutine 写、collectLoop 之后（cancel + join 之后）读——channel close
+// anchorInfo 是本窗锚的可见性字段（winstats 落盘用）。
+// 只由取锚 goroutine 写、collectLoop 之后（cancel + join 之后）读——channel close
 // 建立的 happens-before 保证无数据竞争。
 type anchorInfo struct {
-	init   float64 // t=0 初值（0 = 无初值）
-	src    string  // feed.AnchorSourceOfficial | feed.AnchorSourceStream（空 = t=0 无可用锚）
-	atMs   int64   // 最终锚的取得时刻（unix 毫秒; 仅升级成功时非 0）
-	pickMs int64   // 最终流值锚的评估偏移（毫秒; src=stream 时有意义）
+	src  string // feed.AnchorSourceOfficial | feed.AnchorSourceStream（空 = 本窗未取到锚）
+	atMs int64  // 锚值可用时刻（unix 毫秒; 仅取到锚时非 0; stream = 推送本地到达时刻）
 }
 
 // localFreshMax 是 σ 本地预热的新鲜度上限: 最新已落盘窗口结束距今 ≤ 该值才可信
@@ -384,10 +366,10 @@ func main() {
 		e := flip.WindowStatsEntry{
 			Ts: time.Now().UnixMilli(), ConditionID: condID, Slug: slug,
 			EventStart: eventStart, Skip: skip, Anchor: anchor, HistBps: hb,
-			WindowStats: st, AnchorSrc: ar.src, AnchorInit: ar.init, AnchorPickMs: ar.pickMs,
+			WindowStats: st, AnchorExact: ar.src != "", AnchorSrc: ar.src,
 		}
 		if ar.atMs > 0 {
-			e.AnchorRecoveredMs = ar.atMs - eventStart*1000 // 最终锚取得时刻距边界（仅升级过）
+			e.AnchorRecoveredMs = ar.atMs - eventStart*1000 // 锚可用时刻距边界（仅取到锚时）
 		}
 		if err := recorder.LogWindowStats(e); err != nil {
 			log.Printf("[Cycle] ⚠️ 窗口健康度落盘失败: %v", err)
@@ -581,106 +563,63 @@ func main() {
 		upBook, downBook = nil, nil
 		bookMu.Unlock()
 
-		// 步骤 5: 注入窗口上下文（anchor/σ），启动 1s tick 采集
-		// （σ > 0 由前置闸保证; 锚可缺失, 由升级通道回填——两条闸见上）
-		// t=0 初值 = 边界瞬间的 TWAP-60 流值（**到达口径**）: 服务器发布延迟 ~1.0-1.5s，
-		// 此刻缓存里最新的那条是「边界前那一秒」的评估值，与官方 open（= 边界那一秒）
-		// 差 p90 0.24bps / |>0.5bps| 7.3%（实测见 docs/dog020_anchor_upgrade_2026-09-18.md）。
-		// 故它只作占位: +1s 起由升级通道按**评估时刻**重选，官方 open 在收敛点后覆盖。
-		// 新鲜度守卫（2026-09-09 review）: 边界采样时刻 TWAP 断流会把陈旧流值
-		// 当锚, 整窗 dist_s/触发相对错锚失真——与窗口结束 σ 同一阈值
-		// （feed.max_twap_age_ms）, 超龄把 anchor 置 0 → 引擎锚未就绪（不产出观测）
-		// + 窗口结束不计入 σ（未恢复时, 镜像回测 :69 锚缺失事件跳过）。
-		anchor, anchorAgeMs := twapAdapter.Latest()
-		anchorUsable := flip.AnchorUsableAtBoundary(anchor, anchorAgeMs, cfg.Feed.MaxTwapAgeMs)
-		if !anchorUsable {
-			if anchor > 0 {
-				log.Printf("[Cycle] ⚠️ 窗口 %s 边界 anchor TWAP 陈旧（龄 %dms > %dms）",
-					conditionID, anchorAgeMs, cfg.Feed.MaxTwapAgeMs)
-			}
-			anchor = 0
-		}
-		// 单调门基准: 缓存里评估时刻最贴边界的那条。正常情形它就是 t=0 拿到的那条
-		// （最新到达 = 最新评估）; 两者不等（重连补发/乱序）说明 t=0 拿到的是偏锚,
-		// 不给基准（SeedOK=false）让升级通道的首个命中直接覆盖。
-		seedPrice, seedPickMs, seedOK := twapAdapter.PushNearest(nextStart, anchorPickTol)
-		seedValid := seedOK && anchorUsable && seedPrice == anchor
+		// 步骤 5: 启动 1s tick 采集（σ 就绪由前置闸保证, 锚由取锚通道回填——两条闸见上）
+		// **不设过渡锚**: 窗口开始时不取 Latest()——它是「边界**前**一秒」的到达口径
+		// 近似（服务器发布延迟 p50 ≈ 2.0s）, 与锚的真实口径（边界那一秒的评估值 =
+		// 官方 openPrice）差 p90 0.24bps。锚一律留 0, 由取锚通道精确命中后经
+		// UpgradeAnchor 注入（锚与 σ 同源同换）。锚未到手期间引擎照常收 tick 占槽、
+		// 只闸住触发判定（决策 #12/#14 原则）, 20s 预算耗尽则本窗不产出观测——
+		// 宁可丢窗, 也不拿近似锚判定出信号。
 		engine := flip.NewEngine(cfg.Flip)
-		histBps := hist.Bps(anchor) // 本窗 σ（引擎判定输入 + 窗末健康度落盘共用）
-		engine.BeginWindow(anchor, histBps)
+		engine.BeginWindow(0, 0)
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
 		endTime := nextStart.Add(windowSec * time.Second)
 
-		// 锚升级（2026-09-18, docs/dog020_anchor_upgrade_2026-09-18.md）: 每窗都起一条
-		// 升级通道——+1s 起每秒按评估时刻从推送缓存重选（偏移单调下降），并按
-		// +2/+5/+10/+20/+40s 轮询官方开盘价（权威值）。官方值**收敛点（+20s）之后才
-		// 采纳且每次覆盖**（last-wins）: 早期采样点返回的是收敛中临时值, 只作无流值兜底。
-		// 升级只改锚与 σ、不追溯已判定的 tick（引擎 UpgradeAnchor 在产出观测后冻结）;
-		// 升级期引擎照常收 tick 占槽, 只闸住触发判定（见 engine.ProcessTick）。
-		// 官方全失败 → 保留流值锚继续判定; 连初值都没有（anchor=0）→ 引擎锚 ≤0 天然
-		// 不产出观测（观测行 anchor 恒 >0, 06 复验硬检查），无需额外闸。
+		// 精确取锚通道（2026-09-19, docs/dog020_anchor_exact_open_2026-09-19.md）: 每窗
+		// 都起一条, 按 500ms × 40（= 20s）反复从推送缓存里取**评估时刻 == 边界**的那条
+		// （实测 p50 +2.0s 到达）, 命中即终局。取锚只改锚与 σ、不追溯已判定的 tick
+		// （引擎 UpgradeAnchor 在产出观测后冻结）; 命中前引擎 anchor ≤0 天然不产出观测
+		// （观测行 anchor 恒 >0, 06 复验硬检查），无需额外闸。
+		// 官方 HTTP 路径已休眠（需求: +40s 才收敛, 本窗机会早过）, fetch 传 nil;
+		// 将来恢复只需接回 feed.NewOpenPriceFetcher 并给 opts 填 Schedule/SettleAfter。
 		// 窗口级 ctx: 窗口结束即取消并 join（见 collectLoop 之后的收尾段）。
 		var (
 			rec        anchorInfo
 			cancelAnch context.CancelFunc
 			anchorDone chan struct{}
 		)
-		rec.init = anchor
-		if anchorUsable {
-			rec.src, rec.pickMs = feed.AnchorSourceStream, seedPickMs
-		}
-		pickDesc := "无可用缓存条目"
-		if seedValid {
-			pickDesc = fmt.Sprintf("评估偏移 %+dms", seedPickMs)
-		} else if seedOK {
-			pickDesc = fmt.Sprintf("缓存条目 %+dms 与采样值不一致", seedPickMs)
-		}
-		log.Printf("[Anchor] 窗口 %s 初值 anchor=%.2f 到达龄 %dms（%s）",
-			conditionID, anchor, anchorAgeMs, pickDesc)
 
 		winCtx, cancel := context.WithCancel(ctx)
 		cancelAnch = cancel
 		anchorDone = make(chan struct{})
 		go func() {
 			defer close(anchorDone)
-			fetchOpen := feed.NewOpenPriceFetcher(client, sdk.BTC, sdk.Fiveminute, twapLookbackSeconds)
-			ups := feed.RecoverAnchor(winCtx, fetchOpen, twapAdapter.PushNearest, nextStart, endTime,
+			ups := feed.RecoverAnchor(winCtx, nil, twapAdapter.PushNearest, nextStart, endTime,
 				feed.AnchorUpgradeOpts{
-					Schedule:     anchorRefineSchedule,
-					SeedPickMs:   seedPickMs,
-					SeedOK:       seedValid,
-					SettleAfter:  anchorSettleAfter,
-					PickTol:      anchorPickTol,
-					FetchTimeout: anchorRefineFetchTimeout,
+					Attempts: anchorExactAttempts,
+					Interval: anchorExactInterval,
 				})
 			for r := range ups {
-				prev, _ := engine.WindowAnchor()
-				if !engine.UpgradeAnchor(r.Price, hist.Bps(r.Price)) {
+				bps := hist.Bps(r.Price)
+				if !engine.UpgradeAnchor(r.Price, bps) {
 					continue // 本窗已产出观测 → 锚已冻结
 				}
-				rec.src, rec.atMs, rec.pickMs = r.Source, r.AtMs, r.PickMs
-				from := fmt.Sprintf("%.2f", prev)
-				if prev <= 0 {
-					from = "缺失"
-				}
-				lag := r.AtMs - nextStart.UnixMilli()
-				switch {
-				case r.Source == feed.AnchorSourceOfficial:
-					delta := "初值缺失, 直接采纳"
-					if prev > 0 {
-						delta = fmt.Sprintf("流值 %.2f, 差 %+.3fbps", prev, (r.Price-prev)/prev*1e4)
-					}
-					log.Printf("[Anchor] ✅ 窗口 %s 官方 open=%.2f（%s; 边界后 +%dms）",
-						conditionID, r.Price, delta, lag)
-				case r.Price != prev:
-					log.Printf("[Anchor] 窗口 %s 流值锚 %s→%.2f（评估偏移 %+dms; 边界后 +%dms）",
-						conditionID, from, r.Price, r.PickMs, lag)
-				}
+				rec.src, rec.atMs = r.Source, r.AtMs
+				log.Printf("[Anchor] ✅ 窗口 %s 锚 %.2f（%s, σ=%.2fbps; 边界后 +%dms）",
+					conditionID, r.Price, r.Source, bps, r.AtMs-nextStart.UnixMilli())
+			}
+			// 预算耗尽（通道已关且本窗始终无锚）: 打一行诊断——缓存快照直接回答是
+			// 服务器没发、我们收晚了、还是时间戳缺失。本窗不产出观测（主循环照常跑完）。
+			if rec.src == "" {
+				n, newestOff, noTs := twapAdapter.CacheStat()
+				log.Printf("[Anchor] ⚠️ 窗口 %s %d 次 × %v 未取到边界那一秒的 open"+
+					"（缓存 %d 条, 最新一条评估偏移 %+dms, 缺时间戳 %d 条）, 本窗不产出观测",
+					conditionID, anchorExactAttempts, anchorExactInterval, n, newestOff, noTs)
 			}
 		}()
 
-		log.Printf("[Cycle] event=%s 窗口开始 anchor=%.2f hist_bps=%.2f（%d 窗）",
-			conditionID, anchor, histBps, hist.Count())
+		log.Printf("[Cycle] event=%s 窗口开始（锚待精确命中, 不设过渡锚; σ %d 窗就绪）",
+			conditionID, hist.Count())
 
 		ticker := time.NewTicker(time.Second)
 		lastTick := flip.Tick{}
@@ -730,21 +669,22 @@ func main() {
 			}
 		}
 
-		// 锚升级通道收尾: 取消 + join。channel close 建立 happens-before——此后读
-		// rec / 引擎锚无数据竞争。
+		// 取锚通道收尾: 取消 + join（通道通常早在 +2s 就已命中并关闭, join 立即返回）。
+		// channel close 建立 happens-before——此后读 rec / 引擎锚无数据竞争。
 		cancelAnch()
 		<-anchorDone
-		// 本窗最终锚/σ: 升级过 = 官方 open 或重选后的流值; 未升级 = t=0 初值（无初值且
-		// 未升级则 0, 0 → 本窗不产出观测）。
-		anchor, histBps = engine.WindowAnchor()
+		// 本窗最终锚/σ: 精确命中过 = 边界那一秒的评估值; 始终未取到 = (0, 0)
+		// → 本窗不产出观测, 也不计入 σ。
+		anchor, histBps := engine.WindowAnchor()
 
 		// 步骤 6: 窗口结束 → σ 滚动窗追加本窗振幅（严格只用已结束窗口）。
 		// close 采自边界瞬间的 TWAP 流值（与官方收盘价口径差异已在文档量化）。
 		// 无触底的窗口无记录（回测 extract 同款语义），本窗结算注册已在触发时完成。
 		// 新鲜度守卫: 断流期陈旧流值会把本窗振幅放大成假 σ 污染其后 18 窗，
 		// 缺一窗可接受（阈值依据见 feed.max_twap_age_ms 的注释）。
-		// 锚升级成功时 anchor > 0 → 本窗照常计入 σ（官方开盘价比边界流值更贴回测口径,
-		// 见 docs/dog020_anchor_upgrade_2026-09-18.md）; 始终无锚才落 anchor≤0 分支。
+		// 精确取锚命中时 anchor > 0 → 本窗照常计入 σ（锚就是边界那一秒的评估值,
+		// 最贴回测的 twap_open 口径）; 始终未命中才落 anchor≤0 分支（本窗判定的 tick
+		// 全部被闸, 也不会产出观测, σ 少一窗由 RecentBlock 的缺口容差吸收）。
 		switch {
 		case anchor <= 0 || lastTick.TwapPrice <= 0:
 			log.Printf("[Cycle] ⚠️ 窗口结束 %s 但 close/anchor 缺失，本窗不计入 σ", conditionID)

@@ -113,19 +113,17 @@ type WindowStatsEntry struct {
 	Skip        string  `json:"skip,omitempty"` // 非空 = 本窗未采集（原因, 见 cmd/flip）
 	Anchor      float64 `json:"anchor"`         // 本窗最终生效 anchor（0 = 锚缺失且未恢复/跳过）
 	HistBps     float64 `json:"hist_bps"`       // 本窗生效 σ（bps; 0 = 不可用）
-	// 锚来源诊断（2026-09-18 锚升级通道, docs/dog020_anchor_upgrade_2026-09-18.md）:
-	//   anchor_init      t=0 采样初值（到达口径; 0 = 无初值）
-	//   anchor_src       最终锚来源（official = 官方开盘价 / stream = TWAP 推送; 空 = 无锚）
-	//   anchor_pick_ms   最终流值锚的评估偏移（毫秒, 可负; 仅 src=stream 有意义;
-	//                    **非整千倍数 = 本机与服务器时钟漂移的探针**）
-	//   anchor_recovered_ms  最终锚取得时刻距窗口边界（仅升级过时非 0; 语义 2026-09-18 起
-	//                    由「恢复时刻」扩为「升级时刻」）
-	// anchor_init / anchor_pick_ms **刻意不带 omitempty**: pick_ms=0（边界那一秒的评估值）
-	// 与 init=0（无初值）都是有效取值，不能被省略成「字段不存在」。
-	AnchorInit        float64 `json:"anchor_init"`
-	AnchorPickMs      int64   `json:"anchor_pick_ms"`
-	AnchorSrc         string  `json:"anchor_src,omitempty"`
-	AnchorRecoveredMs int64   `json:"anchor_recovered_ms,omitempty"`
+	// 锚来源诊断（2026-09-19 精确取锚, docs/dog020_anchor_exact_open_2026-09-19.md）:
+	//   anchor_exact         本窗锚是否精确命中边界那一秒的 TWAP 评估值（= 官方 openPrice 口径）
+	//   anchor_src           锚来源（official = 官方开盘价 / stream = TWAP 推送; 空 = 本窗未取到锚）
+	//   anchor_recovered_ms  该值的可用时刻距窗口边界（仅取到锚时非 0; stream = 推送本地到达
+	//                        时刻, 即发布延迟的无偏观测——不含取锚轮询的 500ms 相位）
+	// anchor_exact **刻意不带 omitempty**: false（本窗未取到锚）也是有效取值; 它同时是
+	// python 侧区分「09-19 新口径行」的哨兵键（老行没有这个键, 不能按 anchor_src 过滤:
+	// 09-18 的老行也带 anchor_src）。
+	AnchorExact       bool   `json:"anchor_exact"`
+	AnchorSrc         string `json:"anchor_src,omitempty"`
+	AnchorRecoveredMs int64  `json:"anchor_recovered_ms,omitempty"`
 	WindowStats               // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
 }
 
