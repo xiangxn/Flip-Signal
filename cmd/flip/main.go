@@ -761,7 +761,7 @@ type runtimeState struct {
 func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 	yb, nb := rt.books()
 	pm := feed.NewPMTick(yb, nb)
-	_, twAge := rt.TwapAdapter.Latest()
+	twapPrice, twAge := rt.TwapAdapter.Latest()
 	bin := rt.Binance.LatestData()
 
 	// spot 显示口径: 未推送显示 0/−1（前端判灰）；有推送则显示最近价与
@@ -774,9 +774,11 @@ func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 
 	rt.mu.RLock()
 	engineState := ""
+	anchor := 0.0    // 本窗开盘 TWAP（= 引擎锚; 锚缺失/未就绪为 0, 前端显示「—」）
 	eng := rt.Engine // 引擎引用（窗口换装时替换; 计数器读取放到锁外）
 	if eng != nil {
 		engineState = eng.State().String()
+		anchor, _ = eng.WindowAnchor()
 	}
 	snap := flip.LiveSnapshot{
 		Mode:        rt.Mode,
@@ -791,6 +793,8 @@ func (rt *runtimeState) Snapshot() flip.LiveSnapshot {
 		DownAsk:     pm.DownAsk,
 		BookLatMs:   pm.BookLatMs,
 		TwapAgeMs:   twAge,
+		TwapPrice:   twapPrice,
+		TwapOpen:    anchor,
 		SpotPrice:   spotPrice,
 		SpotAgeMs:   spotAgeMs,
 	}

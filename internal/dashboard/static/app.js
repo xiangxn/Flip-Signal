@@ -50,6 +50,13 @@
     return d ? d.toFixed(2) : '—';
   }
 
+  // TWAP 差（twap − twap_open）: 带符号 2 位；0 不带符号；
+  // |差| < 0.005 归零，防 toFixed 产生 "−0.00"
+  function fmtTwapDiff(v) {
+    if (Math.abs(v) < 0.005) return '0.00';
+    return (v > 0 ? '+' : '') + v.toFixed(2);
+  }
+
   function formatUptime(uptimeSec) {
     const sec = Math.floor(uptimeSec);
     const days = Math.floor(sec / 86400);
@@ -129,7 +136,6 @@
       slugLink.textContent = '等待下一个窗口…';
       slugLink.removeAttribute('href');
     }
-    $('winCond').textContent = s.condition_id ? s.condition_id.slice(0, 8) : '';
 
     $('upBid').textContent = s.up_bid > 0 ? s.up_bid.toFixed(3) : '—';
     $('upAsk').textContent = s.up_ask > 0 ? s.up_ask.toFixed(3) : '—';
@@ -143,21 +149,41 @@
     var latEl = $('winLat');
     latEl.textContent = s.book_latency_ms;
     latEl.className = lim.book_lat_ms && s.book_latency_ms > lim.book_lat_ms ? 'stale' : '';
-    var twEl = $('winTwap');
-    twEl.textContent = s.twap_age_ms;
-    twEl.className = lim.twap_age_ms && s.twap_age_ms > lim.twap_age_ms ? 'stale' : '';
 
     // spot: −1 无推送（灰）；超阈陈旧（红，引擎已判现货缺失）；否则正常
     var spotAge = $('winSpotAge');
     if (s.spot_age_ms < 0 || s.spot_price === 0) {
       $('winSpot').textContent = '—';
       spotAge.textContent = '无推送';
-      spotAge.className = 'spot-age stale';
+      spotAge.className = 'src-age stale';
     } else {
       $('winSpot').textContent = s.spot_price.toFixed(2);
       spotAge.textContent = s.spot_age_ms + 'ms';
-      spotAge.className = 'spot-age' + (s.spot_age_ms > (lim.spot_age_ms || 2000) ? ' stale' : '');
+      spotAge.className = 'src-age' + (s.spot_age_ms > (lim.spot_age_ms || 2000) ? ' stale' : '');
     }
+
+    // TWAP-60: 最新流值 + 接收龄（与 spot 同款）/ 本窗开盘值
+    // 无推送（price=0，此时 age 也是 0）→ 显示「无推送」，不显示 0ms；
+    // 锚缺失（窗口间、恢复中）→ twap_open 显示「—」
+    var twapAge = $('winTwapAge');
+    if (s.twap_price > 0) {
+      $('winTwapPrice').textContent = s.twap_price.toFixed(2);
+      twapAge.textContent = s.twap_age_ms + 'ms';
+      twapAge.className = 'src-age' + (lim.twap_age_ms && s.twap_age_ms > lim.twap_age_ms ? ' stale' : '');
+    } else {
+      $('winTwapPrice').textContent = '—';
+      twapAge.textContent = '无推送';
+      twapAge.className = 'src-age stale';
+    }
+    $('winTwapOpen').textContent = s.twap_open > 0 ? s.twap_open.toFixed(2) : '—';
+
+    // 中间列: twap − twap_open（锚到现在的位移）——只有数值，绿涨红跌；
+    // 无数据（无推送或锚缺失）显示「—」。classList 只增删状态类，不覆盖结构类
+    var deltaEl = $('winTwapDelta');
+    var diff = (s.twap_price > 0 && s.twap_open > 0) ? s.twap_price - s.twap_open : null;
+    deltaEl.textContent = diff == null ? '—' : fmtTwapDiff(diff);
+    deltaEl.classList.toggle('pos', diff != null && diff > 0);
+    deltaEl.classList.toggle('neg', diff != null && diff < 0);
 
     // 本窗 tick 健康度: 「本窗为什么没信号」的现场（延迟闸挡掉的本会触发 tick）
     var wh = $('winHealth');

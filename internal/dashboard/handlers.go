@@ -19,7 +19,6 @@ type stateResponse struct {
 
 	Mode        string `json:"mode"`
 	UptimeSec   int64  `json:"uptime_sec"`
-	ConditionID string `json:"condition_id"`
 	Slug        string `json:"slug"`
 	EventStart  int64  `json:"event_start"`
 	EngineState string `json:"engine_state"`
@@ -33,6 +32,10 @@ type stateResponse struct {
 	BookLatMs int64   `json:"book_latency_ms"`
 	TwapAgeMs int64   `json:"twap_age_ms"`
 
+	// Chainlink TWAP-60: 最新流值 / 本窗开盘值（0 = 尚无推送或锚缺失, 前端显示「—」）
+	TwapPrice float64 `json:"twap_price"`
+	TwapOpen  float64 `json:"twap_open"`
+
 	// Binance spot（−1 = 尚无推送）
 	SpotPrice float64 `json:"spot_price"`
 	SpotAgeMs int64   `json:"spot_age_ms"`
@@ -40,7 +43,7 @@ type stateResponse struct {
 	// 三源新鲜度阈值（前端按此标红 book_lat/twap_age/spot_age，勿硬编码）
 	Limits SourceLimits `json:"limits"`
 
-	// 本窗 tick 健康度（引擎计数器; 窗口间为 nil——与 condition_id 同生命周期）。
+	// 本窗 tick 健康度（引擎计数器; 窗口间为 nil——与 slug/event_start 同生命周期）。
 	// lost_triggers = 本会触发但被延迟闸/整簿缺失挡掉的 tick 明细（§1.3 可见性）
 	WindowStats *flip.WindowStats `json:"window_stats,omitempty"`
 
@@ -127,7 +130,6 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		TS:               s.nowFn().UTC().Format(time.RFC3339),
 		Mode:             s.mode,
 		UptimeSec:        int64(s.nowFn().Sub(s.startedAt).Seconds()),
-		ConditionID:      live.ConditionID,
 		Slug:             live.Slug,
 		EventStart:       live.EventStart,
 		EngineState:      live.EngineState,
@@ -138,6 +140,8 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 		Remaining:        s.remaining(live),
 		BookLatMs:        live.BookLatMs,
 		TwapAgeMs:        live.TwapAgeMs,
+		TwapPrice:        live.TwapPrice,
+		TwapOpen:         live.TwapOpen,
 		SpotPrice:        live.SpotPrice,
 		SpotAgeMs:        live.SpotAgeMs,
 		Limits:           s.limits,

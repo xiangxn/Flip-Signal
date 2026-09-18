@@ -20,6 +20,12 @@ type LiveSnapshot struct {
 	BookLatMs int64 // 盘口传输延迟（毫秒）
 	TwapAgeMs int64 // TWAP-60 距上次推送毫秒数（诊断）
 
+	// Chainlink TWAP-60: 最新流值 + 本窗开盘值（Dashboard 展示 twap / twap_open /
+	// 两者之差）。TwapOpen 取引擎本窗锚（含锚恢复通道回填的值），0 = 尚无推送或
+	// 锚缺失/未就绪——前端判 0 显示「—」。
+	TwapPrice float64
+	TwapOpen  float64
+
 	// Binance spot（浅洞腿参考价）：SpotPrice=0 且 SpotAgeMs=−1 = 尚无推送；
 	// 有推送时 SpotAgeMs 为本地接收龄（毫秒，>2000 = 引擎已判现货缺失）
 	SpotPrice float64

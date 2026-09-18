@@ -123,7 +123,16 @@ main {
   border-bottom: 1px dashed var(--accent);
 }
 .win-slug a:active { opacity: 0.7; }
-.win-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+/* 三列: UP 卡 / TWAP 差（定宽窄列——数值位数变化时不推挤两侧卡片） / DOWN 卡 */
+.win-grid { display: grid; grid-template-columns: 1fr 96px 1fr; gap: 12px; }
+.win-mid {
+  display: flex; align-items: center; justify-content: center;
+  font-size: 18px; font-weight: 700; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  color: var(--muted); /* 无数据（无推送/锚缺失）时显示「—」的灰 */
+}
+.win-mid.pos { color: var(--pos); }
+.win-mid.neg { color: var(--neg); }
 .side {
   border: 1px solid var(--border); border-radius: 10px;
   padding: 10px; text-align: center;
@@ -141,9 +150,9 @@ main {
 }
 .win-meta b { color: var(--text); font-variant-numeric: tabular-nums; }
 .win-meta b.stale { color: var(--neg); }
-.spot-age { font-size: 12px; }
-.spot-age.stale { color: var(--neg); }
-.cond { margin-left: auto; font-size: 12px; }
+/* 数据源本地接收龄（spot / twap 共用）: 无推送或超阈标红 */
+.src-age { font-size: 12px; }
+.src-age.stale { color: var(--neg); }
 
 /* 本窗 tick 健康度（图表/阈值标红之外的诊断行） */
 .win-health {
@@ -228,6 +237,9 @@ tbody tr:last-child td { border-bottom: none; }
   .stats { gap: 8px; }
   .stat-val { font-size: 18px; }
   .side-bid { font-size: 24px; }
+  /* 窄屏: 中间列收窄（字号同步降）给两侧卡片让宽度 */
+  .win-grid { grid-template-columns: 1fr 80px 1fr; }
+  .win-mid { font-size: 16px; }
   table { font-size: 13px; }
   /* 窄屏隐藏次要列（m45），保持可读性 */
   #signalsTable th:nth-child(5), #signalsTable td:nth-child(5),

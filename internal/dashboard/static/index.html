@@ -50,6 +50,8 @@
           <div class="side-bid" id="upBid">—</div>
           <div class="side-ask">ask <span id="upAsk">—</span></div>
         </div>
+        <!-- 中间列: TWAP 差（twap − twap_open），无边框，只有带符号数值（见 app.js） -->
+        <div class="win-mid" id="winTwapDelta">—</div>
         <div class="side down">
           <div class="side-name">DOWN (=NO)</div>
           <div class="side-bid" id="downBid">—</div>
@@ -59,9 +61,9 @@
       <div class="win-meta">
         <span>剩余 <b id="winRem">—</b>s</span>
         <span>book_lat <b id="winLat">—</b>ms</span>
-        <span>twap_age <b id="winTwap">—</b>ms</span>
-        <span>spot <b id="winSpot">—</b> <span class="spot-age" id="winSpotAge">—</span></span>
-        <span id="winCond" class="cond">—</span>
+        <span>spot <b id="winSpot">—</b> <span class="src-age" id="winSpotAge">—</span></span>
+        <span>twap <b id="winTwapPrice">—</b> <span class="src-age" id="winTwapAge">—</span></span>
+        <span>twap_open <b id="winTwapOpen">—</b></span>
       </div>
       <!-- 本窗 tick 健康度（延迟闸挡掉的本会触发 tick 在此可见; 窗口间隐藏） -->
       <div class="win-health" id="winHealth" hidden>

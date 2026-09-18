@@ -147,3 +147,40 @@ func TestStateLimitsAndWindowStats(t *testing.T) {
 		t.Fatalf("窗口间应只下发 limits 而不含 window_stats: %s", body)
 	}
 }
+
+// TestStateTwap 前端当前窗口 TWAP 展示腿（twap / twap_open）: 现值与开盘锚原样
+// 下发；锚缺失（0 = 无推送/未就绪/恢复中）也原样下发——前端据此显示「—」并把
+// 差值置空，不得回落成别的值。
+func TestStateTwap(t *testing.T) {
+	rec, err := flip.NewRecorder(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	defer rec.Close()
+
+	limits := SourceLimits{TwapAgeMs: 10_000}
+	s := NewState(rec, fakeSnap{flip.LiveSnapshot{TwapPrice: 115432.10, TwapOpen: 115400.55}},
+		flip.DefaultConfig(), "paper", limits)
+	w := httptest.NewRecorder()
+	s.handleState(w, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+	var got stateResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
+		t.Fatalf("解析 /api/state: %v", err)
+	}
+	if got.TwapPrice != 115432.10 || got.TwapOpen != 115400.55 {
+		t.Fatalf("twap 腿 = %.2f/%.2f, want 115432.10/115400.55", got.TwapPrice, got.TwapOpen)
+	}
+
+	// 锚缺失窗口（本窗锚未就绪/恢复中）: twap_open=0 原样下发
+	s2 := NewState(rec, fakeSnap{flip.LiveSnapshot{TwapPrice: 115432.10}},
+		flip.DefaultConfig(), "paper", limits)
+	w2 := httptest.NewRecorder()
+	s2.handleState(w2, httptest.NewRequest(http.MethodGet, "/api/state", nil))
+	var got2 stateResponse
+	if err := json.Unmarshal(w2.Body.Bytes(), &got2); err != nil {
+		t.Fatalf("解析 /api/state: %v", err)
+	}
+	if got2.TwapOpen != 0 || got2.TwapPrice != 115432.10 {
+		t.Fatalf("锚缺失时 twap 腿 = %.2f/%.2f, want 115432.10/0", got2.TwapPrice, got2.TwapOpen)
+	}
+}
