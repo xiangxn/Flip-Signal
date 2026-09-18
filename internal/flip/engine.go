@@ -108,7 +108,7 @@ func NewEngine(cfg Config) *Engine {
 
 // BeginWindow 重置引擎并注入窗口上下文（窗口起点瞬间采样）：
 // anchor 为开盘 Chainlink TWAP-60 值、histBps 为该时刻可用的 σ（bps），≤0 表示不可用
-// （锚未就绪窗口可经 SetAnchor 在窗口内回填）。
+// （初值不够准时可由 UpgradeAnchor 在窗口内升级/回填）。
 func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -120,26 +120,32 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.stats = WindowStats{} // 本窗健康度重新计数（LostTriggers 底层数组一并丢弃）
 }
 
-// SetAnchor 在锚未就绪窗口内回填锚值（cmd/flip 的恢复通道成功时调用）。
+// UpgradeAnchor 把本窗锚升级到更可信来源（推送缓存重选 / 官方开盘价），返回是否被采纳。
 //
-// 幂等: 窗口已有锚（边界采样或先前回填）即忽略——锚是窗口级常量，先到者即真值，
-// 恢复通道只有一个且先成功后退出，实际不会二次调用。
+// 相对「窗口级常量锚」的唯一让步: 锚在**产出观测前**可变（2026-09-18 锚升级通道，
+// 见 docs/dog020_anchor_upgrade_2026-09-18.md）。判定入口即冻结——state != Watching
+// 覆盖两种 Done（产出观测、rem==0 终 tick），已落盘的观测行不可追溯改写，其后到达
+// 的新值一律丢弃并返回 false。
 //
-// 回填后本窗恢复判定能力，但**不追溯**恢复前的触底（那时锚未知，用陈旧的
-// 触发 ask 成交毫无意义；与「无效 tick 不触发、其后有效 tick 才算首触」同构）。
-// 恢复前占槽的 tick 已在 ring 中，故 crash 腿看到的仍是完整真实盘口历史。
-func (e *Engine) SetAnchor(anchor, histBps float64) {
+// anchor 与 histBps 必须同源（histBps = 调用方用同一个 anchor 算出的 σ）: dist_s 的
+// 分子是锚、分母是 σ，只换其一会让本窗判定基准自相矛盾。
+//
+// 升级**不追溯**升级前的触底（那些 tick 判定用的还是旧锚；与「无效 tick 不触发」同构）。
+// 锚缺失窗口（anchor ≤ 0）首次升级后本窗恢复判定能力——语义同原 SetAnchor: 升级前
+// 占槽的 tick 仍在 ring 中，故 crash 腿看到的仍是完整真实盘口历史。
+func (e *Engine) UpgradeAnchor(anchor, histBps float64) bool {
 	if !(anchor > 0) {
-		return
+		return false
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.anchor > 0 {
-		return
+	if e.state != stateWatching {
+		return false
 	}
 	e.anchor = anchor
 	e.histBps = histBps
 	e.stats.AnchorMissing = false
+	return true
 }
 
 // WindowAnchor 返回本窗最终生效的锚与 σ（bps）：正常窗口 = BeginWindow 注入值，

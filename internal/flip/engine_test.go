@@ -154,9 +154,9 @@ func TestAnchorZeroWindow(t *testing.T) {
 	}
 }
 
-// TestAnchorPendingWindow 锚恢复通道的核心契约（2026-09-16，docs/dog020_anchor_recovery_2026-09-16.md）:
+// TestAnchorPendingWindow 锚升级通道的核心契约（2026-09-18，docs/dog020_anchor_upgrade_2026-09-18.md）:
 // 锚未就绪期 tick 照常占槽（crash 腿拿得到真实盘口历史），触底不产出观测（只留痕），
-// SetAnchor 回填后本窗照常判定——且 m_45 能看到**恢复前**的 ask（与回测 1:1，回测里锚恒可用）。
+// UpgradeAnchor 升级后本窗照常判定——且 m_45 能看到**升级前**的 ask（与回测 1:1，回测里锚恒可用）。
 func TestAnchorPendingWindow(t *testing.T) {
 	e := NewEngine(cfgOK())
 	e.BeginWindow(0, 0) // 锚与 σ 均未知（恢复时一并回填）
@@ -184,19 +184,24 @@ func TestAnchorPendingWindow(t *testing.T) {
 		t.Fatalf("恢复前触底留痕错: %+v", st.LostTriggers)
 	}
 
-	// 回填锚（恢复通道成功）: 锚/σ 就位、AnchorMissing 清除
-	e.SetAnchor(tAnchor, tHist)
+	// 升级锚（升级通道成功）: 锚/σ 就位、AnchorMissing 清除
+	if !e.UpgradeAnchor(tAnchor, tHist) {
+		t.Fatal("产出观测前升级应被采纳")
+	}
 	if a, hb := e.WindowAnchor(); !approx(a, tAnchor) || !approx(hb, tHist) {
 		t.Fatalf("WindowAnchor = (%v, %v), 期望 (%v, %v)", a, hb, tAnchor, tHist)
 	}
 	if st := e.WindowStats(); st.AnchorMissing {
-		t.Fatalf("回填后应清除 AnchorMissing: %+v", st)
+		t.Fatalf("升级后应清除 AnchorMissing: %+v", st)
 	}
-	// 幂等: 二次回填不覆盖（先到者即真值）
-	e.SetAnchor(1, 1)
-	if a, _ := e.WindowAnchor(); !approx(a, tAnchor) {
-		t.Fatalf("SetAnchor 非幂等, anchor = %v", a)
+	// 产出观测前可连续覆盖（+1s 缓存重选 → +2s 官方 open 是常态）
+	if !e.UpgradeAnchor(tAnchor+1, tHist+1) {
+		t.Fatal("产出观测前二次升级应被采纳")
 	}
+	if a, hb := e.WindowAnchor(); !approx(a, tAnchor+1) || !approx(hb, tHist+1) {
+		t.Fatalf("二次升级未生效: (%v, %v)", a, hb)
+	}
+	e.UpgradeAnchor(tAnchor, tHist) // 复位到本用例后续断言用的值
 
 	// 回填后触底 → 正常判定: crash 腿看到恢复前的 ask（m_45 = 0.55）
 	tk := stdTick(270, 0.19, 0.55)
@@ -222,14 +227,58 @@ func TestAnchorPendingWindow(t *testing.T) {
 	}
 }
 
-// TestSetAnchorInvalid 回填非法锚（≤0）不改变窗口状态（防线: 恢复通道只回填 >0 值）。
-func TestSetAnchorInvalid(t *testing.T) {
+// TestUpgradeAnchorInvalid 升级非法锚（≤0）不改变窗口状态并返回 false
+// （防线: 升级通道只送 >0 值）。
+func TestUpgradeAnchorInvalid(t *testing.T) {
 	e := NewEngine(cfgOK())
 	e.BeginWindow(0, 0)
-	e.SetAnchor(0, tHist)
-	e.SetAnchor(-1, tHist)
+	for _, bad := range []float64{0, -1} {
+		if e.UpgradeAnchor(bad, tHist) {
+			t.Fatalf("非法锚 %v 不得被采纳", bad)
+		}
+	}
 	if a, hb := e.WindowAnchor(); a != 0 || hb != 0 {
-		t.Fatalf("非法锚不得回填: (%v, %v)", a, hb)
+		t.Fatalf("非法锚不得升级: (%v, %v)", a, hb)
+	}
+}
+
+// TestUpgradeAnchorFrozenAfterObserve 产出观测后锚冻结: 判定入口即终点, 已落盘的
+// 观测行不可追溯改写——其后到达的升级值一律丢弃并返回 false（2026-09-18 锚升级通道；
+// 判定用的锚与升级通道是并发的，窗口内官方 open 可能晚到）。
+func TestUpgradeAnchorFrozenAfterObserve(t *testing.T) {
+	e := NewEngine(cfgOK())
+	e.BeginWindow(tAnchor, tHist)
+	for i := 0; i < 3; i++ { // 急跌窗历史（ask 0.55）
+		tk := stdTick(280-i, 0.55, 0.55)
+		tk.BinPrice = 99_986
+		e.ProcessTick(tk)
+	}
+	touch := stdTick(275, 0.19, 0.55)
+	touch.BinPrice = 99_986
+	if o := e.ProcessTick(touch); o == nil || !o.OK {
+		t.Fatalf("首触应产出 ok 观测: %+v", o)
+	}
+	if e.UpgradeAnchor(tAnchor+5, tHist) {
+		t.Fatal("产出观测后升级应被拒绝")
+	}
+	if a, hb := e.WindowAnchor(); !approx(a, tAnchor) || !approx(hb, tHist) {
+		t.Fatalf("冻结后锚/σ 不得变: (%v, %v)", a, hb)
+	}
+}
+
+// TestUpgradeAnchorFrozenAtWindowEnd rem==0 终 tick 后同样冻结（第二种 Done）:
+// 窗口收尾与升级通道的 cancel+join 之间有毫秒级窗口，此处钉死「终 tick 之后不认」。
+func TestUpgradeAnchorFrozenAtWindowEnd(t *testing.T) {
+	e := NewEngine(cfgOK())
+	e.BeginWindow(tAnchor, tHist)
+	if o := e.ProcessTick(stdTick(0, 0.55, 0.55)); o != nil {
+		t.Fatalf("rem==0 终 tick 不产出观测: %+v", o)
+	}
+	if e.UpgradeAnchor(tAnchor+5, tHist) {
+		t.Fatal("rem==0 后升级应被拒绝")
+	}
+	if a, _ := e.WindowAnchor(); !approx(a, tAnchor) {
+		t.Fatalf("终 tick 后锚不得变: %v", a)
 	}
 }
 

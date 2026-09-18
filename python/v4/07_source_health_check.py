@@ -189,6 +189,52 @@ def sec_a():
     return dict(rows=rows, tot=tot, lost=lost)
 
 
+# ─────────────────── A2 锚来源（2026-09-18 锚升级通道）───────────────────
+
+def sec_a2(rows):
+    """锚来源分解: t=0 初值 vs 最终锚的位移（bps）、来源占比、评估偏移自检。
+
+    只读 winstats_*.jsonl 的锚诊断字段（anchor_init/anchor_src/anchor_pick_ms,
+    2026-09-18 起落盘; docs/dog020_anchor_upgrade_2026-09-18.md）——旧行无这些字段,
+    按「无字段」计数并跳过。位移 >0.5bps 一档是 09-18 实测里「旧锚明显偏」的比例
+    （官方 open 与边界流值之差, 见该文档 §1）。
+    """
+    if not rows:
+        return
+    has = [r for r in rows if "anchor_pick_ms" in r]
+    print("\n【A2】锚来源（winstats_*.jsonl, 2026-09-18 起落盘）")
+    if not has:
+        print("  无锚诊断字段（该功能 2026-09-18 上线, 需引擎跑过至少 1 个窗口）")
+        print("  —— 用途: t=0 初值 vs 最终锚的位移、升级来源、评估偏移整千倍数自检")
+        return
+    src = Counter(r.get("anchor_src") or "无锚" for r in has)
+    print(f"  行数 {len(has)}（无字段旧行 {len(rows) - len(has)}）  来源 "
+          + "  ".join(f"{k}={v}" for k, v in src.most_common()))
+
+    diffs, picks = [], []
+    for r in has:
+        a, i = r.get("anchor") or 0, r.get("anchor_init") or 0
+        if a > 0 and i > 0:
+            diffs.append((a - i) / i * 1e4)          # 最终锚 − t=0 初值（bps）
+        if r.get("anchor_src") == "stream":
+            picks.append(r.get("anchor_pick_ms") or 0)
+    if diffs:
+        ad = [abs(v) for v in diffs]
+        over = sum(1 for v in ad if v > 0.5)
+        print(f"  |最终锚 − t=0 初值|（有初值的窗）: p50 {pctl(ad, 50):.3f}  "
+              f"p90 {pctl(ad, 90):.3f}  p99 {pctl(ad, 99):.3f}  max {max(ad):.3f} bps"
+              f"   >0.5bps {over} 行（{pct(over, len(ad)):.1f}%）")
+        print(f"  位移方向: 下移 {sum(1 for v in diffs if v < 0)}  零 "
+              f"{sum(1 for v in diffs if v == 0)}  上移 {sum(1 for v in diffs if v > 0)}")
+    if picks:
+        odd = [v for v in picks if v % 1000 != 0]
+        note = "✅ 全部整千" if not odd else f"⚠️ {len(odd)} 行非整千（时钟漂移？）"
+        print(f"  anchor_pick_ms（流值锚评估偏移）: p10 {pctl(picks, 10):.0f}  "
+              f"p50 {pctl(picks, 50):.0f}  p90 {pctl(picks, 90):.0f} ms"
+              f"（0 = 边界那一秒的评估值, 最好档）")
+        print(f"  整千倍数自检（本地整秒边界 − 服务器评估格）: {note}")
+
+
 # ─────────────────────────── B 三源龄 + spot_age 分桶 ───────────────────────────
 
 SPOT_BUCKETS = ("无字段", "无推送", "0", "(0,200]", "(200,500]", "(500,1s]",
@@ -472,6 +518,7 @@ def main():
           f"{'   [含被闸行]' if args.include_gated else ''}")
     print("=" * 78)
     a = sec_a()
+    sec_a2(a["rows"] if a else [])
     sec_b(args.include_gated)
     c = sec_c(args.include_gated)
     if args.bt_scan:

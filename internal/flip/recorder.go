@@ -87,9 +87,13 @@ type WindowEntry struct {
 	ConditionID string  `json:"condition_id"`
 	Slug        string  `json:"slug"`
 	EventStart  int64   `json:"event_start"`
-	Anchor      float64 `json:"anchor"` // 边界 TWAP-60 流值
+	Anchor      float64 `json:"anchor"` // 本窗最终生效 anchor（流值/官方 open）
 	Close       float64 `json:"close"`  // 窗口结束 TWAP-60 流值
 	Amp         float64 `json:"amp"`    // |close − anchor|（USD）
+	// AnchorSrc 锚来源（official | stream; 2026-09-18 锚升级通道）。amp 此前恒为流值
+	// 口径，升级后部分窗口的 anchor 来自官方 open——RecentBlock 只识断档、不识这种
+	// 小幅水平位移，故在行上留痕（旧行无此字段，读作空串）。
+	AnchorSrc string `json:"anchor_src,omitempty"`
 	// Kind 行类型标识（恒 windowKindAmp）。2026-09-16 新增：旧行无此字段（读作空串，
 	// 加载器按「空 = 合法旧行」放行），新行显式写 "windows"——用作跨类型误读的
 	// 第二道守卫（第一道是文件前缀不重合，见 statsPrefix 注释）。
@@ -107,14 +111,22 @@ type WindowStatsEntry struct {
 	Slug        string  `json:"slug,omitempty"`
 	EventStart  int64   `json:"event_start,omitempty"`
 	Skip        string  `json:"skip,omitempty"` // 非空 = 本窗未采集（原因, 见 cmd/flip）
-	Anchor      float64 `json:"anchor"`         // 本窗 anchor（0 = 锚缺失且未恢复/跳过）
+	Anchor      float64 `json:"anchor"`         // 本窗最终生效 anchor（0 = 锚缺失且未恢复/跳过）
 	HistBps     float64 `json:"hist_bps"`       // 本窗生效 σ（bps; 0 = 不可用）
-	// AnchorSrc / AnchorRecoveredMs 是锚恢复诊断（2026-09-16，仅锚缺失窗口非空）:
-	// 来源（official = 官方开盘价 / push = 边界窄窗口推送）与边界后多久拿到，
-	// 用于统计恢复延迟分布与「恢复窗口的信号表现是否与常规窗口同质」。
-	AnchorSrc         string `json:"anchor_src,omitempty"`
-	AnchorRecoveredMs int64  `json:"anchor_recovered_ms,omitempty"` // 自窗口边界起算（毫秒）
-	WindowStats              // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
+	// 锚来源诊断（2026-09-18 锚升级通道, docs/dog020_anchor_upgrade_2026-09-18.md）:
+	//   anchor_init      t=0 采样初值（到达口径; 0 = 无初值）
+	//   anchor_src       最终锚来源（official = 官方开盘价 / stream = TWAP 推送; 空 = 无锚）
+	//   anchor_pick_ms   最终流值锚的评估偏移（毫秒, 可负; 仅 src=stream 有意义;
+	//                    **非整千倍数 = 本机与服务器时钟漂移的探针**）
+	//   anchor_recovered_ms  最终锚取得时刻距窗口边界（仅升级过时非 0; 语义 2026-09-18 起
+	//                    由「恢复时刻」扩为「升级时刻」）
+	// anchor_init / anchor_pick_ms **刻意不带 omitempty**: pick_ms=0（边界那一秒的评估值）
+	// 与 init=0（无初值）都是有效取值，不能被省略成「字段不存在」。
+	AnchorInit        float64 `json:"anchor_init"`
+	AnchorPickMs      int64   `json:"anchor_pick_ms"`
+	AnchorSrc         string  `json:"anchor_src,omitempty"`
+	AnchorRecoveredMs int64   `json:"anchor_recovered_ms,omitempty"`
+	WindowStats               // 内嵌：ticks/ticks_valid/book_stale/book_missing/lost_triggers 平铺
 }
 
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
@@ -537,7 +549,8 @@ func (r *Recorder) closeCurrentLocked() error {
 // LogWindowAmplitude 落盘一个已完成窗口的 σ 贡献行（行级 flush，崩溃不丢）。
 // 仅当窗口数据有效时调用（与 cmd/flip histState.push 同分支）；落盘失败返回
 // 错误由调用方告警继续——σ 内存窗不受影响，只是下次重启本地预热缺此窗。
-func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end time.Time, anchor, close_, amp float64) error {
+func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end time.Time,
+	anchor, close_, amp float64, anchorSrc string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -554,6 +567,7 @@ func (r *Recorder) LogWindowAmplitude(condID, slug string, eventStart int64, end
 		Anchor:      anchor,
 		Close:       close_,
 		Amp:         amp,
+		AnchorSrc:   anchorSrc,
 		Kind:        windowKindAmp,
 	}
 	r.wins = append(r.wins, e)
