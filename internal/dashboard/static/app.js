@@ -226,8 +226,8 @@
   // （重启清零），fetchList 内兜底收敛页码重拉。
   var PAGE_SIZE = 50;
   var LISTS = {
-    signals: { url: '/api/signals', pagerId: 'signalsPager', infoId: 'signalsPgInfo', page: 1, pages: 1, total: 0, auto: true },
-    obs: { url: '/api/observations', pagerId: 'obsPager', infoId: 'obsPgInfo', page: 1, pages: 1, total: 0, auto: true }
+    signals: { url: '/api/signals', cardId: 'signalsCard', pagerId: 'signalsPager', infoId: 'signalsPgInfo', page: 1, pages: 1, total: 0, auto: true },
+    obs: { url: '/api/observations', cardId: 'obsCard', pagerId: 'obsPager', infoId: 'obsPgInfo', page: 1, pages: 1, total: 0, auto: true }
   };
 
   // 信号行: 时间 侧 rem fill m45 dist_s 份额 结果 P&L
@@ -327,6 +327,59 @@
     }
   }
 
+  // ── 卡片标题栏点击折叠/展开 ──
+  // 点击点 = 标题栏的 h2（撑满标题栏剩余宽度，刷新按钮不在其内）: 收起时整张贴 +
+  // 分页条 + 空态一起隐藏，卡片只剩标题栏一行（两个长列表默认各占半屏，收起一个
+  // 即可同屏看另一个）。状态按表名存 localStorage，刷新页面后保持; localStorage
+  // 不可用（隐私模式）时静默降级为仅本次会话有效。收起期间暂停该表轮询（表体不
+  // 可见），展开时立即补拉一次。
+  var COLLAPSE_KEY = 'flip.collapsedTables';
+
+  function loadCollapsed() {
+    try {
+      var v = JSON.parse(localStorage.getItem(COLLAPSE_KEY));
+      // 非对象（含 null / 被手改坏的值）一律按展开——严格模式下往原始值上写属性会抛错
+      return (v && typeof v === 'object') ? v : {};
+    } catch (e) {
+      return {}; /* 无 localStorage / JSON 损坏 → 全部按展开 */
+    }
+  }
+
+  var collapsed = loadCollapsed();
+
+  function saveCollapsed() {
+    try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify(collapsed)); }
+    catch (e) { /* 隐私模式写失败: 仅本次会话有效，不影响功能 */ }
+  }
+
+  // 把状态刷到 DOM（卡片 class 驱动隐藏与箭头方向，aria-expanded 供读屏）
+  function applyCollapse(name) {
+    var L = LISTS[name];
+    var on = !!collapsed[name];
+    $(L.cardId).classList.toggle('collapsed', on);
+    document.querySelector('#' + L.cardId + ' .list-toggle').setAttribute('aria-expanded', on ? 'false' : 'true');
+  }
+
+  function toggleCollapse(name) {
+    collapsed[name] = !collapsed[name];
+    saveCollapsed();
+    applyCollapse(name);
+    if (!collapsed[name]) fetchList(name); // 收起期不轮询 → 展开即补拉当前页
+  }
+
+  function bindCollapse(name) {
+    var h = document.querySelector('#' + LISTS[name].cardId + ' .list-toggle');
+    h.addEventListener('click', function () { toggleCollapse(name); });
+    // 键盘可达: 标题 tabindex=0，Enter/空格与点击同效
+    h.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        toggleCollapse(name);
+      }
+    });
+    applyCollapse(name);
+  }
+
   // 逐日盈利弹窗（/api/daily，UTC 日聚合）— 日行进 tbody，合计行放 tfoot 吸底
   function dailyRowHtml(r, isTotal) {
     var wr = (r.won + r.lost) > 0 ? (r.win_rate * 100).toFixed(1) + '%' : '—';
@@ -394,16 +447,18 @@
   function tick() {
     fetchJSON('/api/state', renderState);
   }
-  // 自动轮询只刷第 1 页（最新）; 用户翻历史页期间暂停对应表
+  // 自动轮询只刷第 1 页（最新）; 用户翻历史页期间暂停对应表; 收起的表不拉（展开时补拉）
   function tickLists() {
-    if (LISTS.signals.auto) fetchList('signals');
-    if (LISTS.obs.auto) fetchList('obs');
+    if (LISTS.signals.auto && !collapsed.signals) fetchList('signals');
+    if (LISTS.obs.auto && !collapsed.obs) fetchList('obs');
   }
 
   $('btnSignals').addEventListener('click', function () { fetchList('signals'); });
   $('btnObs').addEventListener('click', function () { fetchList('obs'); });
   bindPager('signals');
   bindPager('obs');
+  bindCollapse('signals');
+  bindCollapse('obs');
 
   setInterval(tick, stateInterval);
   setInterval(tickLists, listInterval);

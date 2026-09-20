@@ -75,9 +75,12 @@
       </div>
     </section>
 
-    <!-- 信号列表 -->
-    <section class="card">
-      <div class="list-head"><h2>信号</h2><button class="refresh" id="btnSignals">刷新</button></div>
+    <!-- 信号列表（点击卡片标题栏折叠/展开整张贴） -->
+    <section class="card" id="signalsCard">
+      <div class="list-head">
+        <h2 class="list-toggle" tabindex="0" aria-expanded="true" title="点击折叠 / 展开"><span class="caret">▾</span>信号</h2>
+        <button class="refresh" id="btnSignals">刷新</button>
+      </div>
       <div class="table-wrap">
         <table id="signalsTable">
           <thead><tr>
@@ -97,9 +100,12 @@
       <div class="empty" id="signalsEmpty" hidden>暂无信号</div>
     </section>
 
-    <!-- 触底观测 -->
-    <section class="card">
-      <div class="list-head"><h2>触底观测（含失败）</h2><button class="refresh" id="btnObs">刷新</button></div>
+    <!-- 触底观测（含失败；点击卡片标题栏折叠/展开整张贴） -->
+    <section class="card" id="obsCard">
+      <div class="list-head">
+        <h2 class="list-toggle" tabindex="0" aria-expanded="true" title="点击折叠 / 展开"><span class="caret">▾</span>触底观测（含失败）</h2>
+        <button class="refresh" id="btnObs">刷新</button>
+      </div>
       <div class="table-wrap">
         <table id="obsTable">
           <thead><tr>
