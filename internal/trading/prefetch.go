@@ -22,7 +22,7 @@ import (
 // 统一设置。先清空旧缓存避免 map 无限增长，再注入新周期数据。
 //
 // feeRate>0 时告警：v4 live 的 cost 口径按 fee=0 记（响应 makingAmount 是否已含
-// 费需首单真盘核对），费率市场落单前需人工复核该假设。
+// 费需真盘核对——每窗定稿后的三方对账即为核对面），费率市场落单前需人工复核该假设。
 func PrefetchTokenInfo(client *sdk.PolymarketClient, marketData *gjson.Result, tokenIDs []string) {
 	// 清理上一周期的缓存，防止 tokenID 对应的 map 无限增长
 	client.ClearTickSizes()

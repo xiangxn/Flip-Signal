@@ -144,11 +144,9 @@ func (t *LiveExecutor) postErr(err error, since time.Duration) *flip.ExecResult 
 // making '1.45'; polygolem walkthrough: SELL → making=股数)。同一请求管线
 // 下两字段比例 = 成交均价, 与限价同 tick 格点。
 //
-// 真盘验证 SOP（2026-09-10 用户确认; 2026-09-19 按 GTC 改）: 首笔实盘 1U 试单,
-// **等该窗定稿（撤单确认）后**三方对账——POST 响应（即时）↔ GetOpenOrders(Id) 的
-// SizeMatched/Price（终态, 即 FillTracker 读数）↔ UI 持仓, 三方一致才确认解析
-// 与跟踪口径可信并放开正常单; 口径在真盘证伪前保持 sanity 自动判别（下方 sanity
-// 全过才记 filled, 否则转 resting 或人工核对, 绝不错记）。
+// 真盘核对口径: 每窗定稿后三方对账——POST 响应（即时）↔ GetOpenOrders(Id) 的
+// SizeMatched（终态, 即 FillTracker 读数）↔ UI 持仓; 在真盘证伪前保持下方 sanity
+// 自动判别（全过才记 filled, 否则转 resting 或人工核对, 绝不错记）。
 //
 // 单位不做硬编码假设: CLOB 返回的金额可能是原始小数（py 例证）也可能被请求
 // 管线换算成 1e6 基单位（SDK ParseUnits 方向）。刻度判别用**不变量**「成交股数
@@ -158,20 +156,27 @@ func (t *LiveExecutor) postErr(err error, since time.Duration) *flip.ExecResult 
 // GTC 下部分成交是常态, 故换掉。
 //
 // sanity 校验（兜语义颠倒/单位误判, 宁缺勿错）: 全过才按成交记账, 任一不过 →
-// rejected + ExecNoteUnknown（金额在但不可信, 与 submitting 同属人工核对类）:
+// 交人工核对（拿到 order_id 时仍记 resting 进跟踪, 见下方 unknown）:
 //  1. 0 < shares ≤ reqShares + 0.005（成交不超请求）
 //  2. cost > 0
-//  3. |cost/shares − price| ≤ 0.005 —— 触发价为当时最优 ask, 盘口同价档吃满;
-//     成交均价偏离超过半分钱即不可能。这条正是语义颠倒的兜底: 两字段记反时
-//     cost/shares ≈ 1/price ≈ 5.26, 远超半分钱 → 不会把「花 1.9U 买 10 股」
+//  3. cost/shares ≤ price + 0.005 —— **单边上界**（2026-09-20 改, 原为双边带）:
+//     限价是成交价的**上界**而非等值, 吃单/maker 撮合都可能价格改善（fill_tracker.go
+//     的 cost 口径建立在同一假设上）, 双边带会把「限价 0.20、成交 0.19」这类合法
+//     成交判成响应异常 → 真实挂单从此无人跟踪。语义颠倒的兜底依然成立: 两字段记反
+//     时 cost/shares ≈ 1/price ≈ 5.26, 远超上界 → 不会把「花 1.9U 买 10 股」
 //     错记成「花 10U 买 1.9 股」
 func parseFill(resp *gjson.Result, orderID string, reqShares, price float64) *flip.ExecResult {
+	// unknown: 响应 schema 与假设不符——可能已成交, 也可能根本没上簿。**拿到
+	// order_id 就记 resting**: success=true 时订单多半已在簿, 交 FillTracker
+	// 查询/到点撤单/定稿, 远好过留在 rejected——rejected 不进跟踪表, 那笔真实挂单
+	// 既不会被撤（余量继续吃 rem ≤ RemMin 之后的成交）也不会结算（2026-09-20
+	// code review）。note 保留 ExecNoteUnknown 前缀: 定稿前照旧计入人工核对清单。
 	unknown := func(why string) *flip.ExecResult {
-		return &flip.ExecResult{
-			Status:  flip.ExecStatusRejected,
-			OrderID: orderID,
-			Note:    flip.ExecNoteUnknown + ": 成交解析 " + why + "（原始响应需人工核对: " + shortMsg(resp.Raw, 300) + "）",
+		note := flip.ExecNoteUnknown + ": 成交解析 " + why + "（原始响应需人工核对: " + shortMsg(resp.Raw, 300) + "）"
+		if orderID != "" {
+			return &flip.ExecResult{Status: flip.ExecStatusResting, OrderID: orderID, Note: note}
 		}
+		return &flip.ExecResult{Status: flip.ExecStatusRejected, Note: note}
 	}
 
 	taking, hasTaking := amountOf(resp, "takingAmount")
@@ -184,7 +189,9 @@ func parseFill(resp *gjson.Result, orderID string, reqShares, price float64) *fl
 		if orderID == "" {
 			return unknown(fmt.Sprintf("无 orderID 无法跟踪挂单（status=%q）", st))
 		}
-		switch st {
+		// status 大小写不敏感: CLOB 回 "LIVE"/"Live" 时若按字面比较会落进
+		// unknown, 一笔真实挂单被当成解析失败（2026-09-20 code review）
+		switch strings.ToLower(st) {
 		case "live", "delayed", "unmatched", "":
 			return &flip.ExecResult{
 				Status:  flip.ExecStatusResting,
@@ -204,7 +211,7 @@ func parseFill(resp *gjson.Result, orderID string, reqShares, price float64) *fl
 		shares, cost = taking/1e6, making/1e6
 	}
 
-	if shares <= reqShares+0.005 && cost > 0 && abs(cost/shares-price) <= 0.005 {
+	if shares <= reqShares+0.005 && cost > 0 && cost/shares <= price+0.005 {
 		if shares >= reqShares-0.005 {
 			// 即时全额成交 = 终态, 无需跟踪（部分成交则相反: 余量还在簿上变得更多）
 			return &flip.ExecResult{
@@ -224,7 +231,7 @@ func parseFill(resp *gjson.Result, orderID string, reqShares, price float64) *fl
 			Note:    fmt.Sprintf("GTC 即时成交 %.2f/%.2f 股 @%.4f, 余量挂单在簿（等 FillTracker 撤单时定稿）", shares, reqShares, cost/shares),
 		}
 	}
-	// 金额在但越界: 语义或刻度理解错误, 转人工
+	// 金额在但越界: 语义或刻度理解错误 → 交人工（有 order_id 时仍进跟踪, 见 unknown）
 	return unknown(fmt.Sprintf("sanity 不过: taking=%.6f making=%.6f req=%.2f price=%.3f", taking, making, reqShares, price))
 }
 
@@ -246,13 +253,6 @@ func amountOf(resp *gjson.Result, key string) (float64, bool) {
 		return 0, false
 	}
 	return f, true
-}
-
-func abs(x float64) float64 {
-	if x < 0 {
-		return -x
-	}
-	return x
 }
 
 // shortMsg 截断错误/响应文本（日志/note 长度控制）。

@@ -108,19 +108,29 @@ func TestParseFill(t *testing.T) {
 			orderID: "o8", wantSt: flip.ExecStatusResting,
 		},
 		{
-			name:    "两字段语义记反 → sanity 拒收转人工",
+			name:    "即时成交价优于限价（价格改善）→ filled（单边上界, 原双边带在此误判人工）",
+			raw:     `{"success":true,"orderID":"o9","status":"matched","takingAmount":"10520000","makingAmount":"1900000"}`,
+			orderID: "o9", wantSt: flip.ExecStatusFilled, wantSh: 10.52, wantCost: 1.9,
+		},
+		{
+			name:    "status 大写 LIVE → resting（大小写不敏感, 原字面比较会落进人工）",
+			raw:     `{"success":true,"orderID":"o10","status":"LIVE"}`,
+			orderID: "o10", wantSt: flip.ExecStatusResting,
+		},
+		{
+			name:    "两字段语义记反 → sanity 不过但仍 resting 进跟踪（原 rejected 无人撤单/结算）",
 			raw:     `{"success":true,"orderID":"o4","status":"matched","takingAmount":"1.9988","makingAmount":"10.52"}`,
-			orderID: "o4", wantSt: flip.ExecStatusRejected, unknown: true,
+			orderID: "o4", wantSt: flip.ExecStatusResting, unknown: true,
 		},
 		{
-			name:    "成交超请求 → sanity 拒收",
+			name:    "成交超请求 → sanity 不过但仍 resting 进跟踪（有 order_id, 交由人工+查询定稿）",
 			raw:     `{"success":true,"orderID":"o5","status":"matched","takingAmount":"12000000","makingAmount":"2280000"}`,
-			orderID: "o5", wantSt: flip.ExecStatusRejected, unknown: true,
+			orderID: "o5", wantSt: flip.ExecStatusResting, unknown: true,
 		},
 		{
-			name:    "金额缺失但 status 不认识 → 拒收转人工（可能成交, 不按 0 记）",
+			name:    "金额缺失但 status 不认识 → resting 进跟踪（可能成交, 不按 0 记）",
 			raw:     `{"success":true,"orderID":"o6","status":"matched"}`,
-			orderID: "o6", wantSt: flip.ExecStatusRejected, unknown: true,
+			orderID: "o6", wantSt: flip.ExecStatusResting, unknown: true,
 		},
 		{
 			name:   "挂单但无 orderID → 无法跟踪, 转人工",
@@ -142,8 +152,9 @@ func TestParseFill(t *testing.T) {
 			}
 			switch res.Status {
 			case flip.ExecStatusFilled, flip.ExecStatusPartial:
-				if avg := res.Cost / res.Shares; avg > price+0.005 || avg < price-0.005 {
-					t.Fatalf("成交均价 %.4f 偏离限价 %.3f", avg, price)
+				// 限价是**上界**（买单绝不高于限价成交）; 价格改善（avg < price）合法
+				if avg := res.Cost / res.Shares; avg > price+0.005 {
+					t.Fatalf("成交均价 %.4f 高于限价 %.3f", avg, price)
 				}
 				if res.FillPrice == 0 || res.OrderID == "" {
 					t.Fatalf("成交行缺 FillPrice/OrderID: %+v", res)

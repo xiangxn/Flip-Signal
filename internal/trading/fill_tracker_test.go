@@ -399,6 +399,52 @@ func TestFillTrackerQueryErrorThrottled(t *testing.T) {
 	}
 }
 
+// 挂单表返回的是**别的**单（端点没真按 Id 过滤）: 绝不能把别人的 size_matched
+// 当成本单成交量——那会凭空造出一个仓位（2026-09-20 code review）。
+func TestFillTrackerForeignOrderIgnored(t *testing.T) {
+	// 对方那笔已满额成交（最坏情形: 认错就等于记 10 股 filled）
+	fc := &fakeClient{ooResp: []orders.OpenOrder{
+		{Id: "someone-else", Status: "MATCHED", OriginalSize: 10, SizeMatched: 10, Price: 0.20},
+	}}
+	var got []flip.FillFinal
+	ft := newTestTracker(fc, func(f flip.FillFinal) { got = append(got, f) })
+	ft.Register(mkRestingRec(), testWindowEnd(), false)
+	o := only(t, ft)
+
+	if fin, done := ft.pollOne(o, atRem(60)); done {
+		t.Fatalf("外来单不该被认领定稿: %+v", fin)
+	}
+	if o.sighted || o.lastMatched != 0 {
+		t.Fatalf("外来单不该记成本单已观测/成交量: sighted=%v matched=%v", o.sighted, o.lastMatched)
+	}
+	// 本单始终没查到 → 到硬截止仍是未确认 resting（不按 0 成交记, 交人工）
+	fin, done := ft.pollOne(o, testWindowEnd().Add(fillCloseGrace))
+	if !done || fin.Status != flip.ExecStatusResting || fin.Shares != 0 || fin.Cost != 0 {
+		t.Fatalf("定稿 = %+v done=%v, 期望 resting 未确认", fin, done)
+	}
+	if !strings.HasPrefix(fin.Note, flip.ExecNoteUnknown) {
+		t.Fatalf("未确认行必须带人工核对标记: %q", fin.Note)
+	}
+}
+
+// onFinal panic（回调里的落盘/结算注册出问题）: 终态不能因此丢失——回调在前、
+// delete 在后, panic 被 pollAll 的 recover 兜住, 该单留在表内下一轮重试
+// （2026-09-20 code review）。
+func TestFillTrackerOnFinalPanicKeepsTracking(t *testing.T) {
+	fc := &fakeClient{ooResp: mkOrder("MATCHED", 10)}
+	calls := 0
+	ft := newTestTracker(fc, func(flip.FillFinal) { calls++; panic("落盘炸了") })
+	ft.Register(mkRestingRec(), testWindowEnd(), false)
+
+	ft.pollAll() // 不应 panic 出栈（pollAll 内 recover）
+	if calls != 1 {
+		t.Fatalf("应回调 1 次, 实际 %d", calls)
+	}
+	if ft.Count() != 1 {
+		t.Fatalf("回调 panic 后该单应留在跟踪表待重试, 实际剩 %d", ft.Count())
+	}
+}
+
 func TestFillTrackerRegisterGuards(t *testing.T) {
 	ft := newTestTracker(&fakeClient{}, func(flip.FillFinal) {})
 	ft.Register(nil, testWindowEnd(), false) // nil 记录

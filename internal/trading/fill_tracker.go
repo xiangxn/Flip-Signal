@@ -45,8 +45,13 @@ import (
 //     限价——故成本至多略微高估、P&L 略微低估, 方向保守（不会虚增）。精确到笔
 //     的成交明细在 CLOB 只有 associate_trades（本 SDK 未暴露 trades 端点）。
 //   - **末次观测即终值**: 成交只在挂单活着时发生, 撤单生效/闭市后 size_matched
-//     冻结, 故定稿用「最靠近撤单确认的那次观测」；暴露的偏差 = 末次查询（≤
-//     fillPollInterval）到撤单生效之间的成交, 仅当端点不返回已终态订单时才会漏。
+//     冻结, 故定稿用「最靠近撤单确认的那次观测」。**不会漏掉撤单前的最后成交**:
+//     GET /data/orders 连已终态订单（MATCHED/CANCELED）也返回（2026-09-20 用户
+//     核对官方 API 确认）, 撤单生效那一刻的累计成交会在下一轮查询里以 CANCELED
+//     行的 size_matched 读到——撤单成功的当轮不立即定稿, 正是为了留这一次读
+//     （见 pollOne 的判定顺序）。原设想的「两轮查询之间吃满 → 单子从挂单表消失
+//     → 按陈旧 lastMatched 误记 0 成交」因此不存在（2026-09-20 code review #4,
+//     经 API 行为核对后关闭）。
 //   - **撤单是尽力而为, 不是保证**: 撤单请求失败会每 2s 重试到成功或硬截止（活着
 //     的挂单会一直吃进 rem ≤ 180 之后的成交）——定稿时若撤单没成功, 行照常落盘,
 //     只是 note 里没有「余量已撤」, 该窗口的成交样本按实际发生记账（宁可多记一笔
@@ -77,7 +82,6 @@ type trackedOrder struct {
 	sighted     bool      // 是否至少成功观测到该单一次（区分「没成交」与「没查到」）
 	adopted     bool      // 重启接管: 无本进程 POST 背书, 「查不到」不能推定闭市撤回
 	cancelSent  bool      // 撤单已成功返回（未成交余量已撤; 幂等, 不重复撤）
-	cancelTried bool      // 撤单已尝试过（失败时: 见过该单才继续重试, 见 pollOne）
 	canceledAt  time.Time // 撤单成功时刻（撤单确认宽限 fillCancelGrace 的起点）
 	lastErrLog  time.Time
 	lastCnclLog time.Time
@@ -221,12 +225,16 @@ func (t *FillTracker) pollAll() {
 		if !done {
 			continue
 		}
-		t.mu.Lock()
-		delete(t.orders, o.orderID)
-		t.mu.Unlock()
+		// 先交回结果, 再移出跟踪表: 顺序反了的话, 回调 panic（或落盘失败）时这笔
+		// 终态就永久丢了——delete 已经执行, 没人再重试（2026-09-20 code review）。
+		// panic 由本函数的 defer recover 兜住, 该单留在表内下一轮重试; 磁盘行此刻
+		// 仍是 resting, 不会被错记成成交。
 		if t.onFinal != nil {
 			t.onFinal(fin)
 		}
+		t.mu.Lock()
+		delete(t.orders, o.orderID)
+		t.mu.Unlock()
 	}
 }
 
@@ -244,19 +252,41 @@ func (t *FillTracker) pollOne(o *trackedOrder, now time.Time) (flip.FillFinal, b
 	var oo *orders.OpenOrder
 	matched := 0.0
 	bad := false // size_matched 语义可疑（越界）: 不能当成交量用, 但撤单照发
-	if err == nil && len(list) > 0 {
-		oo = &list[0]
-		matched = normalizeMatched(oo.SizeMatched, o.reqShares)
-		bad = matched > o.reqShares+0.005
+	if err == nil {
+		// 按 id 认领本单: 端点若没真按 Id 过滤（或返回账户下其它挂单）, 直接取
+		// list[0] 会把别人的 size_matched/status 当成这笔的成交量, 凭空造出仓位
+		// （2026-09-20 code review）。
+		for i := range list {
+			if strings.EqualFold(list[i].Id, o.orderID) {
+				oo = &list[i]
+				break
+			}
+		}
+		if oo == nil && len(list) > 0 && now.Sub(o.lastErrLog) >= fillErrLogEvery {
+			o.lastErrLog = now
+			log.Printf("[FillTracker] ⚠️ 挂单表返回 %d 条但无本单 %s——按「本单不在簿」处理（若反复出现, 说明 Id 过滤或 id 格式不符, 该行会以未确认收尾）",
+				len(list), o.orderID)
+		}
+		if oo != nil {
+			matched = normalizeMatched(oo.SizeMatched, o.reqShares)
+			bad = matched > o.reqShares+0.005
+		}
 	}
+	// notFound: 查询成功但本单不在挂单表里（空列表, 或列表里没有本单的 id）。端点
+	// 会返回已终态单（MATCHED/CANCELED, 2026-09-20 核对）, 故 notFound ≠「成交后
+	// 消失」, 它要么是我们撤单生效、要么是闭市撤回——两者都已冻结成交量, 末次观测
+	// 即可定稿。列表非空但没有本单 id 时还叠加「见过 / 接管过」才敢当「已不在簿」
+	// 用——从没观测到过时可能只是 id 比对不上, 见下方分支的保护。
+	notFound := err == nil && oo == nil
 
 	// 撤单: 到 rem ≤ RemMin（cancelAt）就把未成交余量撤走。
-	// 重试规则: 见过该单在簿（sighted）说明撤单失败是真失败, 每轮继续重试; 从没
-	// 观测到过（索引延迟/POST 后订单根本没上簿）则只试一次, 不刷接口——真挂着的
-	// 单只要查询后来成功, sighted 就会置上, 撤单随即恢复重试。
+	// 重试规则: 只要没成功（!cancelSent）就每轮（pollInterval）重发到成功或硬截止
+	// ——漏撤的代价是余量继续吃进 rem ≤ RemMin 之后的成交（策略明确不要的那批）,
+	// 远大于一次废请求。查不到该单也照撤: DELETE 走 CLOB, 与查询的 data-api 不同源,
+	// 查询失败/索引延迟不代表撤不掉。
 	doneForSure := !bad && oo != nil && matched >= o.reqShares-0.005 // 满额成交: 无余量可撤
-	gone := err == nil && len(list) == 0 && (o.sighted || o.adopted) // 已不在簿: 没得撤
-	if !o.cancelSent && !now.Before(o.cancelAt) && !doneForSure && !gone && (o.sighted || !o.cancelTried) {
+	gone := notFound && (o.sighted || o.adopted)                     // 已不在簿: 没得撤
+	if !o.cancelSent && !now.Before(o.cancelAt) && !doneForSure && !gone {
 		t.cancel(o, now)
 	}
 
@@ -271,7 +301,7 @@ func (t *FillTracker) pollOne(o *trackedOrder, now time.Time) (flip.FillFinal, b
 		}
 		return flip.FillFinal{}, false
 
-	case len(list) == 0:
+	case notFound:
 		if !o.sighted && !o.adopted {
 			// 从没观测到过这单: 「查不到」也可能只是索引延迟——不能据此判 0 成交
 			if overdue {
@@ -329,7 +359,6 @@ func (t *FillTracker) pollOne(o *trackedOrder, now time.Time) (flip.FillFinal, b
 // 重试: 一个活着但没撤掉的挂单会继续吃进 rem ≤ RemMin 之后的成交, 那是策略不要
 // 的样本（见类型 doc）。日志节流, 但每次都重试。
 func (t *FillTracker) cancel(o *trackedOrder, now time.Time) {
-	o.cancelTried = true
 	if _, err := t.client.CancelOrder(&orders.OrderPayload{OrderID: o.orderID}); err != nil {
 		if now.Sub(o.lastCnclLog) >= fillErrLogEvery {
 			o.lastCnclLog = now

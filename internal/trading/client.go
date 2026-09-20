@@ -22,7 +22,7 @@ type TradeClient interface {
 
 	// GetOpenOrders 按 id/市场/token 查询订单（GET /data/orders）。两个用处:
 	//   - FillTracker: 按 id 查 GTC 挂单的 size_matched/status（终态跟踪）;
-	//   - 首单真盘三方对账与未知结果人工核对。
+	//   - 真盘三方对账（POST 响应 ↔ SizeMatched ↔ UI 持仓）与未知结果人工核对。
 	GetOpenOrders(params *orders.OpenOrderParams, onlyFirstPage bool, nextCursor *string) ([]orders.OpenOrder, error)
 
 	// CancelOrder 撤销一笔挂单（DELETE /order，L2 签名）。FillTracker 在
