@@ -110,11 +110,12 @@
 ```
 FlipSignal/
 ├── cmd/flip/                         # 策略引擎主入口（纸面/实盘同源，-mode 切换）
-│   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个 flag, 配置见 internal/config）
+│   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── internal/
 │   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
 │   │   ├── config.go                 # AppConfig + defaults()（唯一默认值来源）+ Load()
+│   │   ├── encrypt.go                # 明文→密文（-encrypt 工具的逻辑; 与 decrypt 共用密码来源）
 │   │   ├── decrypt.go                # owner_key/clob_creds/relayer_key 密文解密（PM_CONFIG_DECRYPT_PASSWORD）
 │   │   ├── validate.go               # 校验（fatal/warning），在 CLI 覆盖之后调用
 │   │   └── configfile_drift_test.go  # v4.config.yaml 漂移守卫
@@ -343,7 +344,8 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
    `RiskSummary.CanTrade` 直说极性。分析脚本（02/06/07）默认过滤 `gate_reason`
    非空行，`--include-gated` 恢复旧口径。
 11. **配置分层：CLI flag > 配置文件 > 代码默认值（无 env 层）**（2026-09-16）：
-   配置包 `internal/config`（viper，同 master），`main()` 只留 4 个 flag。
+   配置包 `internal/config`（viper，同 master），`main()` 只留 4 个引擎 flag
+   （+ 1 个工具 flag `-encrypt`，见「敏感字段」节）。
    默认值**唯一来源**是 `defaults()`，`Load()` 把它预置成 `UnmarshalExact` 的目标
    ——mapstructure 只写输入 map 里出现的键，所以"文件缺哪个键，哪个键就是默认值"，
    文件可只写要改的项。
@@ -548,7 +550,7 @@ go run ./cmd/flip
 go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 ```
 
-### CLI flag（main() 只有这 4 个）
+### CLI flag（main() 只有这 4 个引擎参数 + 1 个工具 flag）
 
 | flag | 默认 | 含义 |
 |------|------|------|
@@ -556,6 +558,7 @@ go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 | `-dashboard` | `""` | 覆盖 `runtime.dashboard_addr`；显式传空串 = 本次不开 Dashboard |
 | `-mode` | `""` | 覆盖 `runtime.mode`（paper\|live）|
 | `-stake` | `0` | 覆盖 `flip.stake`；**没给**则用配置值，显式给 0 会校验报错 |
+| `-encrypt` | `false` | **凭证加密工具**（唯一「跑完即退」的分支）：读明文 → 密文写 stdout → 退出。不读配置文件（`-config` 一并忽略）、不碰数据源、不跑引擎 |
 
 用 `flag.Visit` 区分「没给」与「显式给空/0」——所以 `-dashboard ""` 是有效的关闭操作，
 不是"用默认值"。其余全部参数见 `v4.config.yaml`（全量带注释），主要几项：
@@ -586,6 +589,24 @@ AES-256-CBC）则实盘可用。判定语义是**非空即密文**——明文�
 （`RELAYER_API_KEY_ADDRESS` 头），且"哪个子字段该明文"是本包刻意不留的规则。
 `builder_creds` 目前**不在**加密名单（本引擎未使用；要接 builder 时一并加进
 `decrypt.go` 的 `appendCredTargets`）。
+
+**生成密文用 `-encrypt`**（2026-09-20 新增，逻辑在 `internal/config/encrypt.go`，
+与 `decrypt.go` 对称、**共用同一个密码来源**——密文只能用启动时那个密码解开）：
+
+```bash
+go run ./cmd/flip -encrypt                    # 终端: 无回显粘贴明文 → 密文打到 stdout
+printf %s "$RELAYER_KEY" | PM_CONFIG_DECRYPT_PASSWORD=… go run ./cmd/flip -encrypt   # 管道整段读取
+```
+
+- **明文不进命令行**: 没有 `-encrypt <明文>` 这种形态（会进 shell 历史与 `ps`）。
+  stdin 是终端 → `term.ReadPassword` 无回显; 是管道 → 读**整段**（不是逐行——多行
+  秘密会被静默切成多个密文）并 TrimSpace。
+- **stdout 只有密文**（可管道进剪贴板/脚本），提示与自检指纹走 stderr——指纹 =
+  长度 + 首尾各 4 字符，短于 24 字符只报长度（贴错东西时密文照样合法，启动不会报错，
+  这是唯一的人工自检点）。
+- 加密方案由 SDK 决定，**不自行改动**（换 IV/加盐 = 既有密文全解不开）: 代价是确定性
+  ——固定 IV（= SHA256(密码) 前 16 字节）意味着同密码 + 同明文 → 同密文。
+- 与引擎无关: 该分支在 `config.Load` 之前 return，不读配置、不校验、不落盘。
 
 | 变量 | 说明 | 必填 |
 |------|------|------|

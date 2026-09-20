@@ -18,7 +18,8 @@
 //
 // 配置见包 internal/config 与根目录 v4.config.yaml（全量默认值示例）：
 // 优先级 = CLI flag > 配置文件 > 代码默认值，**不读环境变量**（唯一例外是解密密文
-// 凭证用的 PM_CONFIG_DECRYPT_PASSWORD）。本文件只保留 4 个 flag。
+// 凭证用的 PM_CONFIG_DECRYPT_PASSWORD）。本文件只保留 4 个引擎 flag + 1 个工具 flag
+// （-encrypt，见下）。
 //
 // 用法：
 //
@@ -26,6 +27,7 @@
 //	go run ./cmd/flip -config v4.config.yaml -dashboard :8090
 //	go run ./cmd/flip -config v4.config.yaml -mode live     # live 需配置文件里有密文凭证
 //	go run ./cmd/flip -stake 5                              # 单点覆盖（最高优先级）
+//	go run ./cmd/flip -encrypt                              # 凭证加密工具: 明文 → 密文后退出（不跑引擎）
 package main
 
 import (
@@ -118,17 +120,40 @@ func init() {
 }
 
 func main() {
-	// ── CLI 参数（仅 4 个，其余一律走配置文件; 优先级最高）──
+	// ── CLI 参数（4 个引擎参数 + 1 个工具 flag，其余一律走配置文件; 优先级最高）──
 	configPath := flag.String("config", "", "配置文件路径（YAML; 空 = 只用代码默认值）")
 	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（覆盖 runtime.dashboard_addr）")
 	mode := flag.String("mode", "", "成交模式: paper|live（覆盖 runtime.mode）")
 	stake := flag.Float64("stake", 0, "每信号投入 USDC（覆盖 flip.stake）")
+	encryptMode := flag.Bool("encrypt", false, "凭证加密工具: 读明文（终端无回显/管道整段）→ 密文写 stdout 后退出（不跑引擎）")
 	flag.Parse()
 
 	// set 记录「哪些 flag 被显式给出」。用 flag.Visit 而非比零值: 这样 -dashboard ""
 	// 能真的关掉配置文件里的 :8090，-stake 0 也会走校验报错（响亮）而不是静默回退。
 	set := map[string]bool{}
 	flag.Visit(func(f *flag.Flag) { set[f.Name] = true })
+
+	// ── 凭证加密工具（-encrypt）: 读明文 → 密文写 stdout → 退出 ──
+	// 换凭证时的离线小工具（owner_key / clob_creds / relayer_key 都只有密文形态能进配置，
+	// 明文会被 decrypt.go 判成密文而启动失败）。与引擎完全无关: 不读配置文件（-config
+	// 一并忽略）、不碰任何数据源、不落盘——故排在 config.Load 与 signal 之前。
+	// 逻辑在 internal/config/encrypt.go（与 decrypt.go 对称、共用同一个密码来源）,
+	// 本文件只负责读入/打印/退出。
+	if *encryptMode {
+		plain, err := config.ReadSecret("请输入要加密的明文（无回显、粘贴后回车; stdin 为管道时整段读取）: ")
+		if err != nil {
+			log.Fatalf("[Encrypt] %v", err)
+		}
+		cipher, err := config.Encrypt(plain)
+		if err != nil {
+			log.Fatalf("[Encrypt] %v", err)
+		}
+		// stdout 只放密文本身（可直接管道出去）; 提示走 stderr（log 默认流）
+		fmt.Println(cipher)
+		log.Printf("[Encrypt] ✅ 密文已写 stdout（明文 %s）——粘贴进配置文件时带引号",
+			config.PlaintextPreview(plain))
+		return
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

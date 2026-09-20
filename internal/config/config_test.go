@@ -163,6 +163,71 @@ sdk:
 	}
 }
 
+// TestEncryptRoundTrip 加密工具（-encrypt）的产出必须能被 Load() 解回来——同一个密码、
+// 同一个方案，这是「生成的密文可以放心粘进配置」的唯一凭据。
+func TestEncryptRoundTrip(t *testing.T) {
+	// 复用测试里既有的密码来源: Encrypt 与 Load 都走 PM_CONFIG_DECRYPT_PASSWORD
+	t.Setenv("PM_CONFIG_DECRYPT_PASSWORD", "test-password")
+
+	ownerKey, err := Encrypt("owner-secret-1")
+	if err != nil {
+		t.Fatalf("Encrypt(owner_key) 失败: %v", err)
+	}
+	relayerKey, err := Encrypt("relayer-key-1")
+	if err != nil {
+		t.Fatalf("Encrypt(relayer_key.key) 失败: %v", err)
+	}
+	relayerAddr, err := Encrypt("0xrelayeraddr")
+	if err != nil {
+		t.Fatalf("Encrypt(relayer_key.key_address) 失败: %v", err)
+	}
+	if ownerKey == "owner-secret-1" {
+		t.Fatal("密文与明文相同——没有真的加密")
+	}
+
+	path := writeConfig(t, `
+sdk:
+  polymarket:
+    owner_key: "`+ownerKey+`"
+    relayer_key:
+      key: "`+relayerKey+`"
+      key_address: "`+relayerAddr+`"
+`)
+	got, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load 加密工具产出的密文失败: %v", err)
+	}
+	if got.SDK.Polymarket.OwnerKey != "owner-secret-1" {
+		t.Errorf("owner_key 解回 %q, 期望 owner-secret-1", got.SDK.Polymarket.OwnerKey)
+	}
+	if got.SDK.Polymarket.RelayerKey == nil ||
+		got.SDK.Polymarket.RelayerKey.ApiKey != "relayer-key-1" ||
+		got.SDK.Polymarket.RelayerKey.ApiKeyAddress != "0xrelayeraddr" {
+		t.Errorf("relayer_key 解回 %+v, 期望 {relayer-key-1 0xrelayeraddr}", got.SDK.Polymarket.RelayerKey)
+	}
+
+	// 空明文 = 拒绝: 产出「空秘密」的密文只会让配置在启动时才暴露问题
+	if _, err := Encrypt("   "); err == nil {
+		t.Error("空明文应报错")
+	}
+}
+
+// TestPlaintextPreview 自检指纹: 短串只报长度（不把大半个秘密回显出来），
+// 长串首尾各 4 字符。
+func TestPlaintextPreview(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"私钥（64 字符）", strings.Repeat("ab", 32), "64 字符（首 abab… 尾 …abab）"},
+		{"恰好到阈值 23", strings.Repeat("c", 23), "23 字符"},
+		{"阈值 24", strings.Repeat("c", 24), "24 字符（首 cccc… 尾 …cccc）"},
+		{"短串", "short", "5 字符"},
+	}
+	for _, c := range cases {
+		if got := PlaintextPreview(c.in); got != c.want {
+			t.Errorf("%s: PlaintextPreview = %q, 期望 %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestValidate 校验规则表。
 func TestValidate(t *testing.T) {
 	base := func() *AppConfig { return defaults() }

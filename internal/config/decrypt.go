@@ -66,7 +66,7 @@ func decryptSensitiveFields(cfg *AppConfig) error {
 		return nil
 	}
 
-	password, err := readDecryptPassword()
+	password, err := readConfigPassword("请输入启动密码: ")
 	if err != nil {
 		return err
 	}
@@ -86,24 +86,25 @@ func decryptSensitiveFields(cfg *AppConfig) error {
 	return nil
 }
 
-// readDecryptPassword 获取解密密码。
+// readConfigPassword 获取配置密码（解密与加密共用同一来源，故密文能互相解开）。
 //
 // 优先读取 PM_CONFIG_DECRYPT_PASSWORD 环境变量（无人值守启动的唯一途径——nohup/
 // systemd 下没有终端，term.ReadPassword 会直接失败），否则通过终端安全输入（无回显）。
-func readDecryptPassword() (string, error) {
+// 提示语写 stderr: stdout 是数据通道（`-encrypt` 的密文走它），提示串进去会污染重定向的产出。
+func readConfigPassword(prompt string) (string, error) {
 	if envPassword := strings.TrimSpace(os.Getenv("PM_CONFIG_DECRYPT_PASSWORD")); envPassword != "" {
 		return envPassword, nil
 	}
 
-	fmt.Fprint(os.Stdout, "请输入启动密码: ")
+	fmt.Fprint(os.Stderr, prompt)
 	passwordBytes, err := term.ReadPassword(int(os.Stdin.Fd()))
-	fmt.Fprintln(os.Stdout)
+	fmt.Fprintln(os.Stderr)
 	if err != nil {
-		return "", fmt.Errorf("读取解密密码失败（无终端时请设 PM_CONFIG_DECRYPT_PASSWORD）: %w", err)
+		return "", fmt.Errorf("读取密码失败（无终端时请设 PM_CONFIG_DECRYPT_PASSWORD）: %w", err)
 	}
 	password := strings.TrimSpace(string(passwordBytes))
 	if password == "" {
-		return "", errors.New("解密密码不能为空")
+		return "", errors.New("配置密码不能为空")
 	}
 	return password, nil
 }

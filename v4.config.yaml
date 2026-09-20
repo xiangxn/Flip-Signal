@@ -5,11 +5,12 @@
 #
 # ── 优先级（三层）──
 #   CLI flag  >  本文件  >  代码默认值（internal/config/defaults()）
-#   共 4 个 CLI flag，其余一律走本文件：
+#   共 5 个 CLI flag（4 个引擎参数 + 1 个工具），其余一律走本文件：
 #     -config <路径>     指定本文件（**留空则不读任何配置文件**，纯默认值跑）
 #     -dashboard :8090   覆盖 runtime.dashboard_addr（显式传空串 = 本次不开 Dashboard）
 #     -mode paper|live   覆盖 runtime.mode
 #     -stake 2           覆盖 flip.stake
+#     -encrypt           凭证加密工具: 明文 → 密文后退出（不读配置文件、不跑引擎）
 #   **不读任何环境变量**（唯一例外: PM_CONFIG_DECRYPT_PASSWORD，见下"敏感字段"）。
 #
 # ── 用法 ──
@@ -21,7 +22,8 @@
 #
 # ── 敏感字段（sdk.polymarket.owner_key / clob_creds / relayer_key）──
 #   留空       = 只读运行（纸面交易，引擎自动生成临时密钥）
-#   填密文     = 实盘可用。密文由 SDK 的 pmutils.NewEncryptor(密码).Encrypt(明文) 生成
+#   填密文     = 实盘可用。密文由 `go run ./cmd/flip -encrypt` 生成（读一段明文 → 打印
+#                密文; 密码同下 PM_CONFIG_DECRYPT_PASSWORD，也可管道: printf %s "$KEY" | ...）
 #   启动时解密: 优先读环境变量 PM_CONFIG_DECRYPT_PASSWORD，否则终端无回显输入
 #               （nohup/systemd 下没有终端 → 必须设该环境变量）
 #   ⚠️ **明文会被当成密文解析而启动失败**（判定语义是"非空即密文"，没有明文兜底）。
