@@ -43,6 +43,17 @@ func decryptSensitiveFields(cfg *AppConfig) error {
 	}
 	appendCredTargets("sdk.polymarket.clob_creds", cfg.SDK.Polymarket.CLOBCreds)
 
+	// relayer_key 是另一种凭证结构（headers.RelayerKey 而非 ApiKeyCreds）: key 是
+	// API key、key_address 是它的归属地址。**整块**加密（与 clob_creds 同语义）——
+	// 只加密其中一个会让另一个以密文形态被当成地址发出去（RELAYER_API_KEY_ADDRESS
+	// 头），而"哪个字段该明文"这种半加密规则正是本包刻意不留的东西。
+	if rk := cfg.SDK.Polymarket.RelayerKey; rk != nil {
+		targets = append(targets,
+			decryptTarget{label: "sdk.polymarket.relayer_key.key", value: &rk.ApiKey},
+			decryptTarget{label: "sdk.polymarket.relayer_key.key_address", value: &rk.ApiKeyAddress},
+		)
+	}
+
 	// 若无加密字段，跳过（配置文件里没写凭证 = 只读纸面，不需要密码）
 	hasEncrypted := false
 	for i := range targets {

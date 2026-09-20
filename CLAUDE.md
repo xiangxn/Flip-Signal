@@ -115,7 +115,7 @@ FlipSignal/
 ├── internal/
 │   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
 │   │   ├── config.go                 # AppConfig + defaults()（唯一默认值来源）+ Load()
-│   │   ├── decrypt.go                # owner_key/clob_creds 密文解密（PM_CONFIG_DECRYPT_PASSWORD）
+│   │   ├── decrypt.go                # owner_key/clob_creds/relayer_key 密文解密（PM_CONFIG_DECRYPT_PASSWORD）
 │   │   ├── validate.go               # 校验（fatal/warning），在 CLI 覆盖之后调用
 │   │   └── configfile_drift_test.go  # v4.config.yaml 漂移守卫
 │   ├── flip/                         # 引擎核心层（零外部依赖, 可独立测试）
@@ -354,7 +354,7 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
      **以后别再加回来**（viper 的 env 系 API 一个都没调）。
    - **`UnmarshalExact`（拼错的键 = 启动失败）是有意的**：策略参数静默回落默认值
      比崩溃危险得多。
-   - **敏感字段**（`sdk.polymarket.owner_key`/`clob_creds`）沿用 master：非空即密文
+   - **敏感字段**（`sdk.polymarket.owner_key`/`clob_creds`/`relayer_key`）沿用 master：非空即密文
      （AES-256-CBC, key=SHA256(密码)），密码走 `PM_CONFIG_DECRYPT_PASSWORD` 或终端
      无回显输入；四项全空则**不弹密码**（纸面运行永不卡在输入）。
      `POLYMARKET_*` 环境变量已**全部废弃**，凭证只能来自配置文件。
@@ -578,9 +578,14 @@ go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 ### 敏感字段（`sdk.polymarket.*`）
 
 凭证**只能来自配置文件**（`POLYMARKET_*` 环境变量已不再读取）：`owner_key` /
-`clob_creds.{key,secret,passphrase}` 留空 = 只读运行（引擎自动生成临时密钥跑纸面）；
-填 **密文**（`pmutils.NewEncryptor(密码).Encrypt(明文)`，AES-256-CBC）则实盘可用。
-判定语义是**非空即密文**——明文写进去会在解密时启动失败（没有"看起来像明文"的兜底）。
+`clob_creds.{key,secret,passphrase}` / `relayer_key.{key,key_address}` 留空 = 只读运行
+（引擎自动生成临时密钥跑纸面）；填 **密文**（`pmutils.NewEncryptor(密码).Encrypt(明文)`，
+AES-256-CBC）则实盘可用。判定语义是**非空即密文**——明文写进去会在解密时启动失败
+（没有"看起来像明文"的兜底）。**凭证块一律整块加密**：`relayer_key` 的 `key_address`
+虽是地址（公开信息）也走同一口径——半加密会让另一个字段以密文形态被当成地址发出去
+（`RELAYER_API_KEY_ADDRESS` 头），且"哪个子字段该明文"是本包刻意不留的规则。
+`builder_creds` 目前**不在**加密名单（本引擎未使用；要接 builder 时一并加进
+`decrypt.go` 的 `appendCredTargets`）。
 
 | 变量 | 说明 | 必填 |
 |------|------|------|

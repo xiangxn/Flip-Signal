@@ -105,6 +105,14 @@ func TestLoadDecryptSensitive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("加密 clob passphrase 失败: %v", err)
 	}
+	relayerKey, err := enc.Encrypt("relayer-key-1")
+	if err != nil {
+		t.Fatalf("加密 relayer key 失败: %v", err)
+	}
+	relayerKeyAddr, err := enc.Encrypt("0xrelayeraddr")
+	if err != nil {
+		t.Fatalf("加密 relayer key_address 失败: %v", err)
+	}
 
 	path := writeConfig(t, `
 sdk:
@@ -114,6 +122,9 @@ sdk:
       key: "`+clobKey+`"
       secret: "`+clobSecret+`"
       passphrase: "`+clobPassphrase+`"
+    relayer_key:
+      key: "`+relayerKey+`"
+      key_address: "`+relayerKeyAddr+`"
 `)
 	t.Setenv("PM_CONFIG_DECRYPT_PASSWORD", password)
 
@@ -130,9 +141,25 @@ sdk:
 	if got.SDK.Polymarket.CLOBCreds.Key != "clob-key-1" {
 		t.Errorf("clob_creds.key = %q, 期望 clob-key-1", got.SDK.Polymarket.CLOBCreds.Key)
 	}
+	if got.SDK.Polymarket.RelayerKey == nil {
+		t.Fatal("relayer_key 不应为 nil")
+	}
+	if got.SDK.Polymarket.RelayerKey.ApiKey != "relayer-key-1" {
+		t.Errorf("relayer_key.key = %q, 期望 relayer-key-1", got.SDK.Polymarket.RelayerKey.ApiKey)
+	}
+	if got.SDK.Polymarket.RelayerKey.ApiKeyAddress != "0xrelayeraddr" {
+		t.Errorf("relayer_key.key_address = %q, 期望 0xrelayeraddr", got.SDK.Polymarket.RelayerKey.ApiKeyAddress)
+	}
 	// 明文凭证写着（未加密）→ 解密失败、启动报错（判定语义: 非空即密文）
 	if _, err := Load(writeConfig(t, "sdk:\n  polymarket:\n    owner_key: \""+strings.Repeat("cd", 32)+"\"\n")); err == nil {
 		t.Error("明文 owner_key 应解密失败")
+	}
+	// relayer_key 整块同语义: key 或 key_address 任一是明文即启动失败
+	if _, err := Load(writeConfig(t, "sdk:\n  polymarket:\n    relayer_key:\n      key: \"plaintext-key\"\n")); err == nil {
+		t.Error("明文 relayer_key.key 应解密失败")
+	}
+	if _, err := Load(writeConfig(t, "sdk:\n  polymarket:\n    relayer_key:\n      key_address: \"0xdeadbeef\"\n")); err == nil {
+		t.Error("明文 relayer_key.key_address 应解密失败（整块同一口径）")
 	}
 }
 

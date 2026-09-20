@@ -19,7 +19,7 @@
 # ⚠️ 本文件是**默认值镜像**（internal/config/configfile_drift_test.go 守着，改值会测试失败）。
 #    要调参请复制成 config.local.yaml（已 gitignore）再用 -config 指过去。
 #
-# ── 敏感字段（sdk.polymarket.owner_key / clob_creds）──
+# ── 敏感字段（sdk.polymarket.owner_key / clob_creds / relayer_key）──
 #   留空       = 只读运行（纸面交易，引擎自动生成临时密钥）
 #   填密文     = 实盘可用。密文由 SDK 的 pmutils.NewEncryptor(密码).Encrypt(明文) 生成
 #   启动时解密: 优先读环境变量 PM_CONFIG_DECRYPT_PASSWORD，否则终端无回显输入
@@ -180,11 +180,14 @@ sdk:
     #   secret: ""
     #   passphrase: ""
 
-    # Builder / Relayer 凭证（可选，本引擎未使用）
+    # Builder 凭证（可选，本引擎未使用；填写同 clob_creds，须密文）
     # builder_creds:
     #   key: ""
     #   secret: ""
     #   passphrase: ""
+
+    # Relayer 凭证（可选，本引擎未使用）: 整块加密——key 与 key_address 都要填
+    # Encrypt() 生成的密文（key_address 虽是地址，也走同一口径，见 internal/config/decrypt.go）
     # relayer_key:
     #   key: ""
     #   key_address: ""
