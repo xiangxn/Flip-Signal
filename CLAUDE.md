@@ -241,19 +241,28 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
 
 | 库 | 用途 |
 |----|------|
-| `github.com/xiangxn/go-polymarket-sdk` | Polymarket REST/WS 客户端 |
+| `github.com/xiangxn/go-polymarket-sdk` v0.7.2 | Polymarket REST/WS 客户端 |
 | `github.com/gorilla/websocket` | Binance WebSocket 连接（feed adapter） |
 | `github.com/tidwall/gjson` | JSON 解析（SDK 依赖）|
 | `github.com/spf13/viper` | 配置文件加载（internal/config，同 master 分支）|
 | `golang.org/x/term` | 解密密码无回显终端输入（nohup 场景走环境变量，不走它）|
 
-### 本地开发 replace 指令
+### 本地开发 replace 指令（2026-09-21 起默认**不启用**）
+
+`go.mod` 当前**没有** replace：SDK 直接依赖发布版本 `github.com/xiangxn/go-polymarket-sdk
+v0.7.2`（走模块代理/本地模块缓存，本机也没有 `/tmp/go-polymarket-sdk` 这个目录）。
+只有需要**改 SDK 源码**时才临时加回（典型场景是 GTD——SDK 的 `PostOrder` 把 expiration
+硬编码成 `"0"` 且不在签名结构里，见决策 #16）：
 
 ```
-replace (
-    github.com/xiangxn/go-polymarket-sdk => /tmp/go-polymarket-sdk
-)
+replace github.com/xiangxn/go-polymarket-sdk => /tmp/go-polymarket-sdk
 ```
+
+⚠️ 它指向**本机路径**：带着这行提交后，换台机器 / 重新克隆 / `/tmp` 被清过的本机构建
+会直接失败（`replacement directory … does not exist`）——而部署链路是「本机 `build.sh`
+交叉编译 → `deploy.sh` scp 二进制」（服务器不构建），所以这个坑**不在部署时暴露**，只在
+下次有人重新构建时炸；且 SDK 改动不体现在 `go.sum` 里，产物无法从仓库复现。故改完 SDK
+要么删掉这行再提交，要么把 fork 发一个版本号、`go.mod` 指过去。
 
 ---
 
@@ -526,6 +535,11 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
       5 分钟窗口（触发时 rem 只剩 ~3 分钟）几乎等于挂到闭市；更硬的一层是 SDK
       `PostOrder` 把 expiration 硬编码为 `"0"`（`orders.OrderToDTO(..., "0")`）且它
       不在 EIP-712 签名结构里，客户端要用上 GTD 得改 SDK。故撤单由我们自己发。
+      （2026-09-21 在 v0.7.2 上复核过：结论不变。该版本新增的 `UserOrder.Expiration`
+      是**幌子**——它只流进 `Order.Expiration` 这个**未签名**的结构体字段，而
+      `_ORDER_EIP712_TYPES` 仍是 11 个字段、不含 expiration；真正上线的 DTO expiration
+      仍是 `polymarket/polymarket.go:555`（`PostOrder`）与 `:612`（`PostOrders`）里写死的
+      `"0"` 实参，且没有任何入口能改它。）
       **下单路径仍是单次网调**：`CreateOrder` 只查 tickSize/negRisk，两者由
       `PrefetchTokenInfo` 每窗预热（SDK 内部不读 feeRate，`ResolveFeeRateBps` 无调用
       点），`PostOrder` 无附加请求；撤单是独立的 `DELETE /order`（一分钟一笔量级）。
