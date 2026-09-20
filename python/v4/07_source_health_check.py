@@ -138,7 +138,14 @@ def anchor_missing_at_end(r):
     「锚待命中」（每窗开头必然出现 ~2s, 实测到达 p50 +2.0s）不算缺失——故新行按
     anchor_exact 判定（见 A2）; 09-19 之前的老行没有 anchor_exact 键, 回退
     anchor_missing（当时它恰是「期末仍无锚」语义: 恢复通道成功即清除）。
+
+    ⚠️ **skip 行必须排除**（2026-09-20 修）: 整窗跳过（no_sigma / 取不到市场信息）的窗
+    本就不取锚, 而 anchor_exact 无 omitempty 恒落盘 ⇒ 它的 anchor_exact=false 会被这里
+    / 老行的 anchor_missing 读成「期末仍无锚」, 把「跳过」双计进「无锚」（跳过列已另
+    有一行）。这正是 A2 的验收线排除 skip 的同一条理由。故判定前先看 skip。
     """
+    if r.get("skip"):
+        return False
     if "anchor_exact" in r:
         return not r.get("anchor_exact")
     return bool(r.get("anchor_missing"))
