@@ -827,10 +827,15 @@ func (r *Recorder) HasRecord(conditionID string) bool {
 
 // NeedsReconcile 返回执行中断待人工核对的行数（live）:
 //   - submitting = 下单后崩溃（order_id 大概率不可得）;
-//   - resting    = GTC 挂单遗留（进程死在挂单期间）——重启后由 FillTracker 接管
-//     自动定稿, 这里只在接管前计一次; 定稿不了（查不到该单）会保持 resting;
-//   - note 以 ExecNoteUnknown 开头 = 成交结果不明（POST 传输错误、或挂单终态
-//     从未观测到）, 任何状态都算。
+//   - note 以 ExecNoteUnknown 开头 = 成交结果不明（POST 传输错误, 或挂单终态从未
+//     观测到）, 任何状态都算;
+//   - resting 且**无法跟踪**（缺 order_id/限价/投入, 见 trading.FillTracker.Register）
+//     = 永远无人定稿的遗留行。
+//
+// ⚠️ **正常在途的 resting 行不算**（2026-09-20 review 修）: 它由 FillTracker 在撤单
+// 点定稿, 计进来会让告警常亮（live 下几乎每个窗口都有一段挂单在簿），真出问题反而
+// 看不见; 定稿不了的会被 FillTracker 写成 resting + ExecNoteUnknown（见上一条）, 由
+// 那条兜住, 不丢。
 //
 // 重启后 cmd/flip 据此汇总告警——不自动补单、不自动注册。
 func (r *Recorder) NeedsReconcile() int {
@@ -839,13 +844,22 @@ func (r *Recorder) NeedsReconcile() int {
 	n := 0
 	for _, rec := range r.recs {
 		switch {
-		case rec.ExecStatus == ExecStatusSubmitting, rec.ExecStatus == ExecStatusResting:
+		case rec.ExecStatus == ExecStatusSubmitting:
 			n++
 		case strings.HasPrefix(rec.ExecNote, ExecNoteUnknown):
+			n++
+		case rec.ExecStatus == ExecStatusResting && !trackableResting(rec):
 			n++
 		}
 	}
 	return n
+}
+
+// trackableResting 判断一条 resting 行能否被 FillTracker 接手: 条件是
+// trading.FillTracker.Register 的入表判据（缺 order_id/限价/投入即只告警跳过、
+// 不入表）——接不了的行永远停在 resting, 必须计进待人工核对。
+func trackableResting(rec *Record) bool {
+	return rec.OrderID != "" && rec.Fill > 0 && rec.Stake > 0
 }
 
 // PendingSignals 返回未结算 ok 信号的**副本**（重启后据此重新注册结算轮询;

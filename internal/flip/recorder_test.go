@@ -643,13 +643,18 @@ func TestRestartReconcileScan(t *testing.T) {
 		return rec
 	}
 	wonTrue := true
+	recNoID := mk("c-rest-noid", ExecStatusResting, "", true, nil)
+	recNoID.OrderID = "" // FillTracker.Register 接不了（缺 order_id）→ 永远无人定稿 → 核对
 	lines := []*Record{
-		mk("c-sub", ExecStatusSubmitting, "", true, nil),                        // 下单后崩溃 → 核对
-		mk("c-unk", ExecStatusRejected, ExecNoteUnknown+": POST 超时", true, nil), // 结果不明 → 核对
-		mk("c-rej", ExecStatusRejected, "balance insufficient", true, nil),      // 明确拒单 → 不核对
-		mk("c-ok", "", "", true, nil),                                           // paper 待结算 → pending
-		mk("c-fill", ExecStatusFilled, "", true, nil),                           // live 成交待结算 → pending
-		mk("c-done", ExecStatusFilled, "", true, &wonTrue),                      // 已结算 → 不挂
+		mk("c-sub", ExecStatusSubmitting, "", true, nil),                            // 下单后崩溃 → 核对
+		mk("c-unk", ExecStatusRejected, ExecNoteUnknown+": POST 超时", true, nil),     // 结果不明 → 核对
+		mk("c-rej", ExecStatusRejected, "balance insufficient", true, nil),          // 明确拒单 → 不核对
+		mk("c-rest", ExecStatusResting, "", true, nil),                              // GTC 在途 → FillTracker 接管, **不核对**（旧实现误计, 告警常亮）
+		mk("c-rest-unk", ExecStatusResting, ExecNoteUnknown+": 从未观测到该单", true, nil), // 未确认 → 核对
+		recNoID,                       // 缺 order_id 的遗留行 → 核对
+		mk("c-ok", "", "", true, nil), // paper 待结算 → pending
+		mk("c-fill", ExecStatusFilled, "", true, nil),      // live 成交待结算 → pending
+		mk("c-done", ExecStatusFilled, "", true, &wonTrue), // 已结算 → 不挂
 	}
 	var buf []byte
 	for _, rec := range lines {
@@ -670,8 +675,10 @@ func TestRestartReconcileScan(t *testing.T) {
 	}
 	defer r.Close()
 
-	if got := r.NeedsReconcile(); got != 2 {
-		t.Fatalf("NeedsReconcile = %d, 期望 2（submitting + unknown-rejected）", got)
+	// 4 = submitting + unknown-rejected + resting(unknown note) + resting(缺 order_id);
+	// 正常在途的 c-rest 不计——计了 live 下几乎每窗都在报警（2026-09-20 review #6）
+	if got := r.NeedsReconcile(); got != 4 {
+		t.Fatalf("NeedsReconcile = %d, 期望 4（submitting + unknown-rejected + resting-unknown + resting-无orderID）", got)
 	}
 	pending := r.PendingSignals()
 	if len(pending) != 2 {

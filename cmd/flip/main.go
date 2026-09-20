@@ -270,6 +270,24 @@ func main() {
 	}
 	defer recorder.Close()
 
+	// ── 🔴 未决 GTC 挂单 × 非 live 模式 = 拒绝启动 ──
+	// resting 行只可能来自 live（paper 即时定稿, 永不落 resting）——那笔真单还在
+	// CLOB 簿上等对手方。paper 模式没有凭证撤单、也不做终态跟踪: 重启后它会一直吃到
+	// 闭市（rem ≤ 策略时间腿之后的成交正是决策 #16 要截掉的逆向选择样本）, 而且永远
+	// 无人结算——行悬在磁盘上, 日亏熔断与 P&L 都看不见它。故宁可拒绝启动（与配置
+	// 拼错即失败同一原则: 静默带病运行比崩溃危险）, 逼运维带凭证以 live 重启接管
+	// （接管后首轮查询就能读到终态、把未成交余量撤掉）, 或按 order_id 人工结清该行。
+	if effMode != "live" {
+		if pend := pendingResting(recorder.Observations()); len(pend) > 0 {
+			for _, rec := range pend {
+				log.Printf("[Dog] 🔴 未决挂单遗留: order=%q status=%s slug=%s event_start=%d note=%q",
+					rec.OrderID, rec.ExecStatus, rec.Slug, rec.EventStart, rec.ExecNote)
+			}
+			log.Fatalf("[Dog] 🔴 检测到 %d 条未决 GTC 挂单（磁盘 resting 行）, 而本次是 %s 模式——该模式既不能撤单也不能定稿。请带凭证以 -mode live 重启接管（首轮查询即定稿并撤余量）; 若该单早已了结, 按 order_id 去 data-api/UI 核对后人工结清该行再跑 paper",
+				len(pend), effMode)
+		}
+	}
+
 	resolutionPoller := trading.NewResolutionPoller(
 		client.FetchMarketBySlug,
 		10*time.Second,
@@ -956,6 +974,19 @@ func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.
 	// 撤单点由 FillTracker 自己的启动日志打印（它拿得到配置里的时间腿）
 	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 触发 ask, 绝不超价, 到策略时间腿撤未成交余量; 首窗禁单）", addr)
 	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client})
+}
+
+// pendingResting 挑出磁盘上未决的 GTC 挂单行（resting = 订单仍在 CLOB 簿上、成交量
+// 未定稿）。只可能来自 live（paper 即时定稿）; live 模式下由 FillTracker 接管, 非 live
+// 模式下必须拒绝启动（见启动处的 🔴 段）。
+func pendingResting(recs []*flip.Record) []*flip.Record {
+	var out []*flip.Record
+	for _, rec := range recs {
+		if rec.ExecStatus == flip.ExecStatusResting {
+			out = append(out, rec)
+		}
+	}
+	return out
 }
 
 // warnLiveStartup 打印 live 启动告警（载入期逐条 ⚠️ 已打, 这里给总量与目录提示;
