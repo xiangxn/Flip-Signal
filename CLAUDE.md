@@ -741,6 +741,32 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
     - 验收：btreplay 625 笔逐位一致（n=625 WR 24.6% EV +0.633U +395.8U）+ tail parity
       三闩锁计数一致（frame 3643 / snap 3634 / scan 485）+ `go test ./internal/... -race`
       全绿 + `TestResolveSettleSrcPersisted`（两族各一，含重启与 `omitempty` 钉子）。
+20. **无仓位行独立成类：`signal = won + lost + pending + noexec`**（2026-09-24，flip
+    Dashboard）。起因：用户从日志看到一条 `信号被风控闸拦截未下单: 重启后首窗禁单`，
+    页面上却找不到它——`/api/signals` 里这行**是在的**（`Signals()` 只按 `OK` 过滤），
+    但结果列只会渲染 `won == null` ⇒「待结算」，**永远不会变**（无仓位 ⇒ 永不被结算），
+    而旧的 `lost = sigCount − won − pending` 反算又把它计进「负」——一笔从未下过的单
+    同时虚增亏损笔数与压低胜率。两处都改：
+    - **分类**：`FlipState.tally` 逐行只落一类——`won` / `lost` / `pending`（**在
+      `Recorder.PendingSignals()` 里**，即 `isSettlable` 过滤后的真实持仓行，判据单一来源
+      不另写一遍）/ `noexec`（其余）。`/api/state` 增 `noexec_count`，`/api/daily` 的
+      「待结算」列拆出「未成交」列（`flipDailyRow` 包 `dayAgg`，同 tail 的
+      `tailDailyRow` 形制；共用骨架 `dayAgg` 不动 ⇒ tail 数字零变化）。胜率分母**只**
+      含赢+输。
+    - **可见性**：`recordResponse` 补 `gate_reason` / `exec_status` / `exec_note`
+      （此前三个字段根本没进响应），前端结果列三态合一：已结算 → 赢/输（paper 方案 A
+      下被闸行照常结算，故附 `闸·首窗`/`闸·熔断` 标记）→ 被闸 → 执行状态（`挂单中`/
+      `未成交`/`下单被拒`/`下单中`，`未知结果` 前缀单列「成交未知」）→ 待结算。份额与
+      P&L 对无仓位行显示「—」（不拿目标股数冒充成交）；观测表判定列同步标闸。
+    - ⚠️ **口径红线**：`pending` ≠ `won == nil`（后者含永不结算的行）；分析脚本若按
+      「未结算」筛样本，必须区分「在途」与「无仓位」。paper 方案 A 的被闸行仍照常结算
+      ⇒ `noexec` 里**永远不含** paper 行（它只出现在 live 的 rejected/unfilled/resting/
+      成交未知）。
+    - 验收：`TestFlipNoExecClassification`（6 行混排钉住恒等式 6=1+1+1+3、胜率 0.5、
+      逐日同口径、三个键逐行透传）+ `go test ./internal/... -race` 全绿。
+    - **tail 侧未动**（用户本次只报 flip）：tail 的 `collectDaily` 与 `lost = sig − won
+      − pending` 有同一反算口径，但 tail 实盘未上、被闸行恒为 paper（照常结算）⇒ 现网
+      无症状；真上实盘前应同步这套分类。
 
 ---
 
