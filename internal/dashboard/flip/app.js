@@ -17,6 +17,59 @@
     dist_out: '浅洞外'
   };
 
+  // 风控闸原因（= internal/flip Gate* 常量字面量）与结果列短标签。
+  // ⚠️ 被闸行**没有仓位**: live 直接不 POST; paper（方案 A）只标记、行照常结算。
+  var GATE_CN = { first_window: '重启后首窗禁单', daily_loss: '日亏熔断（锁存）' };
+  var GATE_SHORT = { first_window: '闸·首窗', daily_loss: '闸·熔断' };
+
+  // live 执行状态（= internal/flip ExecStatus* 常量）; 无仓位的那几个在结果列直接显示。
+  var EXEC_CN = {
+    submitting: '下单中',
+    resting: '挂单中',
+    unfilled: '未成交',
+    rejected: '下单被拒'
+  };
+  // 成交结果不明（= internal/flip ExecNoteUnknown）: 仓位悬而未决, 需人工核对
+  var NOTE_UNKNOWN = '未知结果';
+
+  // 结果列短标签: 悬停给全称 + 说明
+  function tag(cls, text, title) {
+    return '<span class="tag ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>';
+  }
+
+  // 该行是否有仓位（决定「份额/P&L」显示成数字还是「—」）:
+  //   paper 正常行 exec_status 缺省; live 只有 filled/partial 真成交;
+  //   已结算行必然有仓位。被闸/被拒/未成交/挂单未定稿/成交未知 = 没有。
+  function hasPosition(r) {
+    if (r.won != null) return true;
+    var e = r.exec_status;
+    return e === undefined || e === '' || e === 'filled' || e === 'partial';
+  }
+
+  // 结果列（结算结果 / 被闸 / 下单状态 三态合一）:
+  //   已结算     → 赢/输（paper 方案 A 下被闸行照常结算, 附闸标记）
+  //   被闸未结算 → 「闸·熔断」等（live 不 POST, 永无仓位 ⇒ 不可能是待结算）
+  //   其他       → 执行状态; 全空 = paper 正常行 → 待结算
+  function resultCell(r) {
+    var gate = r.gate_reason
+      ? tag('gate', GATE_SHORT[r.gate_reason] || r.gate_reason,
+        '被风控闸拦下: ' + (GATE_CN[r.gate_reason] || r.gate_reason) + (r.exec_note ? ' | ' + r.exec_note : ''))
+      : '';
+    if (r.won != null) {
+      return (r.won ? '<span class="won">赢</span>' : '<span class="lost">输</span>') + gate;
+    }
+    if (r.gate_reason) return gate;
+    if (r.exec_note && r.exec_note.indexOf(NOTE_UNKNOWN) === 0) {
+      return tag('warn', '成交未知', r.exec_note + '（无仓位, 按 order_id 去 data-api 核对）');
+    }
+    var cn = EXEC_CN[r.exec_status];
+    if (cn) {
+      var warn = (r.exec_status === 'unfilled' || r.exec_status === 'rejected') ? 'warn' : '';
+      return tag(warn, cn, r.exec_note);
+    }
+    return '<span class="muted">待结算</span>';
+  }
+
   function fmtTime(tsMs) {
     var d = new Date(tsMs);
     function p(n) { return n < 10 ? '0' + n : '' + n; }
@@ -110,6 +163,7 @@
     $('statWon').textContent = s.won_count;
     $('statLost').textContent = s.lost_count;
     $('statPending').textContent = s.pending_count;
+    $('statNoexec').textContent = s.noexec_count;
     $('statWr').textContent = (s.win_rate * 100).toFixed(1) + '%';
     var pnl = $('statPnl');
     pnl.textContent = fmtPnl(s.cumulative_pnl);
@@ -231,12 +285,15 @@
   };
 
   // 信号行: 时间 侧 rem fill m45 dist_s 份额 结果 P&L
+  // 份额/P&L 只对**有仓位**的行给数字: 被闸与下单失败的行没有成交, 拿目标股数冒充
+  // 成交会让页面看起来像「有仓位在途」——正是用户反馈的那类混淆。
   function renderSignals(resp) {
     var tb = document.querySelector('#signalsTable tbody');
     tb.innerHTML = '';
     $('signalsEmpty').hidden = resp.items.length > 0;
     resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
+      var pos = hasPosition(r);
       var pnlCls = r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '');
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
@@ -245,9 +302,9 @@
         '<td>' + r.fill.toFixed(3) + '</td>' +
         '<td>' + (r.m_45 ? r.m_45.toFixed(2) : '—') + '</td>' +
         '<td>' + fmtDist(r.dist_s) + '</td>' +
-        '<td>' + (r.shares ? r.shares.toFixed(1) : '—') + '</td>' +
-        '<td>' + (r.won == null ? '<span class="muted">待结算</span>' : (r.won ? '<span class="won">赢</span>' : '<span class="lost">输</span>')) + '</td>' +
-        '<td class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td>';
+        '<td>' + (pos && r.shares ? r.shares.toFixed(1) : '—') + '</td>' +
+        '<td>' + resultCell(r) + '</td>' +
+        '<td class="' + (pos ? pnlCls : 'muted') + '">' + (pos ? fmtPnl(r.pnl) : '—') + '</td>';
       tb.appendChild(tr);
     });
   }
@@ -260,8 +317,13 @@
     resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
       var status;
-      if (r.ok) status = '<span class="won">信号</span>';
-      else status = '<span class="muted">' + (REJECT_CN[r.reject_reason] || esc(r.reject_reason)) + '</span>';
+      if (r.ok) {
+        // 被风控闸拦下的信号在这里也标一下（信号表的完整口径见结果列）
+        status = '<span class="won">信号</span>' +
+          (r.gate_reason ? ' ' + tag('gate', GATE_SHORT[r.gate_reason] || r.gate_reason, GATE_CN[r.gate_reason] || r.gate_reason) : '');
+      } else {
+        status = '<span class="muted">' + (REJECT_CN[r.reject_reason] || esc(r.reject_reason)) + '</span>';
+      }
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
         '<td>' + sideTag(r.side) + '</td>' +
@@ -390,6 +452,7 @@
       '<td>' + r.obs + '</td>' +
       '<td>' + r.signals + '</td>' +
       '<td>' + r.pending + '</td>' +
+      '<td>' + r.noexec + '</td>' +
       '<td>' + wr + '</td>' +
       '<td class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td></tr>';
   }

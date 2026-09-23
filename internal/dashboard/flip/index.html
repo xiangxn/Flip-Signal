@@ -24,6 +24,7 @@
       <div class="card stat"><div class="stat-val" id="statWon">—</div><div class="stat-lbl">胜</div></div>
       <div class="card stat"><div class="stat-val" id="statLost">—</div><div class="stat-lbl">负</div></div>
       <div class="card stat"><div class="stat-val" id="statPending">—</div><div class="stat-lbl">待结算</div></div>
+      <div class="card stat" title="无仓位: 被风控闸拦下 / 下单被拒 / 未成交 / 挂单未定稿（不计入胜率）"><div class="stat-val" id="statNoexec">—</div><div class="stat-lbl">未成交</div></div>
       <div class="card stat"><div class="stat-val" id="statWr">—</div><div class="stat-lbl">胜率</div></div>
       <div class="card stat"><div class="stat-val" id="statPnl">—</div><div class="stat-lbl">累计 P&amp;L</div></div>
       <div class="card stat"><div class="stat-val" id="statDd">—</div><div class="stat-lbl">最大回撤</div></div>
@@ -139,7 +140,7 @@
       <div class="modal-body">
         <table id="dailyTable">
           <thead><tr>
-            <th>日期 (UTC)</th><th>观测</th><th>信号</th><th>待结算</th><th>胜率</th><th>P&amp;L</th>
+            <th>日期 (UTC)</th><th>观测</th><th>信号</th><th>待结算</th><th title="无仓位: 被闸/被拒/未成交/挂单未定稿">未成交</th><th>胜率</th><th>P&amp;L</th>
           </tr></thead>
           <tfoot></tfoot>
           <tbody></tbody>

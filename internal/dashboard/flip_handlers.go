@@ -43,12 +43,13 @@ type stateResponse struct {
 	// lost_triggers = 本会触发但被延迟闸/整簿缺失挡掉的 tick 明细（§1.3 可见性）
 	WindowStats *flip.WindowStats `json:"window_stats,omitempty"`
 
-	// 统计汇总（已结算 + 待结算信号）
+	// 统计汇总（已结算 + 待结算 + 无仓位; 恒等式 signal = won + lost + pending + noexec）
 	ObservationCount int     `json:"observation_count"` // 全部触底观测（含失败）
 	SignalCount      int     `json:"signal_count"`
 	WonCount         int     `json:"won_count"`
 	LostCount        int     `json:"lost_count"`
-	PendingCount     int     `json:"pending_count"`
+	PendingCount     int     `json:"pending_count"` // 有仓位、等结算回填
+	NoExecCount      int     `json:"noexec_count"`  // 无仓位: 被闸/被拒/未成交/挂单未定稿（不入胜率）
 	WinRate          float64 `json:"win_rate"`
 	CumPnl           float64 `json:"cumulative_pnl"`
 	DayPnlPos        int     `json:"day_pnl_pos"`  // 逐日盈利天数（已结算）
@@ -84,12 +85,33 @@ type recordResponse struct {
 	Won          *bool   `json:"won,omitempty"`
 	PnL          float64 `json:"pnl,omitempty"`
 	ResolvedAt   string  `json:"resolved_at,omitempty"`
+
+	// 执行/风控可见性（2026-09-24 追加）。此前这三个字段不在响应里, 于是被风控闸拦下
+	// 或下单失败的行在页面上与「在途待结算」长得一模一样——结果列永远停在「待结算」,
+	// 而它们**永远不会**被结算（无仓位）。live 每次重启都产生一条首窗禁单行。
+	GateReason string `json:"gate_reason,omitempty"` // 风控闸: first_window | daily_loss
+	ExecStatus string `json:"exec_status,omitempty"` // live 执行终态: filled/partial/unfilled/rejected/resting/submitting
+	ExecNote   string `json:"exec_note,omitempty"`   // 拒绝/未成交的说明（前端悬停显示）
+}
+
+// flipDailyRow 是 flip /api/daily 的一行 = 共用骨架 + 本族专有的「无仓位」细分列。
+//
+// 为何要拆（2026-09-24）: 共用骨架的 Pending（won == nil）把两类完全不同的行混在
+// 一起——有仓位在途（等结算编排回填, 几十秒内必然落定）与**永远不会有结算的行**
+// （被风控闸拦下 / 下单被拒 / 0 成交 / GTC 挂单未定稿）。后者算「待结算」会让日表的
+// 待结算列永不归零（live 每次重启都留一条首窗禁单行）。故照 tail 的 tailDailyRow
+// 同款做法拆出本族专有列:
+//
+//	Signals = Won + Lost + Pending + NoExec
+type flipDailyRow struct {
+	dayAgg
+	NoExec int `json:"noexec"` // 无仓位行数（被闸/被拒/未成交/挂单未定稿）
 }
 
 // dailyResp 是 flip /api/daily 的响应体（rows 时间正序 + 合计行）。
 type dailyResp struct {
-	Days  []dayAgg `json:"days"`
-	Total dayAgg   `json:"total"`
+	Days  []flipDailyRow `json:"days"`
+	Total flipDailyRow   `json:"total"`
 }
 
 // ── Handlers ──
@@ -97,8 +119,17 @@ type dailyResp struct {
 // handleState 返回运行状态与统计汇总。
 func (s *FlipState) handleState(w http.ResponseWriter, r *http.Request) {
 	live := s.snapshot.Snapshot()
-	total, won, lost, pending, winRate, cumPnl := s.signalStats()
+	t := s.tally()
 	daily, dayPos := s.dailySummary()
+
+	// 胜率只按已结算（赢+输）计: 待结算与无仓位行既不入分子也不入分母
+	winRate, cumPnl := 0.0, 0.0
+	if resolved := t.Won + t.Lost; resolved > 0 {
+		winRate = float64(t.Won) / float64(resolved)
+	}
+	for _, d := range daily {
+		cumPnl += d.PnL
+	}
 
 	writeJSON(w, stateResponse{
 		TS:               s.nowFn().UTC().Format(time.RFC3339),
@@ -121,10 +152,11 @@ func (s *FlipState) handleState(w http.ResponseWriter, r *http.Request) {
 		Limits:           s.limits,
 		WindowStats:      live.Stats,
 		ObservationCount: len(s.recorder.Observations()),
-		SignalCount:      total,
-		WonCount:         won,
-		LostCount:        lost,
-		PendingCount:     pending,
+		SignalCount:      t.Total,
+		WonCount:         t.Won,
+		LostCount:        t.Lost,
+		PendingCount:     t.Pending,
+		NoExecCount:      t.NoExec,
 		WinRate:          winRate,
 		CumPnl:           cumPnl,
 		DayPnlPos:        dayPos,
@@ -147,14 +179,19 @@ func (s *FlipState) handleSignals(w http.ResponseWriter, r *http.Request) {
 
 // handleDaily 返回逐日盈利明细（UTC 日粒度，供前端弹窗表格）。
 func (s *FlipState) handleDaily(w http.ResponseWriter, r *http.Request) {
-	days := collectDaily(s.recorder.Observations())
-	writeJSON(w, dailyResp{Days: days, Total: sumDaily(days)})
+	days := s.collectDaily()
+	writeJSON(w, dailyResp{Days: days, Total: sumFlipDaily(days)})
 }
 
 // collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（任意序输入，输出时间正序）。
-func collectDaily(recs []*flip.Record) []dayAgg {
+// 分类口径与 /api/state 的 tally 同源（同一份 pending 集合 + 同一恒等式）:
+// 无仓位行记 NoExec, **不再混进 Pending**——否则 live 每天都会留下一条永不归零的
+// 「待结算」（见 flipDailyRow 注释）。
+func (s *FlipState) collectDaily() []flipDailyRow {
+	pending := s.pendingSet()
 	byDay := map[string]*dayAgg{}
-	for _, rec := range recs {
+	noexec := map[string]int{}
+	for _, rec := range s.recorder.Observations() {
 		d := byDay[rec.Date]
 		if d == nil {
 			d = &dayAgg{Date: rec.Date}
@@ -166,8 +203,10 @@ func collectDaily(recs []*flip.Record) []dayAgg {
 		}
 		d.Signals++
 		switch {
-		case rec.Won == nil:
+		case rec.Won == nil && pending[rec.ConditionID]:
 			d.Pending++
+		case rec.Won == nil:
+			noexec[rec.Date]++
 		case *rec.Won:
 			d.Won++
 			d.PnL += rec.PnL
@@ -176,7 +215,24 @@ func collectDaily(recs []*flip.Record) []dayAgg {
 			d.PnL += rec.PnL
 		}
 	}
-	return finalizeDaily(byDay)
+	// 先复用共用骨架收敛（日期正序 + 胜率），再贴回本族专有列
+	base := finalizeDaily(byDay)
+	out := make([]flipDailyRow, 0, len(base))
+	for _, d := range base {
+		out = append(out, flipDailyRow{dayAgg: d, NoExec: noexec[d.Date]})
+	}
+	return out
+}
+
+// sumFlipDaily 累加逐日行（共用骨架合计 + NoExec 列）。
+func sumFlipDaily(days []flipDailyRow) flipDailyRow {
+	base := make([]dayAgg, 0, len(days))
+	var noexec int
+	for _, d := range days {
+		base = append(base, d.dayAgg)
+		noexec += d.NoExec
+	}
+	return flipDailyRow{dayAgg: sumDaily(base), NoExec: noexec}
 }
 
 // handleConfig 返回当前策略配置（前端展示标定参数）。
@@ -200,21 +256,54 @@ func (s *FlipState) remaining(live flip.LiveSnapshot) int {
 	return remainingSec(live.EventStart, s.nowFn().Unix())
 }
 
-// signalStats 汇总信号统计: 总数/赢/输/待结算/胜率/累计 P&L。
-// 胜率按已结算信号计（待结算不计入分母）。
-func (s *FlipState) signalStats() (total, won, lost, pending int, winRate, cumPnl float64) {
-	obsCount, sigCount, wonCount := s.recorder.Counts()
-	_ = obsCount
-	pending = len(s.recorder.PendingSignals())
-	total, won = sigCount, wonCount
-	lost = sigCount - wonCount - pending
-	if resolved := won + lost; resolved > 0 {
-		winRate = float64(won) / float64(resolved)
+// signalTally 是信号分类汇总（每行**只落一类**, 恒等式 Total = Won + Lost + Pending + NoExec）。
+//
+// ⚠️ NoExec 必须独立成类（2026-09-24 修）: 原实现用 `lost = sigCount − won − pending`
+// 反算「负」, 于是「被风控闸拦下 / 下单被拒 / 0 成交 / 挂单未定稿」这些**从未有过仓位**的
+// 行被算成了「输」——它们既没赢也没输: 混进分母会压低胜率, 混进分子会虚增亏损笔数。
+// 这正是用户看到的那条日志（首窗禁单行）在页面上完全消失的原因之一。
+type signalTally struct {
+	Total   int
+	Won     int
+	Lost    int
+	Pending int // 有仓位、等结算编排回填
+	NoExec  int // 无仓位（被闸/被拒/未成交/挂单未定稿）
+}
+
+// pendingSet 返回「结算编排正在等回填」的 conditionID 集合。
+//
+// 判据以 PendingSignals()（= isSettlable 过滤后的真实持仓行）为唯一来源, 不在这里
+// 用 IsFilled 复算一遍——两处判据各写一遍必然漂移, 而结算层才是「这行会不会被结算」
+// 的权威（决策 #19）。
+func (s *FlipState) pendingSet() map[string]bool {
+	pending := map[string]bool{}
+	for _, rec := range s.recorder.PendingSignals() {
+		pending[rec.ConditionID] = true
 	}
-	for _, d := range s.recorder.DailyPnl() {
-		cumPnl += d.PnL
+	return pending
+}
+
+// tally 逐行分类全部 ok 信号（观测全量在内存, 无需 Counts 的聚合口径）。
+func (s *FlipState) tally() signalTally {
+	pending := s.pendingSet()
+	var t signalTally
+	for _, rec := range s.recorder.Observations() {
+		if !rec.OK {
+			continue
+		}
+		t.Total++
+		switch {
+		case rec.Won != nil && *rec.Won:
+			t.Won++
+		case rec.Won != nil:
+			t.Lost++
+		case pending[rec.ConditionID]:
+			t.Pending++
+		default:
+			t.NoExec++
+		}
 	}
-	return
+	return t
 }
 
 // dailySummary 返回逐日 P&L 序列与盈利天数。
@@ -253,5 +342,8 @@ func mapRecord(rec *flip.Record) recordResponse {
 		Won:          rec.Won,
 		PnL:          rec.PnL,
 		ResolvedAt:   rec.ResolvedAt,
+		GateReason:   rec.GateReason,
+		ExecStatus:   rec.ExecStatus,
+		ExecNote:     rec.ExecNote,
 	}
 }
