@@ -737,6 +737,47 @@ func (r *Recorder) Observations() []*Record {
 	return copyRecords(r.recs)
 }
 
+// Signals 返回**判定通过**的决策快照行副本（时间正序）——Dashboard 快照表与
+// Judge 的输入。⚠️ 含被闸行（gate_reason 非空）: 那是「当日不熔断会怎样」的反事实
+// 样本, 过滤是**消费端**的责任（Judge 与前端各自显式过滤, 与 flip 同口径）。
+//
+// 帧行天然不入（RunFrame 恒置 OK=false）。
+func (r *Recorder) Signals() []*Record {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]*Record, 0, len(r.recs))
+	for _, rec := range r.recs {
+		if rec.Kind == KindSnap && rec.OK {
+			out = append(out, rec)
+		}
+	}
+	return copyRecords(out)
+}
+
+// Counts 返回 (snap, ok, won): snap = 决策快照行数（含否决与被闸）, ok = 其中判定
+// 通过的行数, won = 其中已结算且赢的行数。
+//
+// ⚠️ 与 flip.Recorder.Counts 的口径差: 那里第 1 个返回值是**全部观测行**（flip 每窗
+// 至多一行, 观测即行数）。本族每窗至多两行（帧 + 快照）, 帧行无仓位语义——若照抄
+// 「全部行」, Dashboard 的「快照数」会被帧行虚高约一倍。
+func (r *Recorder) Counts() (snap, ok, won int) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rec := range r.recs {
+		if rec.Kind != KindSnap {
+			continue
+		}
+		snap++
+		if rec.OK {
+			ok++
+			if rec.Won != nil && *rec.Won {
+				won++
+			}
+		}
+	}
+	return
+}
+
 // RecentWindows 返回最近 n 个已完成窗口振幅行（时间正序；不足则返回全部）。
 // cmd/tail 启动时据此做 σ 本地预热（配合 flip.RecentBlock 截连续块）。
 func (r *Recorder) RecentWindows(n int) []flip.WindowEntry {
@@ -827,6 +868,71 @@ func (r *Recorder) DailyPnl() []DayPnl {
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
 	return out
+}
+
+// MaxDrawdown 基于已结算信号的累计 P&L 最大回撤（USDC，负值表示回撤）。
+// 与 flip.Recorder.MaxDrawdown 同口径: 只吃 snap 行的 ok 且已结算（帧行 Won 恒 nil）。
+func (r *Recorder) MaxDrawdown() float64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cum, peak, dd := 0.0, 0.0, 0.0
+	for _, rec := range r.recs {
+		if rec.Kind != KindSnap || !rec.OK || rec.Won == nil {
+			continue
+		}
+		cum += rec.PnL
+		if cum > peak {
+			peak = cum
+		}
+		if d := cum - peak; d < dd {
+			dd = d
+		}
+	}
+	return dd
+}
+
+// TodayStats 读取**当日**（UTC）健康度日志 tailstats_*.jsonl 的全部行（时间正序）。
+//
+// ⚠️ 这是本 Recorder 唯一的磁盘读口: 健康度行只追加、**不载入内存**（纯审计,
+// 省一次全量读盘）, 而 Dashboard 要的「今日辅助闸门」（窗数 / skip 分布 /
+// anchor_exact=false 计数）恰好只存在于这个文件里。
+//
+// 坏行/半行跳过（进程正在追写时最后一行可能不完整）——审计视图不该因一行解析失败
+// 整体失败; 文件不存在返回 nil, nil（当日还没跑过任何窗口, 不是错误）。
+func (r *Recorder) TodayStats() ([]StatsRow, error) {
+	r.mu.Lock()
+	dir := r.dir
+	r.mu.Unlock()
+
+	path := statsFilePath(dir, utcToday())
+	f, err := os.Open(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("TodayStats: 打开 %s: %w", path, err)
+	}
+	defer f.Close()
+
+	out := make([]StatsRow, 0, 288) // 一天 288 窗（5 分钟一窗）
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 64*1024), 1024*1024)
+	for sc.Scan() {
+		line := sc.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var e StatsRow
+		if err := json.Unmarshal(line, &e); err != nil {
+			log.Printf("⚠️ [Tail] %s: 健康度行解析失败跳过: %v", filepath.Base(path), err)
+			continue
+		}
+		out = append(out, e)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("TodayStats: 读 %s: %w", path, err)
+	}
+	return out, nil
 }
 
 // NeedsReconcile 返回执行中断待人工核对的行数（live）:

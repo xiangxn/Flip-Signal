@@ -461,3 +461,114 @@ func TestRecorderFindSnapNotFrame(t *testing.T) {
 		t.Fatalf("帧行应带完整快照字段: %+v", obs[0])
 	}
 }
+
+// TestRecorderSignalsCountsDrawdown 三个只读口的口径: 帧行不入任何计数、被闸行
+// 计入 Signals（反事实样本, 过滤是消费端的事）、回撤按累计 P&L 峰值差现算。
+func TestRecorderSignalsCountsDrawdown(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	base := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+
+	// 窗 1: 帧行（不入任何计数）。
+	frame := okSnap(base, flip.SideYes)
+	frame.Kind, frame.Rules, frame.OK, frame.Shares = KindFrame, Rules{}, false, 0
+	if _, err := r.RecordObservation("0xc1", "s", 0, frame, 0); err != nil {
+		t.Fatal(err)
+	}
+	// 窗 2: 否决行（计入 snap, 不计入 ok）。
+	rej := okSnap(base+300000, flip.SideYes)
+	rej.OK, rej.RejectReason, rej.Shares = false, RejectLegOut, 0
+	if _, err := r.RecordObservation("0xc2", "s", 0, rej, 2); err != nil {
+		t.Fatal(err)
+	}
+	// 窗 3: ok 行 → 结算赢（+2/0.92−2 ≈ +0.174）。
+	if _, err := r.RecordObservation("0xc3", "s", 0, okSnap(base+600000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Resolve("0xc3", flip.OutcomeUp, time.Unix(0, 0)) {
+		t.Fatal("Resolve 应命中")
+	}
+	// 窗 4: ok 行 → 结算输（−2）。
+	if _, err := r.RecordObservation("0xc4", "s", 0, okSnap(base+900000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	r.Resolve("0xc4", flip.OutcomeDown, time.Unix(0, 0))
+	// 窗 5: ok 行 → 被闸（仍计入 Signals / Counts.ok）。
+	if _, err := r.RecordGatedObservation("0xc5", "s", 0, okSnap(base+1200000, flip.SideYes), 2, GateDailyLoss); err != nil {
+		t.Fatal(err)
+	}
+
+	snap, ok, won := r.Counts()
+	if snap != 4 || ok != 3 || won != 1 {
+		t.Errorf("Counts = (%d, %d, %d), want (4, 3, 1)", snap, ok, won)
+	}
+	sigs := r.Signals()
+	if len(sigs) != 3 {
+		t.Fatalf("Signals 应 3 条（含被闸行, 不含帧行/否决行）, 得到 %d", len(sigs))
+	}
+	for _, s := range sigs {
+		if s.Kind != KindSnap || !s.OK {
+			t.Errorf("Signals 混入非 ok 快照行: kind=%s ok=%v", s.Kind, s.OK)
+		}
+	}
+	// 回撤: 累计 +0.174 → −2 → 峰 0.174, 谷 −1.826 → dd = −2.0（被闸行未结算, 不入）。
+	if dd := r.MaxDrawdown(); dd != -2.0 {
+		t.Errorf("MaxDrawdown = %v, want -2", dd)
+	}
+	// 副本语义: 改返回值不影响内部记录。
+	sigs[0].PnL = 999
+	if r.Signals()[0].PnL == 999 {
+		t.Error("Signals 必须返回副本（结算轮询并发写 Won/PnL）")
+	}
+}
+
+// TestRecorderTodayStats 健康度读口: 只读当日文件、坏行跳过、无文件返回空。
+func TestRecorderTodayStats(t *testing.T) {
+	r, dir := newTestRecorder(t)
+
+	// 当日尚无文件。
+	rows, err := r.TodayStats()
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("空目录应返回 (nil/空, nil), 得到 (%d 行, %v)", len(rows), err)
+	}
+
+	today := utcToday()
+	rowsIn := []StatsRow{
+		{Ts: time.Now().UnixMilli(), ConditionID: "0xa", AnchorExact: true, Skip: ""},
+		{Ts: time.Now().UnixMilli(), ConditionID: "0xb", AnchorExact: false, Skip: "no_sigma"},
+	}
+	for _, e := range rowsIn {
+		if err := r.LogWindowStats(e); err != nil { // 走真实落盘路径（含 kind/date 派生）
+			t.Fatal(err)
+		}
+	}
+	// 手工塞一行坏数据 + 一个空行（进程追写时的半行形态）。
+	path := filepath.Join(dir, statsPrefix+today+".jsonl")
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.WriteString("{不是 JSON\n\n")
+	f.Close()
+
+	rows, err = r.TodayStats()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("坏行应跳过, 得到 %d 行", len(rows))
+	}
+	if rows[0].ConditionID != "0xa" || !rows[0].AnchorExact || rows[0].Kind != winKindStats || rows[0].Date != today {
+		t.Errorf("行 schema 不对: %+v", rows[0])
+	}
+	if rows[1].Skip != "no_sigma" || rows[1].AnchorExact {
+		t.Errorf("第 2 行 skip/anchor_exact 不对: %+v", rows[1])
+	}
+	// 昨日文件不读（读口只认当日）。
+	if err := r.LogWindowStats(StatsRow{Ts: time.Now().Add(-25 * time.Hour).UnixMilli(), ConditionID: "0xold"}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ = r.TodayStats()
+	if len(rows) != 2 {
+		t.Fatalf("昨日行不该进入今日读口, 得到 %d 行", len(rows))
+	}
+}

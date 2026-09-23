@@ -255,3 +255,48 @@ func (x *ExecState) todaySettledPnl() float64 {
 	}
 	return 0
 }
+
+// RiskSummary 构造日亏熔断摘要（Dashboard 风控块，两模式都填——paper 显示"影子"角标）。
+// 判据与 HandleObservation 的闸同源（breakerTripped 同一函数）, 只是多带上展示字段。
+// 与 flip.ExecState.RiskSummary 逐字段同形（复用 flip.RiskSummary 类型, 前端共用渲染）。
+func (x *ExecState) RiskSummary() *flip.RiskSummary {
+	if x.Rec == nil {
+		return nil
+	}
+	return &flip.RiskSummary{
+		TodayPnl:     x.todaySettledPnl(),
+		MaxDailyLoss: x.MaxDailyLoss,
+		CanTrade:     !x.breakerTripped(),
+		GatedToday:   x.Rec.GatedToday(utcToday(), GateDailyLoss),
+		Enforced:     x.Live,
+	}
+}
+
+// LiveSummary 构造 live 执行摘要（Dashboard /api/state 的 live 段; paper 恒 nil）。
+// 今日口径 = UTC 日——与日亏熔断闸同源（今日已结算 P&L 现算 + 同一熔断线）; 待核对行
+// 用重启扫描同语义的全量计数（submitting/未知结果, 跨日残留仍计）。
+// 与 flip.ExecState.LiveSummary 同口径, 只把「已结算行」的筛选换成 snap 行
+// （本族的帧行 OK 恒 false, 天然不入）。
+func (x *ExecState) LiveSummary() *flip.LiveExec {
+	if !x.Live {
+		return nil
+	}
+	ex := &flip.LiveExec{MaxDailyLoss: x.MaxDailyLoss, Reconciling: x.Rec.NeedsReconcile()}
+	today := utcToday()
+	for _, rec := range x.Rec.Observations() {
+		if rec.Date != today {
+			continue
+		}
+		switch rec.ExecStatus {
+		case flip.ExecStatusFilled, flip.ExecStatusPartial:
+			ex.TodayFilled++
+		}
+		if rec.Kind == KindSnap && rec.OK && rec.Won != nil {
+			ex.TodayPnl += rec.PnL
+		}
+	}
+	// BreakerOpen 语义 = 「可开单」（历史字段, 见 flip.LiveExec 注释）: 含当日锁存——
+	// 与 HandleObservation 的闸同源, 否则 Dashboard 会显示"可开单"但实际已停单。
+	ex.BreakerOpen = !x.breakerTripped()
+	return ex
+}

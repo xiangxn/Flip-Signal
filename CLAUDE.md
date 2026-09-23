@@ -128,8 +128,8 @@
 FlipSignal/
 ├── cmd/flip/                         # 狗@0.2 引擎主入口（纸面/实盘同源，-mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
-├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 无 Dashboard; -config/-mode/-stake 三 flag）
-│   └── main.go                       # 同上接线, 但两帧闩锁/尾盘闸/GTC 挂到闭市（决策 #17）
+├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
+│   └── main.go                       # 同上接线, 但两帧闩锁/尾盘闸/GTC 挂到闭市（决策 #17）+ 窗口运行时载体（决策 #18）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── internal/
 │   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
@@ -148,11 +148,16 @@ FlipSignal/
 │   │   ├── sigma.go                  # HistState（σ 滚动窗）+ RecentBlock 截断纯函数
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
 │   │   └── *_test.go                 # engine/recorder/exec_state/risk/latency/preheat/winstats + mirrorcheck 镜像回归
-│   ├── dashboard/
-│   │   ├── server.go                 # HTTP server（go:embed static/）
-│   │   ├── handlers.go               # /api/state, /api/observations, /api/signals, /api/config
-│   │   ├── state.go                  # 运行时组件引用
-│   │   └── static/                   # index.html, app.js, style.css（兼容手机浏览器）
+│   ├── dashboard/                    # 两族各自的 listener + 各自的静态目录（单包, 按族分文件; 决策 #18）
+│   │   ├── common.go                 # 共用: 分页信封/查询参数/JSON 响应/日志/单页入口/阈值 struct/逐日聚合
+│   │   ├── flip_server.go            # go:embed flip + 路由装配（/api/state, /api/observations, /api/signals, /api/daily, /api/config）
+│   │   ├── flip_handlers.go          # 上述 flip API 的 handler + 映射
+│   │   ├── flip_state.go             # FlipState + NewFlipState（运行时组件引用）
+│   │   ├── tail_server.go            # go:embed tail + 路由装配（/api/state, /api/snaps, /api/frames, /api/daily, /api/judge, /api/config）
+│   │   ├── tail_handlers.go          # 上述 tail API 的 handler + 映射
+│   │   ├── tail_state.go             # TailState + NewTailState
+│   │   ├── flip/                     # flip 前端三件套 index.html, app.js, style.css（手机优先）
+│   │   └── tail/                     # tail 前端三件套（判决速览/五格对照/快照与帧两表）
 │   ├── feed/
 │   │   ├── anchor_recover.go         # 取锚通道（精确命中边界那一秒的推送, 500ms×40 重试；官方 open HTTP 段保留但休眠）
 │   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
@@ -165,7 +170,10 @@ FlipSignal/
 │   │   ├── engine.go                 # 状态机: 两个独立一次性闩锁（rem≤150 帧 / rem≤60 快照）, ProcessTick 返回 0~2 行
 │   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* 三前缀（独立于 flip 三前缀, 决策 #9 红线）
 │   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像）
-│   │   └── *_test.go                 # decide/engine/recorder/exec_state/parity（对账 opt-in, 不在 -race 快跑里）
+│   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费; 决策 #18）
+│   │   ├── judge.go                  # 判决纯函数: Judge（五格 + T=150 对照格）/ BootstrapCI / verdictFor
+│   │   ├── mt19937.go                # CPython 的 MT19937 + randrange 复刻（bootstrap 与 python 逐位一致）
+│   │   └── *_test.go                 # decide/engine/recorder/exec_state/judge（含黄金向量）/parity（opt-in）
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 与 cmd/tail 各自构造注入）
 │       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
 │       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin（flip）/ 闭市（tail）撤单 + 查 size_matched 定稿回调（决策 #16/#17）
@@ -278,6 +286,9 @@ Watching ──首个有效 tick 且 rem≤150──▶ 落 frame 行（只记�
   `anchor_exact=false`）。
 - σ 未就绪（`hist.Count() < 3`）⇒ 整窗跳过 `skip=no_sigma`；`tailwin_*` 是 tail
   自己的 σ 预热源（独立于 `windows_*`，不交叉读写）。
+- Dashboard（`runtime.tail_dashboard_addr`，决策 #18）**只读**这条流水线：本窗两个
+  闩锁的进度、热门侧读数、锚/σ 就绪、以及**判决速览**（五格 + T=150 对照格的
+  n/WR/P&L 与日级 bootstrap 95% 区间）都是现算——不参与判定、不写任何文件。
 
 ---
 
@@ -626,6 +637,41 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       成交样本天然偏向「热门侧走弱」，与回测「快照瞬间即成交」**不是同一个估计量**
       ——**首次只跑纸面**；② 两族同开实盘时日亏熔断**各自一条独立 24U 线**（等效 48U），
       文档 §4.7 要求的合并**未实现**。
+18. **tail Dashboard = 同包并列 + 独立 listener + 判决在 Go 里现算**（2026-09-23，用户要求
+    「static 改 flip、tail 再开一个 tail 目录；server 与 handlers 分文件，可共用的提到一个
+    文件」）。`internal/dashboard` 从「flip 专用包」改成**双策略并列的单包**：
+    `common.go`（分页信封/查询参数/JSON/日志/单页入口/`SourceLimits`/逐日聚合骨架）+
+    每族三件（`{flip,tail}_server.go` / `_handlers.go` / `_state.go`）+ 每族自己的静态目录
+    `flip/` `tail/`。**不拆子包**：两族的 handler 方法同名（`handleState` 等）靠 receiver
+    类型区分，共用辅助函数留在 `common.go` 且保持非导出。五条要点：
+    - **各自一个 listener、各自 embed 自己的静态目录**（URL 前缀都还是 `/static/`，FS 根
+      不同）——`flip/index.html` 对 `/static/style.css` 的引用一字未改。两族的静态资源
+      **有意复制**（不共享 CSS/JS）：两族页面会长成各自的样子，复制比耦合省事。
+    - **启动方式 = 新键 `runtime.tail_dashboard_addr` + `cmd/tail` 第 4 个 flag
+      `-dashboard`**（`flag.Visit` 语义同 flip：显式空串 = 关掉配置文件里的地址）。
+      **不复用 `runtime.dashboard_addr`**：两族是独立进程，各自监听、可只开其一，
+      同机并行须给不同端口。
+    - **判决（含区间）在服务端算并直接给结论**（前端不写死 14/800/2000，口径常量随
+      `/api/judge` 的 `meta` 下发）：`internal/tail/judge.go` 的 `Judge` 吃全量行 →
+      ①~⑤ 五格 + T=150 对照格，每格给 n / 胜率 / P&L / 亏损日 / **日级 bootstrap 95%
+      区间**（2000 次，seed 42）/ 判词 / 频率闸。`BootstrapCI` 在 Go 里**复刻 CPython
+      的 MT19937 + `randrange`**（含 CPython 3.12+ `sum()` 的 Neumaier 补偿求和），
+      与 `python/v4/13_tail_sweep.py:424 boot_days` **逐位一致**（黄金向量 + 实测期望值
+      钉在 `judge_test.go`）——判决卡上的数字必须与复验脚本同一个数。
+      ⚠️ 一处**口径差异**（写进 mapping §5.4）：T=150 对照格的结果借自**同窗已结算的
+      快照行**（帧行自己不挂结算），故它只覆盖「该窗快照成交过」的窗口，比 python 的
+      全样本离线复算窄——它是**同一批窗口内 T=60 vs T=150 的配对比较**，不是全样本对照。
+      胜负按**帧行自己的热门侧**重算（帧与快照的 hot side 可能不同），P&L 按
+      `cfg.Stake / frame.HotAsk` 现算（帧行没有仓位）。
+    - **页面健康度读 `tailstats_*` 当日文件**（`Recorder.TodayStats()`，本族**唯一**的磁盘
+      读口）：窗数 / `skip` 分布 / `anchor_exact=false` 计数 = 文档 §5.2 的**辅助闸门 3**。
+      健康度行**不载入内存**（纯审计，省一次全量读盘），故 `/api/state` 每次请求现读当日
+      文件；读失败只在日志留痕、不阻断状态页（窗数恒 0 即信号）。flip 的 `/api/state`
+      不读盘（它的 winstats 只落盘）——这是本族多出来的那一段。
+    - **零行为改动**：dashboard 侧复算现窗口读数用的纯函数（`SideOfHot` / `DevUSD` /
+      `SigmaUSD`）就是引擎自己调的那三个（抽出来单一实现），`LatchState()` 只读两个闩锁
+      与锚冻结标记。验收红线不变：btreplay 625 笔逐位一致 + tail parity 五格与两闩锁计数
+      逐位一致 + `go test ./internal/... -race` 全绿。
 
 ---
 
@@ -646,9 +692,9 @@ go run ./cmd/flip
 # 单点覆盖（最高优先级；-dashboard "" 能真的关掉配置文件里的地址）
 go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 
-# 扫尾盘（第二条策略线, 独立进程可并行跑；无 Dashboard、无 -encrypt）
-go run ./cmd/tail -config v4.config.yaml
-go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper
+# 扫尾盘（第二条策略线, 独立进程可并行跑；自带 Dashboard, 无 -encrypt）
+go run ./cmd/tail -config v4.config.yaml -dashboard :8091
+go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
 ```
 
 ### CLI flag（`cmd/flip` main() 只有这 4 个引擎参数 + 1 个工具 flag）
@@ -671,13 +717,17 @@ go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper
 | `feed.max_spot_age_ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
 | `feed.max_twap_age_ms` | 10000 | TWAP-60 新鲜度：**只**管窗末 close（锚走精确匹配，不吃到达龄），超龄按缺失处理。历史上与 `anchorPickTol`(10s) 同值但语义无关，后者已随决策 #15 废除 |
 | `risk.max_daily_loss` | **−24** | 日亏熔断线（负值）：当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存；两模式同源（paper 只标记不拦单） |
+| `runtime.dashboard_addr` | `""` | **flip 进程**的 Dashboard 监听地址（空 = 不启动；`:8090` 直接给端口） |
+| `runtime.tail_dashboard_addr` | `""` | **tail 进程**的 Dashboard 监听地址（独立键——两个进程各自的 listener，详见决策 #18） |
 | `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录，见启动时的 paper/live 混行告警；**flip 与 tail 可共用**——三前缀各自不撞） |
 | `runtime.slug_prefix` | `btc-updown-5m` | 市场 slug 前缀 |
 | `tail.*` | 见下 | 扫尾盘 7 键（`rem_start 60` / `frame_rem 150` / `price_min 0.80` / `dev_min_usd 63` / `sigma_min_usd 40` / `stake 2` / `max_book_lat_ms 300`）——⚠️ **全部不可调**，见决策 #17 与 `docs/tail_sweep_2026-09-22.md` §4.3 |
 
-`cmd/tail` 只认 **3 个 flag**（`-config` / `-mode` / `-stake`，语义同 flip 那三个，
-`-stake` 覆盖的是 `tail.stake`）——没有 `-dashboard`（Dashboard 硬绑 `*flip.Recorder`，
-泛化不划算）也没有 `-encrypt`（用 flip 的那个）。
+`cmd/tail` 只认 **4 个 flag**（`-config` / `-mode` / `-stake` / `-dashboard`，语义同
+flip 那四个，`-stake` 覆盖的是 `tail.stake`、`-dashboard` 覆盖的是
+`runtime.tail_dashboard_addr`）——没有 `-encrypt`（用 flip 的那个）。两族的
+`-dashboard` 是**两个独立的键**：同机并行跑时给不同端口（如 flip `:8090` /
+tail `:8091` ），各自的静态目录与 API 前缀独立（决策 #18）。
 
 启动校验（`internal/config/validate.go`，判**最终生效值**）：三阈值必须 > 0、
 `risk.max_daily_loss` 必须 < 0、`runtime.mode ∈ {paper, live}`、`flip.stake > 0`、

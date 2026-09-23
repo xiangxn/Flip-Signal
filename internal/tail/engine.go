@@ -166,18 +166,21 @@ func (e *Engine) WindowStats() WindowStats {
 	return e.stats
 }
 
+// LatchState 返回两个一次性闩锁与锚冻结状态（只读, dashboard 展示本窗进度用）:
+// frameSent = 帧已落 / snapSent = 决策快照已落 / frozen = 已产出过行（锚自此冻结,
+// 也是 UpgradeAnchor 此后拒收的判据）。判定路径不读它。
+func (e *Engine) LatchState() (frameSent, snapSent, frozen bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.frameSent, e.snapSent, e.emitted
+}
+
 // snapshot 采集一条快照行（原始字段 + 派生量; snap 行另做判定）。
 // 调用方已持锁、已保证 anchor > 0 且本 tick 为有效 tick。
 func (e *Engine) snapshot(t flip.Tick, kind string, frameT int) Observation {
-	// 热门侧 = ask 高的一侧（python: `side = "yes" if ya >= na else "no"`——平局取 yes）。
-	side := flip.SideYes
-	if t.DownAsk > t.UpAsk {
-		side = flip.SideNo
-	}
-	sgn, hotAsk := 1.0, t.UpAsk
-	if side == flip.SideNo {
-		sgn, hotAsk = -1.0, t.DownAsk
-	}
+	// 热门侧 = ask 高的一侧（平局取 yes）——口径见 decide.go SideOfHot。
+	side := SideOfHot(t.UpAsk, t.DownAsk)
+	hotAsk := HotAskOf(side, t.UpAsk, t.DownAsk)
 
 	o := Observation{
 		Kind: kind, FrameT: frameT,
@@ -191,11 +194,9 @@ func (e *Engine) snapshot(t flip.Tick, kind string, frameT int) Observation {
 	// 派生量: 输入齐备才算（缺则留 0 = 未计算, 由 RejectReason 区分）。
 	// 帧行同样计算——T=150 的规则形态正是靠这些字段离线复算。
 	if t.BinPrice > 0 {
-		o.Dev = sgn * (t.BinPrice - e.anchor)
+		o.Dev = DevUSD(side, t.BinPrice, e.anchor)
 	}
-	if e.histBps > 0 {
-		o.Sd = e.histBps * e.anchor / 1e4
-	}
+	o.Sd = SigmaUSD(e.histBps, e.anchor)
 	if kind != KindSnap {
 		return o // 帧行只记录, 不带规则与判定
 	}

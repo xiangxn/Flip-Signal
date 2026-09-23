@@ -56,6 +56,10 @@ type RuntimeConfig struct {
 	OutputDir string `mapstructure:"output_dir"`
 	// DashboardAddr HTTP Dashboard 监听地址（如 ":8090"）; 留空 = 不启动
 	DashboardAddr string `mapstructure:"dashboard_addr"`
+	// TailDashboardAddr 扫尾盘（cmd/tail）Dashboard 监听地址（如 ":8091"）;
+	// 留空 = 不启动。与 flip 的 dashboard_addr 分开: 两个进程各自一个 listener,
+	// 可以只开其一, 也可以用同一个端口号以外的任意组合（见 cmd/tail 的 -dashboard）。
+	TailDashboardAddr string `mapstructure:"tail_dashboard_addr"`
 	// SlugPrefix Polymarket slug 前缀（运行时拼接 "-<unix_ts>"; 原 -slug）
 	SlugPrefix string `mapstructure:"slug_prefix"`
 }
@@ -122,7 +126,9 @@ func defaults() *AppConfig {
 			Mode:          "paper", // 纸面为默认: 实盘必须显式 -mode live 或配置写 live
 			OutputDir:     "data/v4",
 			DashboardAddr: "", // 留空 = 不启动 Dashboard（保持 v4 现状; master 默认 :8090）
-			SlugPrefix:    "btc-updown-5m",
+			// 扫尾盘 Dashboard 同理留空（部署时命令行 -dashboard 覆盖, 或写进 config.local.yaml）
+			TailDashboardAddr: "",
+			SlugPrefix:        "btc-updown-5m",
 		},
 		Flip: flip.DefaultConfig(), // 策略参数单一真相（含 MaxBookLatMs=300）, 见 internal/flip/config.go
 		// 扫尾盘（cmd/tail）参数: 与 flip 各自独立成节——两个引擎可分别部署,

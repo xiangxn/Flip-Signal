@@ -22,13 +22,12 @@ func recs(total int) []*flip.Record {
 }
 
 // resp 发起带 query 的请求并解析 listResp。
-func resp(t *testing.T, records []*flip.Record, defSize int, query string) listResp {
+func resp(t *testing.T, records []*flip.Record, defSize int, query string) listResp[recordResponse] {
 	t.Helper()
-	s := &State{}
 	req := httptest.NewRequest(http.MethodGet, "/api/x"+query, nil)
 	w := httptest.NewRecorder()
-	s.writePage(w, req, records, defSize)
-	var r listResp
+	writePage(w, req, records, recordTs, mapRecord, defSize)
+	var r listResp[recordResponse]
 	if err := json.Unmarshal(w.Body.Bytes(), &r); err != nil {
 		t.Fatalf("解析响应失败: %v", err)
 	}
@@ -113,7 +112,7 @@ func TestStateLimitsAndWindowStats(t *testing.T) {
 		}},
 	}
 	limits := SourceLimits{BookLatMs: 300, SpotAgeMs: 2000, TwapAgeMs: 10_000}
-	s := NewState(rec, fakeSnap{flip.LiveSnapshot{
+	s := NewFlipState(rec, fakeSnap{flip.LiveSnapshot{
 		EngineState: "Watching", BookLatMs: 412, Stats: &stats,
 	}}, flip.DefaultConfig(), "paper", limits)
 
@@ -139,7 +138,7 @@ func TestStateLimitsAndWindowStats(t *testing.T) {
 	}
 
 	// 窗口间（快照无 Stats）: 字段省略，前端隐藏健康度行
-	s2 := NewState(rec, fakeSnap{flip.LiveSnapshot{}}, flip.DefaultConfig(), "paper", limits)
+	s2 := NewFlipState(rec, fakeSnap{flip.LiveSnapshot{}}, flip.DefaultConfig(), "paper", limits)
 	w2 := httptest.NewRecorder()
 	s2.handleState(w2, httptest.NewRequest(http.MethodGet, "/api/state", nil))
 	if body := w2.Body.String(); !strings.Contains(body, "\"limits\"") ||
@@ -159,7 +158,7 @@ func TestStateTwap(t *testing.T) {
 	defer rec.Close()
 
 	limits := SourceLimits{TwapAgeMs: 10_000}
-	s := NewState(rec, fakeSnap{flip.LiveSnapshot{TwapPrice: 115432.10, TwapOpen: 115400.55}},
+	s := NewFlipState(rec, fakeSnap{flip.LiveSnapshot{TwapPrice: 115432.10, TwapOpen: 115400.55}},
 		flip.DefaultConfig(), "paper", limits)
 	w := httptest.NewRecorder()
 	s.handleState(w, httptest.NewRequest(http.MethodGet, "/api/state", nil))
@@ -172,7 +171,7 @@ func TestStateTwap(t *testing.T) {
 	}
 
 	// 锚缺失窗口（本窗锚未就绪/恢复中）: twap_open=0 原样下发
-	s2 := NewState(rec, fakeSnap{flip.LiveSnapshot{TwapPrice: 115432.10}},
+	s2 := NewFlipState(rec, fakeSnap{flip.LiveSnapshot{TwapPrice: 115432.10}},
 		flip.DefaultConfig(), "paper", limits)
 	w2 := httptest.NewRecorder()
 	s2.handleState(w2, httptest.NewRequest(http.MethodGet, "/api/state", nil))

@@ -43,6 +43,10 @@ runtime:
   # HTTP Dashboard 监听地址，如 ":8090"。留空 = 不启动 Dashboard
   dashboard_addr: ""
 
+  # 扫尾盘（cmd/tail）Dashboard 监听地址，如 ":8091"。留空 = 不启动
+  # （cmd/tail 的 -dashboard 覆盖本键; 两个进程各起一个 listener，互不影响）
+  tail_dashboard_addr: ""
+
   # Polymarket 市场 slug 前缀，运行时拼接 "-<unix_timestamp>"
   slug_prefix: "btc-updown-5m"
 

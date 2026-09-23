@@ -403,7 +403,7 @@ func main() {
 			SpotAgeMs: cfg.Feed.MaxSpotAgeMs,
 			TwapAgeMs: cfg.Feed.MaxTwapAgeMs,
 		}
-		dashState := dashboard.NewState(recorder, runtime, cfg.Flip, effMode, limits)
+		dashState := dashboard.NewFlipState(recorder, runtime, cfg.Flip, effMode, limits)
 		go dashState.ListenAndServe(cfg.Runtime.DashboardAddr)
 	}
 

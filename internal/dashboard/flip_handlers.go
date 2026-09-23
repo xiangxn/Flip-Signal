@@ -1,11 +1,7 @@
 package dashboard
 
 import (
-	"encoding/json"
-	"fmt"
-	"log"
 	"net/http"
-	"sort"
 	"time"
 
 	"github.com/necklace/flip-signal/internal/flip"
@@ -13,7 +9,7 @@ import (
 
 // ── Response 类型 ──
 
-// stateResponse 是 /api/state 的响应体。
+// stateResponse 是 flip /api/state 的响应体。
 type stateResponse struct {
 	TS string `json:"ts"` // 服务器当前时间（RFC3339）
 
@@ -66,7 +62,7 @@ type stateResponse struct {
 	Risk *flip.RiskSummary `json:"risk,omitempty"`
 }
 
-// recordResponse 是 /api/observations 与 /api/signals 的元素。
+// recordResponse 是 flip /api/observations 与 /api/signals 的元素。
 // 字段 = 观测记录（ts/date/condition_id/slug 对齐回测 CSV 键，09-15 复验映射用）。
 type recordResponse struct {
 	Ts           int64   `json:"ts"`
@@ -90,38 +86,16 @@ type recordResponse struct {
 	ResolvedAt   string  `json:"resolved_at,omitempty"`
 }
 
-// listResp 是 /api/observations 与 /api/signals 的分页响应
-// （items 为时间倒序的当前页切片; total/page/size 供前端分页条渲染）。
-type listResp struct {
-	Items []recordResponse `json:"items"`
-	Total int              `json:"total"`
-	Page  int              `json:"page"` // 1-based 当前页（越界时服务端钳制到末页）
-	Size  int              `json:"size"` // 本页条数（?limit=，≤1000）
-}
-
-// dailyRow 是 /api/daily 的一行（按 UTC 日切分，与回测 CSV date/记录文件同日口径；
-// 逐日明细弹窗用，列与 02_paper_compare.py 逐日输出对齐）。
-type dailyRow struct {
-	Date    string  `json:"date"` // YYYY-MM-DD（UTC）；total 行为空
-	Obs     int     `json:"obs"`  // 触底观测（含失败）
-	Signals int     `json:"signals"`
-	Pending int     `json:"pending"` // 未结算信号
-	Won     int     `json:"won"`
-	Lost    int     `json:"lost"`
-	WinRate float64 `json:"win_rate"` // 已结算口径（won/(won+lost)；无结算 = 0）
-	PnL     float64 `json:"pnl"`
-}
-
-// dailyResp 是 /api/daily 的响应体（rows 时间正序 + 合计行）。
+// dailyResp 是 flip /api/daily 的响应体（rows 时间正序 + 合计行）。
 type dailyResp struct {
-	Days  []dailyRow `json:"days"`
-	Total dailyRow   `json:"total"`
+	Days  []dayAgg `json:"days"`
+	Total dayAgg   `json:"total"`
 }
 
 // ── Handlers ──
 
 // handleState 返回运行状态与统计汇总。
-func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
+func (s *FlipState) handleState(w http.ResponseWriter, r *http.Request) {
 	live := s.snapshot.Snapshot()
 	total, won, lost, pending, winRate, cumPnl := s.signalStats()
 	daily, dayPos := s.dailySummary()
@@ -162,42 +136,28 @@ func (s *State) handleState(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleObservations 返回触底观测列表（成功+失败，时间倒序分页）。
-func (s *State) handleObservations(w http.ResponseWriter, r *http.Request) {
-	s.writePage(w, r, s.recorder.Observations(), 50)
+func (s *FlipState) handleObservations(w http.ResponseWriter, r *http.Request) {
+	writePage(w, r, s.recorder.Observations(), recordTs, mapRecord, 50)
 }
 
 // handleSignals 返回信号列表（ok=true，含 P&L，时间倒序分页）。
-func (s *State) handleSignals(w http.ResponseWriter, r *http.Request) {
-	s.writePage(w, r, s.recorder.Signals(), 200)
+func (s *FlipState) handleSignals(w http.ResponseWriter, r *http.Request) {
+	writePage(w, r, s.recorder.Signals(), recordTs, mapRecord, 200)
 }
 
 // handleDaily 返回逐日盈利明细（UTC 日粒度，供前端弹窗表格）。
-func (s *State) handleDaily(w http.ResponseWriter, r *http.Request) {
+func (s *FlipState) handleDaily(w http.ResponseWriter, r *http.Request) {
 	days := collectDaily(s.recorder.Observations())
-	var total dailyRow
-	for i := range days {
-		d := &days[i]
-		total.Obs += d.Obs
-		total.Signals += d.Signals
-		total.Pending += d.Pending
-		total.Won += d.Won
-		total.Lost += d.Lost
-		total.PnL += d.PnL
-	}
-	if total.Won+total.Lost > 0 {
-		total.WinRate = float64(total.Won) / float64(total.Won+total.Lost)
-	}
-	writeJSON(w, dailyResp{Days: days, Total: total})
+	writeJSON(w, dailyResp{Days: days, Total: sumDaily(days)})
 }
 
-// collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（时间正序输入）。
-// 胜率与 P&L 只统计已结算信号（与 /api/state 统计口径一致）。
-func collectDaily(recs []*flip.Record) []dailyRow {
-	byDay := map[string]*dailyRow{}
+// collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（任意序输入，输出时间正序）。
+func collectDaily(recs []*flip.Record) []dayAgg {
+	byDay := map[string]*dayAgg{}
 	for _, rec := range recs {
 		d := byDay[rec.Date]
 		if d == nil {
-			d = &dailyRow{Date: rec.Date}
+			d = &dayAgg{Date: rec.Date}
 			byDay[rec.Date] = d
 		}
 		d.Obs++
@@ -216,19 +176,11 @@ func collectDaily(recs []*flip.Record) []dailyRow {
 			d.PnL += rec.PnL
 		}
 	}
-	out := make([]dailyRow, 0, len(byDay))
-	for _, d := range byDay {
-		if d.Won+d.Lost > 0 {
-			d.WinRate = float64(d.Won) / float64(d.Won+d.Lost)
-		}
-		out = append(out, *d)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })
-	return out
+	return finalizeDaily(byDay)
 }
 
 // handleConfig 返回当前策略配置（前端展示标定参数）。
-func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
+func (s *FlipState) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
 		"trigger_ask_max": s.cfg.TriggerAskMax,
 		"crash_min_ask":   s.cfg.CrashMinAsk,
@@ -244,20 +196,13 @@ func (s *State) handleConfig(w http.ResponseWriter, r *http.Request) {
 // ── 内部 ──
 
 // remaining 计算当前窗口剩余秒（未到窗口起点或已结束为 0）。
-func (s *State) remaining(live flip.LiveSnapshot) int {
-	if live.EventStart == 0 {
-		return 0
-	}
-	rem := live.EventStart + 300 - s.nowFn().Unix()
-	if rem < 0 {
-		return 0
-	}
-	return int(rem)
+func (s *FlipState) remaining(live flip.LiveSnapshot) int {
+	return remainingSec(live.EventStart, s.nowFn().Unix())
 }
 
 // signalStats 汇总信号统计: 总数/赢/输/待结算/胜率/累计 P&L。
 // 胜率按已结算信号计（待结算不计入分母）。
-func (s *State) signalStats() (total, won, lost, pending int, winRate, cumPnl float64) {
+func (s *FlipState) signalStats() (total, won, lost, pending int, winRate, cumPnl float64) {
 	obsCount, sigCount, wonCount := s.recorder.Counts()
 	_ = obsCount
 	pending = len(s.recorder.PendingSignals())
@@ -273,7 +218,7 @@ func (s *State) signalStats() (total, won, lost, pending int, winRate, cumPnl fl
 }
 
 // dailySummary 返回逐日 P&L 序列与盈利天数。
-func (s *State) dailySummary() (daily []flip.DayPnl, dayPos int) {
+func (s *FlipState) dailySummary() (daily []flip.DayPnl, dayPos int) {
 	daily = s.recorder.DailyPnl()
 	for _, d := range daily {
 		if d.PnL > 0 {
@@ -283,101 +228,30 @@ func (s *State) dailySummary() (daily []flip.DayPnl, dayPos int) {
 	return
 }
 
-// mapRecords 将 flip.Record 映射为 API 响应元素。
-func mapRecords(records []*flip.Record) []recordResponse {
-	out := make([]recordResponse, 0, len(records))
-	for _, rec := range records {
-		out = append(out, recordResponse{
-			Ts:           rec.Ts,
-			Date:         rec.Date,
-			ConditionID:  rec.ConditionID,
-			Slug:         rec.Slug,
-			Side:         rec.Side,
-			Rem:          rec.Rem,
-			Fill:         rec.Fill,
-			M20:          rec.M20,
-			M30:          rec.M30,
-			M45:          rec.M45,
-			DistS:        rec.DistS,
-			DistT:        rec.DistT,
-			OK:           rec.OK,
-			RejectReason: rec.RejectReason,
-			Shares:       rec.Shares,
-			BookLatMs:    rec.BookLatMs,
-			Won:          rec.Won,
-			PnL:          rec.PnL,
-			ResolvedAt:   rec.ResolvedAt,
-		})
-	}
-	return out
-}
+// recordTs 取记录的排序时间戳（writePage 用）。
+func recordTs(rec *flip.Record) int64 { return rec.Ts }
 
-// writePage 输出时间倒序的分页列表: 先按 ts 降序排，再切 ?page=&limit= 窗口。
-// page 越界时钳制到末页；total=0 时恒为第 1 页 + 空 items。
-func (s *State) writePage(w http.ResponseWriter, r *http.Request, records []*flip.Record, defSize int) {
-	sort.Slice(records, func(i, j int) bool { return records[i].Ts > records[j].Ts })
-	total := len(records)
-	size := queryLimit(r, defSize)
-	lastPage := 1
-	if total > 0 {
-		lastPage = (total + size - 1) / size
-	}
-	page := queryPage(r)
-	if page > lastPage {
-		page = lastPage
-	}
-	start := (page - 1) * size
-	end := start + size
-	if end > total {
-		end = total
-	}
-	writeJSON(w, listResp{
-		Items: mapRecords(records[start:end]),
-		Total: total,
-		Page:  page,
-		Size:  size,
-	})
-}
-
-// queryPage 解析 ?page= 参数（1-based，默认 1，最小 1）。
-func queryPage(r *http.Request) int {
-	v := r.URL.Query().Get("page")
-	if v == "" {
-		return 1
-	}
-	var n int
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return 1
-	}
-	if n < 1 {
-		return 1
-	}
-	return n
-}
-
-// queryLimit 解析 ?limit= 参数（1..1000，默认 def）。
-func queryLimit(r *http.Request, def int) int {
-	v := r.URL.Query().Get("limit")
-	if v == "" {
-		return def
-	}
-	var n int
-	if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
-		return def
-	}
-	if n < 1 {
-		return 1
-	}
-	if n > 1000 {
-		return 1000
-	}
-	return n
-}
-
-// writeJSON 统一 JSON 响应。
-func writeJSON(w http.ResponseWriter, v interface{}) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
-		log.Printf("[Dashboard] 编码响应失败: %v", err)
+// mapRecord 将 flip.Record 映射为 API 响应元素。
+func mapRecord(rec *flip.Record) recordResponse {
+	return recordResponse{
+		Ts:           rec.Ts,
+		Date:         rec.Date,
+		ConditionID:  rec.ConditionID,
+		Slug:         rec.Slug,
+		Side:         rec.Side,
+		Rem:          rec.Rem,
+		Fill:         rec.Fill,
+		M20:          rec.M20,
+		M30:          rec.M30,
+		M45:          rec.M45,
+		DistS:        rec.DistS,
+		DistT:        rec.DistT,
+		OK:           rec.OK,
+		RejectReason: rec.RejectReason,
+		Shares:       rec.Shares,
+		BookLatMs:    rec.BookLatMs,
+		Won:          rec.Won,
+		PnL:          rec.PnL,
+		ResolvedAt:   rec.ResolvedAt,
 	}
 }

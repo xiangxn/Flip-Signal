@@ -27,13 +27,18 @@
 // rem≤180，本族没有那条时间腿——快照点已在 rem≈60，再提前撤会把手里的位置全撤空）。
 // 挂单终态由 trading.FillTracker 撤单时查 size_matched 定稿（闭市 +60s 硬截止兜底）。
 //
-// Dashboard 不在本命令范围（internal/dashboard 硬绑 flip.Recorder）。
+// Dashboard（internal/dashboard 的 tail 族; 与 flip 面板**各自一个 listener**）:
+// 判决速览（日级 bootstrap 判据 + 频率闸 + 今日采集健康度）、五格对照、当前窗口的
+// 两个闩锁与热门侧读数、决策快照/帧行两表。开关 = `runtime.tail_dashboard_addr`
+// 配置键或 `-dashboard` flag; 判决口径在 Go 侧现算且与 python `boot_days` 逐位一致。
 //
 // 用法:
 //
 //	go run ./cmd/tail -config v4.config.yaml                   # 纸面（无需凭证, 不弹密码）
 //	go run ./cmd/tail -config v4.config.yaml -mode live        # live 需配置文件里有密文凭证
 //	go run ./cmd/tail -stake 5                                 # 单点覆盖（覆盖 tail.stake）
+//	go run ./cmd/tail -config config.local.yaml -dashboard :8091   # 纸面 + Dashboard
+//	go run ./cmd/tail -config config.local.yaml -dashboard ""      # 显式关掉配置里的地址
 package main
 
 import (
@@ -55,6 +60,7 @@ import (
 	sdk "github.com/xiangxn/go-polymarket-sdk/polymarket"
 
 	"github.com/necklace/flip-signal/internal/config"
+	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
 	"github.com/necklace/flip-signal/internal/tail"
@@ -111,12 +117,158 @@ type marketCache struct {
 	res  *gjson.Result
 }
 
-// sampler 是 tick 采样所需的运行时组件：盘口闭包（monitor goroutine 写）+ 两个数据源。
-// 不持有窗口状态——引擎挂在主循环里（本命令没有 Dashboard，无跨 goroutine 读取需求）。
-type sampler struct {
-	Binance     *feed.BinanceAdapter
-	TwapAdapter *feed.TwapAdapter
-	books       func() (*sdk.OrderBook, *sdk.OrderBook) // 当前窗口 UP/DOWN 盘口
+// runtimeState 是主循环/Dashboard 共用的窗口现场快照载体——只背「当前窗口长什么样」
+// （引擎/适配器/窗口元/盘口闭包）; 成交编排（执行器/闸/两阶段落盘/风控）收敛在
+// Exec（tail.ExecState, 见 internal/tail exec_state.go）。
+//
+// 与 cmd/flip 的同名类型形制一致, 字段集不同: 本族的窗口进度是**两个一次性闩锁**
+// （LatchState）而不是触底观测。mu 保护每窗口换装的字段（Engine/ConditionID/Slug/
+// EventStart）: 主循环写（窗口起点 setWindow 换装, 跳窗路径 clearWindow 清空——清空后
+// Dashboard 显示「等待下一窗口…」而非上一窗陈旧状态）, Dashboard goroutine 经
+// Snapshot 读。
+type runtimeState struct {
+	mu sync.RWMutex
+
+	Engine      *tail.Engine                            // 当前窗口引擎（首个窗口边界前/跳窗后 nil, Snapshot 判空）
+	TwapAdapter *feed.TwapAdapter                       // 锚/σ 数据源
+	Binance     *feed.BinanceAdapter                    // 位移腿 spot 数据源
+	ConditionID string                                  // 当前窗口 conditionId（窗口起点换装）
+	Slug        string                                  // 当前窗口 slug
+	EventStart  int64                                   // 当前窗口起点（unix 秒）
+	Mode        string                                  // 成交模式: paper/live（构造后不变, live 缺凭证降级为 paper）
+	StartedAt   time.Time                               // 进程启动时刻（构造后不变）
+	Exec        *tail.ExecState                         // 快照执行编排（HandleFrame/HandleObservation + LiveSummary; 构造后不变）
+	books       func() (*sdk.OrderBook, *sdk.OrderBook) // 当前窗口 UP/DOWN 盘口闭包
+
+	// 锚可见性（取锚 goroutine 写 → 主循环 join 后读, Dashboard 也在读）。
+	// 单独一把锁、**不与窗口换装的 mu 嵌套**: 前者在窗口内异步写、每窗清零,
+	// 后者只在窗口边界换装——生命周期不同, 混用会让读写面变复杂。
+	anchorMu  sync.RWMutex
+	anchorSrc string // feed.AnchorSourceStream（空 = 本窗未取到锚; 官方段休眠时恒 stream）
+	anchorAt  int64  // 该推送的**本地到达时刻**（unix 毫秒; 仅取到锚时非 0）
+}
+
+// Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照）。
+//
+// 窗口读数（热门侧/dev/sd）在**采样时刻现算**——与引擎落盘行走的是同一组纯函数
+// （tail.SideOfHot / DevUSD / SigmaUSD, 见 decide.go）: 页面上的 dev/sd 必须与
+// 落盘行的 dev/sd 同一口径, 否则「为什么这一窗没过 ⑤」会被两个数忽悠。
+// 差别只在输入新鲜度: 页面用**当前**盘口/现货, 落盘行用快照 tick 那一刻的值。
+//
+// ⚠️ Engine 为 nil 的场景: 启动空窗（Dashboard 先于窗口循环开服, 最长等 ~5 分钟才
+// setWindow）与跳窗路径（clearWindow——迟到/市场获取失败/token 缺失/防重入/σ 未就绪）
+// ——判空, nil 时状态留空（前端显示「等待下一个窗口…」）。
+func (rt *runtimeState) Snapshot() tail.LiveSnapshot {
+	yb, nb := rt.books()
+	pm := feed.NewPMTick(yb, nb)
+	twapPrice, twAge := rt.TwapAdapter.Latest()
+	bin := rt.Binance.LatestData()
+
+	// spot 显示口径: 未推送显示 0/−1（前端判灰）；有推送则显示最近价与本地接收龄
+	// （前端按 >2s 标红——与引擎判 stale 的阈值一致）
+	spotPrice, spotAgeMs := 0.0, int64(-1)
+	if bin.RxAtMs > 0 {
+		spotPrice = bin.Price
+		spotAgeMs = time.Now().UnixMilli() - bin.RxAtMs
+	}
+
+	rt.mu.RLock()
+	eng := rt.Engine // 引擎引用（窗口换装时替换; 计数器/闩锁读取放到锁外）
+	engineState := ""
+	anchor, histBps := 0.0, 0.0
+	if eng != nil {
+		engineState = eng.State().String()
+		anchor, histBps = eng.WindowAnchor()
+	}
+	snap := tail.LiveSnapshot{
+		Mode:        rt.Mode,
+		StartedAt:   rt.StartedAt,
+		ConditionID: rt.ConditionID,
+		Slug:        rt.Slug,
+		EventStart:  rt.EventStart,
+		EngineState: engineState,
+		Anchor:      anchor,
+		HistBps:     histBps,
+		YesBid:      pm.UpBid,
+		YesAsk:      pm.UpAsk,
+		NoBid:       pm.DownBid,
+		NoAsk:       pm.DownAsk,
+		BookLatMs:   pm.BookLatMs,
+		TwapAgeMs:   twAge,
+		TwapPrice:   twapPrice,
+		SpotPrice:   spotPrice,
+		SpotAgeMs:   spotAgeMs,
+	}
+	rt.mu.RUnlock()
+
+	// 尾盘读数: 热门侧 = ask 高的一侧（平局取 yes）。dev/sd 需输入齐备才算——缺锚
+	// 或缺现货时留 0（前端显示「—」, 不是「恰好为 0」）。
+	snap.HotSide = tail.SideOfHot(pm.UpAsk, pm.DownAsk)
+	snap.HotAsk = tail.HotAskOf(snap.HotSide, pm.UpAsk, pm.DownAsk)
+	if spotPrice > 0 && anchor > 0 {
+		snap.Dev = tail.DevUSD(snap.HotSide, spotPrice, anchor)
+	}
+	snap.Sd = tail.SigmaUSD(histBps, anchor)
+
+	// 锚可见性（决策 #15: 精确命中边界那一秒的推送才算 exact）
+	ai := rt.anchorInfo()
+	snap.AnchorExact = ai.src != ""
+	snap.AnchorSrc = ai.src
+	if ai.atMs > 0 && snap.EventStart > 0 {
+		snap.AnchorArrivedMs = ai.atMs - snap.EventStart*1000
+	}
+
+	// 本窗 tick 健康度与两个闩锁放锁外: 引擎自锁（诊断计数, 与本窗同一窗口上下文）。
+	// 窗口间（clearWindow 后 Engine=nil）为 nil——前端隐藏本窗统计块、闩锁全灭。
+	if eng != nil {
+		st := eng.WindowStats()
+		snap.Stats = &st
+		snap.FrameSent, snap.SnapSent, snap.AnchorFrozen = eng.LatchState()
+	}
+
+	// live/风控摘要放锁外: Exec 构造后不变且方法内部自锁（Recorder 域, 与窗口快照无关）
+	// ——全量观测遍历不阻塞 setWindow/clearWindow 的窗口换装写锁。
+	snap.Live = rt.Exec.LiveSummary()
+	snap.Risk = rt.Exec.RiskSummary() // 日亏熔断摘要（两模式都填, 与闸判据同源）
+	return snap
+}
+
+// setWindow 在窗口起点换装引擎与元字段，并清掉上一窗的锚可见性（主循环持有）。
+func (rt *runtimeState) setWindow(engine *tail.Engine, conditionID, slug string, eventStart int64) {
+	rt.mu.Lock()
+	rt.Engine = engine
+	rt.ConditionID = conditionID
+	rt.Slug = slug
+	rt.EventStart = eventStart
+	rt.mu.Unlock()
+	rt.setAnchor("", 0) // 新窗口从「锚未到手」开始（取锚通道 +20s 内注入）
+}
+
+// clearWindow 清空当前窗口快照（语义 = 无窗口进行中），跳窗 continue 路径调用:
+// 否则 Dashboard 在最长一个完整窗口周期内停留在上一窗的陈旧引擎/conditionID
+// （上一窗本就一行不产出, 清空零副作用）。Snapshot 判 nil Engine, 前端显示
+// 「等待下一窗口…」, 与启动空窗同口径。
+func (rt *runtimeState) clearWindow() {
+	rt.mu.Lock()
+	rt.Engine = nil
+	rt.ConditionID = ""
+	rt.Slug = ""
+	rt.EventStart = 0
+	rt.mu.Unlock()
+}
+
+// setAnchor 记录本窗锚的来源与该推送的本地到达时刻（取锚 goroutine 调用）。
+func (rt *runtimeState) setAnchor(src string, atMs int64) {
+	rt.anchorMu.Lock()
+	rt.anchorSrc, rt.anchorAt = src, atMs
+	rt.anchorMu.Unlock()
+}
+
+// anchorInfo 返回锚可见性副本（主循环 join 后读 / tailstats 落盘用）。
+func (rt *runtimeState) anchorInfo() anchorInfo {
+	rt.anchorMu.RLock()
+	defer rt.anchorMu.RUnlock()
+	return anchorInfo{src: rt.anchorSrc, atMs: rt.anchorAt}
 }
 
 func init() {
@@ -124,8 +276,9 @@ func init() {
 }
 
 func main() {
-	// ── CLI 参数（与 cmd/flip 同形, 去掉 -dashboard 与 -encrypt）──
+	// ── CLI 参数（与 cmd/flip 同形, 去掉 -encrypt）──
 	configPath := flag.String("config", "", "配置文件路径（YAML; 空 = 只用代码默认值）")
+	dashboardAddr := flag.String("dashboard", "", "Dashboard 监听地址（覆盖 runtime.tail_dashboard_addr; 显式空串 = 本次不开）")
 	mode := flag.String("mode", "", "成交模式: paper|live（覆盖 runtime.mode）")
 	stake := flag.Float64("stake", 0, "每信号投入 USDC（覆盖 tail.stake）")
 	flag.Parse()
@@ -148,6 +301,9 @@ func main() {
 	}
 	if set["stake"] {
 		cfg.Tail.Stake = *stake
+	}
+	if set["dashboard"] {
+		cfg.Runtime.TailDashboardAddr = *dashboardAddr // 显式空串 = 关掉配置文件里的地址
 	}
 	// 校验判的是最终生效值，必须在覆盖之后（config.Validate 同时校验 flip 节——
 	// 一个结构体一份配置, 两节都在里面）
@@ -323,6 +479,20 @@ func main() {
 		},
 	}
 
+	// ── 运行时状态载体（主循环 + Dashboard 共用; 窗口现场由 setWindow 换装）──
+	runtime := &runtimeState{
+		TwapAdapter: twapAdapter,
+		Binance:     binance,
+		Mode:        effMode,
+		StartedAt:   time.Now(),
+		Exec:        exec,
+	}
+	runtime.books = func() (*sdk.OrderBook, *sdk.OrderBook) {
+		bookMu.RLock()
+		defer bookMu.RUnlock()
+		return upBook, downBook
+	}
+
 	// ── GTC 挂单跟踪 ──
 	// 撤单点 = **闭市**（trading.CancelAtClose）: 快照在 rem≈60 产出，挂单只等 ~1 分钟
 	// 就撤等于白挂（且会把「热门侧走弱」的那批位置全部让出）。挂到闭市由 CLOB 自动
@@ -345,6 +515,20 @@ func main() {
 		}
 	}
 
+	// ── Dashboard（internal/dashboard 的 tail 族; 与 flip 面板各自一个 listener）──
+	// 判决速览在 Go 侧现算（tail.Judge 纯函数, 含日级 bootstrap —— 口径与
+	// python/v4/13_tail_sweep.py 的 boot_days 逐位一致）, 但**只读**: 不碰判定/执行路径。
+	if cfg.Runtime.TailDashboardAddr != "" {
+		// 三源新鲜度阈值下发（前端按阈值标红——勿在前端硬编码）
+		limits := dashboard.SourceLimits{
+			BookLatMs: cfg.Tail.MaxBookLatMs,
+			SpotAgeMs: cfg.Feed.MaxSpotAgeMs,
+			TwapAgeMs: cfg.Feed.MaxTwapAgeMs,
+		}
+		dashState := dashboard.NewTailState(recorder, runtime, cfg.Tail, effMode, limits)
+		go dashState.ListenAndServe(cfg.Runtime.TailDashboardAddr)
+	}
+
 	// σ 启动预热（本地 tailwin_*.jsonl 优先, 不足/陈旧回退官方网络预热）
 	hist := flip.NewHistState()
 	warmupSigma(hist, recorder, client)
@@ -365,13 +549,6 @@ func main() {
 		cfg.Tail.MaxBookLatMs, cfg.Feed.MaxSpotAgeMs, cfg.Feed.MaxTwapAgeMs)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 位移]")
 	log.Println("========================================")
-
-	sam := &sampler{Binance: binance, TwapAdapter: twapAdapter}
-	sam.books = func() (*sdk.OrderBook, *sdk.OrderBook) {
-		bookMu.RLock()
-		defer bookMu.RUnlock()
-		return upBook, downBook
-	}
 
 	// logStats 落盘一行本窗 tick 健康度（tailstats_*.jsonl, **每窗无条件一行**）。
 	// 含被跳过的窗口（skip 非空）: 逐日行数（≈288）本身即「主循环跑满」的证据。
@@ -478,6 +655,7 @@ func main() {
 			if err != nil {
 				log.Printf("[Cycle] 获取市场失败: %v —— 跳过本窗口", err)
 				logStats("", slug, nextStart.Unix(), 0, 0, tail.WindowStats{}, "no_market", anchorInfo{})
+				runtime.clearWindow() // 跳窗 → Dashboard 显示「等待下一窗口…」而非上一窗陈旧状态
 				waitTo(nextStart.Add(windowSec*time.Second), ctx)
 				continue
 			}
@@ -487,6 +665,7 @@ func main() {
 		if upTokenID == "" || downTokenID == "" {
 			log.Printf("[Cycle] ⚠️ 市场 %s token 解析为空，跳过本窗口", slug)
 			logStats(conditionID, slug, nextStart.Unix(), 0, 0, tail.WindowStats{}, "no_token", anchorInfo{})
+			runtime.clearWindow()
 			waitTo(nextStart.Add(windowSec*time.Second), ctx)
 			continue
 		}
@@ -498,6 +677,7 @@ func main() {
 		if recorder.HasKind(conditionID, tail.KindSnap) {
 			log.Printf("[Cycle] ⚠️ 窗口 %s 已有决策快照（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
 			logStats(conditionID, slug, nextStart.Unix(), 0, 0, tail.WindowStats{}, "dup_record", anchorInfo{})
+			runtime.clearWindow()
 			waitTo(nextStart.Add(windowSec*time.Second), ctx)
 			continue
 		}
@@ -511,6 +691,7 @@ func main() {
 			log.Printf("[Cycle] ⚠️ 窗口 %s σ 未就绪（%d < %d 窗，预热中），跳过本窗口",
 				slug, hist.Count(), flip.HistMin)
 			logStats(conditionID, slug, nextStart.Unix(), 0, 0, tail.WindowStats{}, "no_sigma", anchorInfo{})
+			runtime.clearWindow()
 			waitTo(nextStart.Add(windowSec*time.Second), ctx)
 			continue
 		}
@@ -541,9 +722,10 @@ func main() {
 		engine := tail.NewEngine(cfg.Tail)
 		engine.BeginWindow(0, 0)
 		endTime := nextStart.Add(windowSec * time.Second)
+		// 换装 Dashboard 的窗口现场（锚可见性一并清零, 由取锚通道稍后注入）
+		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
 
 		var (
-			rec        anchorInfo
 			cancelAnch context.CancelFunc
 			anchorDone chan struct{}
 		)
@@ -562,11 +744,11 @@ func main() {
 				if !engine.UpgradeAnchor(r.Price, bps) {
 					continue // 本窗已产出帧（锚已冻结）或窗口已结束
 				}
-				rec.src, rec.atMs = r.Source, r.AtMs
+				runtime.setAnchor(r.Source, r.AtMs)
 				log.Printf("[Anchor] ✅ 窗口 %s 锚 %.2f（%s, σ=%.2fbps; 边界后 +%dms）",
 					conditionID, r.Price, r.Source, bps, r.AtMs-nextStart.UnixMilli())
 			}
-			if rec.src == "" {
+			if runtime.anchorInfo().src == "" {
 				n, newestOff, noTs := twapAdapter.CacheStat()
 				log.Printf("[Anchor] ⚠️ 窗口 %s %d 次 × %v 未取到边界那一秒的 open"+
 					"（缓存 %d 条, 最新一条评估偏移 %+dms, 缺时间戳 %d 条）, 本窗不产出样本",
@@ -594,7 +776,7 @@ func main() {
 				rem := int(endTime.Sub(tickTime).Seconds())
 				rem = max(rem, 0)
 				lastSampleAt = time.Now()
-				lastTick = sam.tick(tickTime, rem, cfg.Feed.MaxSpotAgeMs)
+				lastTick = runtime.tick(tickTime, rem, cfg.Feed.MaxSpotAgeMs)
 
 				// 引擎驱动: 0~2 行（帧 + 决策快照）。**帧行只落盘**——它不带判定、
 				// 更不带仓位, 走执行路径会让本窗在价格还没到 0.80 时就下单。
@@ -644,10 +826,12 @@ func main() {
 		}
 
 		// 取锚通道收尾: 取消 + join（通道通常早在 +2s 就已命中并关闭, join 立即返回）。
-		// channel close 建立 happens-before——此后读 rec / 引擎锚无数据竞争。
+		// channel close 建立 happens-before——此后读锚可见性 / 引擎锚无数据竞争
+		// （载体侧另有 anchorMu 保护, Dashboard goroutine 也在读）。
 		cancelAnch()
 		<-anchorDone
 		anchor, histBps := engine.WindowAnchor()
+		ai := runtime.anchorInfo() // 本窗锚可见性（tailstats + tailwin_ 落盘用）
 
 		// 步骤 6: 窗口结束 → σ 滚动窗追加本窗振幅（严格只用已结束窗口）。
 		// 判据与 cmd/flip 逐条一致（缺锚/close 缺失/流值陈旧/采样迟到 —— 假振幅会
@@ -668,7 +852,7 @@ func main() {
 			if err := recorder.LogWindowAmplitude(flip.WindowEntry{
 				Ts: time.Now().UnixMilli(), ConditionID: conditionID, Slug: slug,
 				EventStart: nextStart.Unix(),
-				Anchor:     anchor, Close: lastTick.TwapPrice, Amp: amp, AnchorSrc: rec.src,
+				Anchor:     anchor, Close: lastTick.TwapPrice, Amp: amp, AnchorSrc: ai.src,
 			}); err != nil {
 				log.Printf("[Cycle] ⚠️ 窗口振幅落盘失败: %v（重启本地预热将缺此窗）", err)
 			}
@@ -677,7 +861,7 @@ func main() {
 		}
 
 		// 本窗 tick 健康度无条件落盘（含锚缺失/σ 未计的窗口——可见性优先于整洁）
-		logStats(conditionID, slug, nextStart.Unix(), anchor, histBps, engine.WindowStats(), "", rec)
+		logStats(conditionID, slug, nextStart.Unix(), anchor, histBps, engine.WindowStats(), "", ai)
 
 		// live 首窗禁单解除: 首个完整跑完的窗口结束后置 false。窗口被跳过（continue）
 		// 则顺延——保守多禁一窗，防重启残留窗双单的缝隙优先于交易频率。
@@ -691,11 +875,11 @@ func main() {
 // tick 读取当前盘口/现货/TWAP 构造一条引擎 tick（1s 粒度）。
 // 盘口缺失时 bid/ask 为 0（引擎判无效 tick、不推进闩锁）；spot 新鲜度超阈值置 0
 // （= missing_spot，快照行会据此整窗丢弃）。
-func (s *sampler) tick(t time.Time, rem int, maxSpotAgeMs int64) flip.Tick {
-	yb, nb := s.books()
+func (rt *runtimeState) tick(t time.Time, rem int, maxSpotAgeMs int64) flip.Tick {
+	yb, nb := rt.books()
 	pm := feed.NewPMTick(yb, nb)
 
-	bin := s.Binance.LatestData()
+	bin := rt.Binance.LatestData()
 	spot, spotAge := 0.0, int64(-1)
 	if bin.RxAtMs > 0 {
 		spotAge = t.UnixMilli() - bin.RxAtMs
@@ -704,7 +888,7 @@ func (s *sampler) tick(t time.Time, rem int, maxSpotAgeMs int64) flip.Tick {
 		}
 	}
 
-	twapPrice, twAge := s.TwapAdapter.Latest()
+	twapPrice, twAge := rt.TwapAdapter.Latest()
 	return flip.Tick{
 		Ts:        t.UnixMilli(),
 		Rem:       rem,

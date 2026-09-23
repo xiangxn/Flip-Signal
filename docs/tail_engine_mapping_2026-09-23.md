@@ -134,11 +134,12 @@ tail 独有的时序性质：取锚通道在边界 **+20s（rem≈280）** 就�
 
 ```bash
 # 纸面（无需凭证；与 flip 并行跑不冲突——前缀不撞、无共享状态）
-go run ./cmd/tail -config v4.config.yaml
+go run ./cmd/tail -config v4.config.yaml -dashboard :8091
 
-# 单点覆盖: -config / -mode / -stake（比 flip 少了 -dashboard 与 -encrypt，
-# Dashboard 硬绑 *flip.Recorder，泛化不划算——本族看 JSONL 与日志）
-go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper
+# 单点覆盖: -config / -mode / -stake / -dashboard（比 flip 少了 -encrypt）
+go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
+# Dashboard 地址来自 runtime.tail_dashboard_addr（**独立于** flip 的 dashboard_addr），
+# 空串 = 不开——两个进程各自的 listener、各自的静态目录与 API 前缀（见 §5.4）
 
 # 交叉编译交付（build.sh 自动探测 cmd/）
 ./build.sh tail
@@ -186,6 +187,45 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 ⚠️ 两条对账口径：① 宇宙过滤必须含「快照 tick 上 spot 与 twap 同时在场」（python
 整窗丢弃、Go 落行后继续——聚合时要对齐）；② σ 必须**按事件索引**现算后注入
 （python 语义），**不能喂 `flip.HistState`**（后者只记已 push 的振幅，缺窗时条数不同）。
+
+### 5.4 Dashboard（判决速览）口径
+
+`cmd/tail -dashboard :8091`（或配置键 `runtime.tail_dashboard_addr`）起一块只读面板，
+把 §5.2 的判据做成常显读数——**页面不参与判定、不写任何文件**，全部读数现算。六个口：
+
+| 路由 | 内容 |
+|---|---|
+| `/api/state` | 当前窗口（热门侧/`dev`/`sd`/锚与 σ/两个闩锁/三源新鲜度）+ 统计汇总 + **今日健康度**（读当日 `tailstats_*`） |
+| `/api/snaps` | 决策快照行分页（成功 + 否决 + 被闸，各带判定段与结算回填） |
+| `/api/frames` | 原始帧行分页（rem≤150，只记录——「那一刻市场长什么样」的原稿） |
+| `/api/daily` | 逐日：帧/快照/注数/**注/日**/待结算/胜率/P&L |
+| `/api/judge` | **判决速览本尊**：①~⑤ 五格 + T=150 对照格 |
+| `/api/config` | `tail.*` 7 键（键名 = mapstructure tag，前端展示标定参数） |
+
+**判决口径（`internal/tail/judge.go`，与 §5.2 逐条对应）**：
+
+- 样本门槛 `Days ≥ 14 ∧ N ≥ 800` 未过 ⇒ 判词 `pending`（页面显示「未到判决时点」+ 进度条）；
+- **主判据 = 日级 bootstrap**：把每格的注按 UTC 日汇总成日 P&L 序列，按**日**重采样
+  2000 次（seed 42），取第 `0.025·B` / `0.975·B` 个排序值 = 95% 区间；下界 > 0 `pass` /
+  上界 < 0 `fail` / 跨 0 `inconclusive`（28 日仍跨 0 ⇒ `fail`）。
+  **Go 侧复刻了 CPython 的 MT19937 + `randrange`**（含 3.12+ `sum()` 的 Neumaier 补偿
+  求和），与 `python/v4/13_tail_sweep.py:424 boot_days` **逐位一致**——判决卡上的区间
+  与复验脚本跑出来的是同一个数（黄金向量钉在 `internal/tail/judge_test.go`）；
+- 频率闸 90~120 注/日按 `N/Days` 现算（§5.2 辅助闸门 1）；
+- 被闸行（`gate_reason` 非空）**不进任何格**（§2.2 红线），但仍在快照表里可见；
+- 未结算行不进 n/胜率/P&L（判决只吃已结算样本）。
+
+⚠️ **三处已知口径差异**（别把页面读数当成 python 的等价物）：
+
+1. **T=150 对照格的结果是借来的**：帧行自己不挂结算（recorder 只对 snap+ok+成交的行
+   注册结算轮询），故按 `condition_id` 借**同窗快照行**的官方结果。这意味着该格只覆盖
+   「该窗快照成交过」的窗口，比 python 的全样本离线复算窄——它是**同一批窗口内
+   T=60 vs T=150 的配对比较**，不是全样本对照（`③ 纯 σ` 等其它格的宇宙不受影响）。
+2. **胜负按帧行自己的热门侧重算**（帧与快照的 hot side 可能不同——rem≤150 时 ask 高的
+   一侧到 rem≤60 可能已反过来），P&L 按 `cfg.Stake / frame.HotAsk` 现算（帧行没有仓位）。
+3. **σ 用的是落盘时的本窗值**（`hist_bps`），与 python 按事件索引现算的口径一致；
+   但页面**实时**读数（`/api/state` 的 `dev`/`sd`）用的是**当前**盘口与 spot——同一窗内
+   与落盘行不会逐位相同（落盘行是快照 tick 那一刻的值）。判定路径不读页面。
 
 ## 6. 复现
 
