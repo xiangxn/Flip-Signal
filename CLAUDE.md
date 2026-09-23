@@ -29,7 +29,7 @@
 - **成交口径**：fill = 触发 tick 狗侧 ask（≤0.20，无滑点）；`shares = stake/fill`；
   赢 → `shares − stake`，输 → `−stake`（每股兑 1U）
 - **结算**（2026-09-24 起三层回退，决策 #19）：官方 outcome（0=Up 1=Down）——
-  ① 边界推送自算（闭市 +25s，与官方逐位同源）→ ② 官方 crypto-price 接口（+45s）→
+  ① 边界推送自算（闭市 +10s，与官方逐位同源）→ ② 官方 crypto-price 接口（+45s）→
   ③ gamma `umaResolutionStatus=="resolved"` 轮询；每行落 `settle_src`
 - **回测基准（14 天，2U/笔，2026-08-18~31）**：R1 m_45 纯现货 n=245，WR 29.0%，
   EV +1.078U/注，+264U/14 天；日正 12/14；双层（+dist_t）n=197，WR 30.5%，EV +1.234U/注
@@ -181,7 +181,7 @@ FlipSignal/
 │   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
 │   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest(精确)/CacheStat
 │   ├── settle/                       # 结算编排（零外部依赖, 不 import flip; 两族共用; 决策 #19）
-│   │   ├── settle.go                 # Outcome/Anchors（按边界秒存推送）+ Resolver 三层回退（push +25s → official +45s → gamma）
+│   │   ├── settle.go                 # Outcome/Anchors（按边界秒存推送）+ Resolver 三层回退（push +10s → official +45s → gamma）
 │   │   └── settle_test.go            # 判定词表钉在 flip 常量上 + 三层时点/次数/幂等/剪枝
 │   ├── tail/                         # 扫尾盘 ⑤ 引擎核心层（零外部依赖; 只复用 flip 的原语, 反向不依赖）
 │   │   ├── config.go                 # Config + DefaultConfig()（7 个键, 全部不可调; 见决策 #17）
@@ -244,7 +244,7 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
                          │  PendingSignals()（待结算行, isSettlable 已过滤）
                          ▼
       settle.Resolver 三层回退（决策 #19; 锚推送缓存是它的输入之一）
-        ① push     闭市 +25s   两条边界推送在手 ⇒ 自算定案  ← 实测覆盖 ~96.5%
+        ① push     闭市 +10s   两条边界推送在手 ⇒ 自算定案  ← 实测覆盖 ~96.5%
         ② official 闭市 +45s   官方 open+close（须已收敛）  ← 推送缺一条即走这里
         ③ gamma    约 +75s     ResolutionPoller 兜底
                          │  每行落 settle_src
@@ -268,7 +268,7 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
 5. ok 信号 → 风控闸（live 命中拦 POST 记 rejected；paper 命中记 gate_reason 照常结算）
    → Executor 执行（paper 即时定稿; live = GTC 挂单 → resting 交 FillTracker 每 2s
    查询, **到 rem ≤ RemMin 撤掉未成交余量并定稿**）→ **定稿后**该行进 pending,
-   由 settle.Resolver 按三层回退结算（决策 #19: push +25s → official +45s → gamma）
+   由 settle.Resolver 按三层回退结算（决策 #19: push +10s → official +45s → gamma）
 6. 窗口结束（rem=0）→ 收尾取锚通道（cancel + join）→ |close−anchor| 追加进 σ 滚动窗
    并落盘 windows_*.jsonl（重启 σ 预热本地优先：windows_* 新鲜即毫秒级恢复，
    不足/过旧回退官方网络预热 FetchTwapRanges——停机期窗口只有官方能取）；
@@ -614,7 +614,7 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       （保守，且与回测 `shares = stake/fill` 同口径）。
     - **结算注册后移**：resting 行 `IsFilled()==false`、不进 pending；改由定稿回调
       在 `ApplyFillFinal` 之后进 pending（决策 #19 后由 `settle.Resolver` 的 Pending
-      扫描接管，闭市 +25s 即可定案——挂单定稿本来就远早于此，不影响）。
+      扫描接管，闭市 +10s 即可定案——挂单定稿本来就远早于此，不影响）。
       重启时 main 扫盘把残留 resting 行按 `adopted` 重新登记。
     - **已知样本偏差**（不是免费午餐）：挂单越久，成交样本越偏向「价格继续下探」的
       那批——反弹回去的单子根本不会成交。回测 WR 24.6% 对应「触发瞬间拿到位置」，
@@ -719,13 +719,18 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
     （**228/228**）；**错位对照** `close(N)` vs `anchor(N)` 差 p50 **51.83 美元 = 1.00σ**
     ——对齐是**定义级相同**而非近似。官方 API 方向 vs 市场实际结算方向 113/113 一致
     ⇒ 换层只改时延不改编号。
-    - **三层与时点**：闭市 **+25s** 推送自算（close 那条推送到达 p50 +2.0s / 最晚 +12.1s，
-      25s 留余量）→ 闭市 **+45s** 官方接口（**必须等收敛**，头几十秒是临时值，见决策 #14；
-      每 5s 一次 × 至多 6 次）→ **+75s** 交回 gamma 轮询（UMA 是市场结算本身，最后一层）。
+    - **三层与时点**：闭市 **+10s** 推送自算（闭市时唯一还在等的是 close 那条推送——边界
+      N+300，闭市那一刻才发布；open 那条开局 ~2s 内已入表。实盘 880 个命中窗里它的到达
+      延迟只有 1s(771) / 2s(94) 两档、**无一晚于 2s**，10s = 5 倍上界。⚠️ 决策 #15 记的
+      「最晚 +12.1s」是取锚通道 500ms 轮询下的观测上界, 不是推送本身延迟——首版照抄取锚
+      通道的 20s 预算取了 25s，2026-09-24 用户实测「还要 40-50s」后下调，见
+      `docs/settle_self_2026-09-24.md` §6）→ 闭市 **+45s** 官方接口（**必须等收敛**，头几十
+      秒是临时值，见决策 #14；每 5s 一次 × 至多 6 次；该门槛与 PushWait 无关，丢推送的窗口
+      时点不变）→ **+75s** 交回 gamma 轮询（UMA 是市场结算本身，最后一层）。
     - **为什么值**：新口径下**判定与官方逐位同源**，误差归零——而引擎原先的 close 是
       **到达口径**流值，实测 315 窗里 3 窗（0.95%）方向被贴线漂移带反（三例官方 Δ 仅
       −0.079/−1.09/−0.080 美元，而窗口振幅中位 51.83 美元）；顺带日亏熔断从「等 UMA
-      （闭市后数分钟）」提前到**闭市 +25s**。
+      （闭市后数分钟）」提前到**闭市 +10s**。
     - **缺失面**：854 个实盘窗里 `anchor_exact=false` 仅 **15 窗（1.76%）**，且全部
       `ticks=298`（整窗 tick 齐全 ⇒ 上游那一秒没发，不是我们掉线）。一次结算要**两条**边界
       推送 ⇒ 约 **3.5%** 的结算走官方层。
