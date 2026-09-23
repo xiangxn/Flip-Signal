@@ -34,12 +34,14 @@ import (
 
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
+	"github.com/necklace/flip-signal/internal/tail"
 )
 
 // AppConfig 是与配置文件（v4.config.yaml）对应的顶层配置结构，节顺序即文件顺序。
 type AppConfig struct {
 	Runtime RuntimeConfig      `mapstructure:"runtime"`
 	Flip    flip.Config        `mapstructure:"flip"`
+	Tail    tail.Config        `mapstructure:"tail"`
 	Feed    FeedConfig         `mapstructure:"feed"`
 	Risk    RiskConfig         `mapstructure:"risk"`
 	Binance feed.BinanceConfig `mapstructure:"binance"`
@@ -123,6 +125,9 @@ func defaults() *AppConfig {
 			SlugPrefix:    "btc-updown-5m",
 		},
 		Flip: flip.DefaultConfig(), // 策略参数单一真相（含 MaxBookLatMs=300）, 见 internal/flip/config.go
+		// 扫尾盘（cmd/tail）参数: 与 flip 各自独立成节——两个引擎可分别部署,
+		// 共享键会让调其中一个时误改另一个。默认值全部不可调, 见内部注释。
+		Tail: tail.DefaultConfig(),
 		Feed: FeedConfig{
 			// spot 2s: BTC 常态每秒多笔成交，>2s 无推送基本等于链路断流；用本地接收时刻
 			// 而非交易所成交时间戳（链路排队/服务器时钟都会让后者失真，见 BinanceAdapter）。

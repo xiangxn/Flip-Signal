@@ -108,10 +108,34 @@ const fillCancelLead = 180 * time.Second
 // fillErrLogEvery 查询/撤单错误日志节流（接口长时间不通时不刷屏）。
 const fillErrLogEvery = 30 * time.Second
 
+// CancelAtClose 是传给 NewFillTracker 的 cancelLead 哨兵值: 撤单点 = **闭市**
+// （挂单一直等到 rem ≤ 0 才撤），而不是提前 cancelLead 撤。cmd/tail（扫尾盘族）
+// 用这个口径——它在 rem≈60 才挂单, 撤单点若也按 rem≤180 算就落在此刻之前。
+//
+// ⚠️ 取值必须是**微小正数**（1ns）: NewFillTracker 把 cancelLead ≤ 0 一律当成
+// 「未配置」回退 fillCancelLead（180s）, 传 0 或 -1 都会变成「闭市前 180s 撤单」
+// ——对 rem≈60 才挂单的策略等于挂上后第一轮轮询（≤2s）就撤, size_matched 恒 0、
+// 每单都记 unfilled, 而全程只有一行看着无害的 ⚠️ 回退日志（静默失败）。
+// 1ns 偏移在语义上就是闭市那一刻; 日志按 %.0f 秒打印 = "0"。
+const CancelAtClose = time.Nanosecond
+
+// FillOrder 是 FillTracker 跟踪一笔挂单所需的最小字段集（RegisterOrder 的参数）。
+// 之所以不要求调用方构造 *flip.Record: 兄弟策略（cmd/tail）没有 flip.Record, 而
+// Register 真正用到的只有这几个字段。Register 会把这些字段**即刻拷贝**进
+// trackedOrder, 不保留传入对象——调用方此后可以随意丢弃它。
+type FillOrder struct {
+	OrderID     string  // CLOB 订单 id
+	ConditionID string  // 定位落盘行（与 Recorder 的键一致）
+	Slug        string  // 市场 slug（诊断/定稿回填用）
+	Limit       float64 // 挂单限价 = 触发侧 ask（成交价按它记, 见 trackedOrder.limit）
+	Stake       float64 // 请求投入 USDC（目标股数 = floor2(Stake/Limit)）
+}
+
 // NewFillTracker 构造挂单跟踪器。cancelLead = 窗口结束前多久撤未成交余量, 取
 // **策略时间腿** flip.Config.RemMin（cmd/flip 传入; 回测里触发要求 rem > 它, 故
-// rem ≤ 它之后的成交都不属于本策略）。onFinal 在跟踪 goroutine 内被调用（须自行
-// 保证线程安全——flip.ExecState.ApplyFillFinal 与 ResolutionPoller.Register 都是）。
+// rem ≤ 它之后的成交都不属于本策略）。cmd/tail 传 CancelAtClose（挂到闭市）。
+// onFinal 在跟踪 goroutine 内被调用（须自行保证线程安全——flip.ExecState.ApplyFillFinal
+// 与 ResolutionPoller.Register 都是）。
 func NewFillTracker(client TradeClient, cancelLead time.Duration, onFinal func(flip.FillFinal)) *FillTracker {
 	if cancelLead <= 0 {
 		log.Printf("⚠️ [FillTracker] 撤单提前量 %v 非正, 回退默认 %v（应为 flip.Config.RemMin）", cancelLead, fillCancelLead)
@@ -127,32 +151,44 @@ func NewFillTracker(client TradeClient, cancelLead time.Duration, onFinal func(f
 	}
 }
 
-// Register 登记一笔 GTC 挂单（POST 返回 resting 时; adopted=true = 重启扫描接管
-// 磁盘上的 resting 遗留行）。windowEnd 为本窗市场结束时刻（闭市点）。
-// 同一 orderID 重复登记幂等。缺 order_id/限价/目标股数（= 无法跟踪）仅告警跳过。
+// Register 登记一笔 GTC 挂单（flip.Record 形态的入口, cmd/flip 用）。
+// 只取 FillOrder 需要的字段转调 RegisterOrder——不保留 rec 指针。
 func (t *FillTracker) Register(rec *flip.Record, windowEnd time.Time, adopted bool) {
 	if rec == nil {
 		return
 	}
-	if rec.OrderID == "" || rec.Fill <= 0 || rec.Stake <= 0 {
+	t.RegisterOrder(FillOrder{
+		OrderID:     rec.OrderID,
+		ConditionID: rec.ConditionID,
+		Slug:        rec.Slug,
+		Limit:       rec.Fill,
+		Stake:       rec.Stake,
+	}, windowEnd, adopted)
+}
+
+// RegisterOrder 登记一笔 GTC 挂单（POST 返回 resting 时; adopted=true = 重启扫描接管
+// 磁盘上的 resting 遗留行）。windowEnd 为本窗市场结束时刻（闭市点）。
+// 同一 orderID 重复登记幂等。缺 order_id/限价/目标股数（= 无法跟踪）仅告警跳过。
+func (t *FillTracker) RegisterOrder(o FillOrder, windowEnd time.Time, adopted bool) {
+	if o.OrderID == "" || o.Limit <= 0 || o.Stake <= 0 {
 		log.Printf("⚠️ [FillTracker] 无法跟踪挂单（缺 order_id/限价/投入）: window=%s order=%q fill=%.4f stake=%.2f",
-			rec.ConditionID, rec.OrderID, rec.Fill, rec.Stake)
+			o.ConditionID, o.OrderID, o.Limit, o.Stake)
 		return
 	}
-	reqShares := floor2(rec.Stake / rec.Fill)
+	reqShares := floor2(o.Stake / o.Limit)
 	cancelAt := windowEnd.Add(-t.cancelLead)
 	deadline := windowEnd.Add(t.closeGrace)
 
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	if _, dup := t.orders[rec.OrderID]; dup {
+	if _, dup := t.orders[o.OrderID]; dup {
 		return
 	}
-	t.orders[rec.OrderID] = &trackedOrder{
-		conditionID: rec.ConditionID,
-		slug:        rec.Slug,
-		orderID:     rec.OrderID,
-		limit:       rec.Fill,
+	t.orders[o.OrderID] = &trackedOrder{
+		conditionID: o.ConditionID,
+		slug:        o.Slug,
+		orderID:     o.OrderID,
+		limit:       o.Limit,
 		reqShares:   reqShares,
 		cancelAt:    cancelAt,
 		deadline:    deadline,
@@ -163,7 +199,7 @@ func (t *FillTracker) Register(rec *flip.Record, windowEnd time.Time, adopted bo
 		how = "重启接管"
 	}
 	log.Printf("[FillTracker] 📋 跟踪挂单 %s（%s）: 限价 %.3f 目标 %.2f 股, 撤单点 %s（rem≤%.0fs）, 硬截止 %s",
-		rec.OrderID, how, rec.Fill, reqShares,
+		o.OrderID, how, o.Limit, reqShares,
 		cancelAt.UTC().Format("15:04:05Z"), t.cancelLead.Seconds(), deadline.UTC().Format("15:04:05Z"))
 }
 

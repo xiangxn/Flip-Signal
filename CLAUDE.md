@@ -95,6 +95,23 @@
 - 已证伪：flip「自信崩溃」家族（v3，分支 v3 保留）、v1/v2 follow/wait 族、0.2 深度
   全市场扫、双层版单独 TWAP 腿等——历史分析/代码在 git 其他分支可查。
 
+### 第二条策略线：「扫尾盘」⑤（2026-09-23 落引擎，与狗@0.2 独立并行）
+- 完整规格见 `docs/tail_sweep_2026-09-22.md`，口径映射/运行说明见
+  `docs/tail_engine_mapping_2026-09-23.md`，实现 `cmd/tail/` + `internal/tail/`。
+- **逻辑（方向与狗@0.2 相反：买热门侧）**：每窗在 **`rem ≤ 60` 的第一个有效 tick**
+  取快照，买当时 **ask 较高的一侧**（热门侧），当 `hot_ask ≥ 0.80` 且
+  `dev ≥ 63 美元` **或**（`sd ≥ 40 美元` ∧ `dev ≥ sd`）时下注。
+  `dev = sgn·(spot − anchor)`（美元，正 = 朝押注方向，sgn: 押 yes +1 / no −1）；
+  `sd = hist_bps × anchor / 1e4`（该窗 1σ 折美元）。
+- **回测基准（14 天，2U/注）**：n=1536，WR 99.61%，+36.93U，0 亏损日；同批快照可
+  离线算 ①~⑤ 五格（WR 97.6~99.6%），但**只有 ⑤ 落引擎下单**。
+- ⚠️ **参数全部不可调**：`40` 这个门槛在 2000 次日期重采样里一次都没成为最优
+  （真 argmax=35）——不许调参，只纸面登记。
+- 🟡 **状态：纸面登记中**，判据（文档 §5.2，先定后看）= 14 个完整 UTC 日且 n ≥ 800 时
+  做首次判决，主判据为**日级 bootstrap（重采样日期 2000 次）P&L 的 95% 区间**：
+  下界 > 0 通过 / 上界 < 0 判负 / 跨 0 不显著（延到 28 日）。**未上实盘**
+  （live 是 GTC 挂单等成交，成交样本天然偏向「热门侧走弱」，与回测不是同一个估计量）。
+
 ### 版本管理约定（2026-08-31 起生效，v4 分支沿用）
 - **分支即版本**：当前分支 `v4`（从 v3 切出，dog@0.2 全新独立实现）。
   代码命名不带版本字眼；后续策略演进各开新分支（`git checkout -b v5`…），
@@ -109,8 +126,10 @@
 
 ```
 FlipSignal/
-├── cmd/flip/                         # 策略引擎主入口（纸面/实盘同源，-mode 切换）
+├── cmd/flip/                         # 狗@0.2 引擎主入口（纸面/实盘同源，-mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
+├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 无 Dashboard; -config/-mode/-stake 三 flag）
+│   └── main.go                       # 同上接线, 但两帧闩锁/尾盘闸/GTC 挂到闭市（决策 #17）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── internal/
 │   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
@@ -139,15 +158,23 @@ FlipSignal/
 │   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
 │   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
 │   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest(精确)/CacheStat
-│   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 构造注入）
+│   ├── tail/                         # 扫尾盘 ⑤ 引擎核心层（零外部依赖; 只复用 flip 的原语, 反向不依赖）
+│   │   ├── config.go                 # Config + DefaultConfig()（7 个键, 全部不可调; 见决策 #17）
+│   │   ├── types.go                  # Observation/Rules/Record/WindowStats + 行类型/闸原因常量 + 状态机
+│   │   ├── decide.go                 # 纯函数 EvalRules + Rules.Rule1()…Rule5()（价格腿 = 全部五格前置）
+│   │   ├── engine.go                 # 状态机: 两个独立一次性闩锁（rem≤150 帧 / rem≤60 快照）, ProcessTick 返回 0~2 行
+│   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* 三前缀（独立于 flip 三前缀, 决策 #9 红线）
+│   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像）
+│   │   └── *_test.go                 # decide/engine/recorder/exec_state/parity（对账 opt-in, 不在 -race 快跑里）
+│   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 与 cmd/tail 各自构造注入）
 │       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
-│       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin 撤单 + 查 size_matched 定稿回调（决策 #16）
+│       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin（flip）/ 闭市（tail）撤单 + 查 size_matched 定稿回调（决策 #16/#17）
 │       ├── prefetch.go               # 每窗预热 tickSize/negRisk/feeRate（下单路径零额外网调）
 │       └── resolution_poller.go      # 官方结算轮询（gamma umaResolutionStatus）
-├── docs/                             # 策略文档（v4 方案/口径映射）
+├── docs/                             # 策略文档（v4 方案/口径映射; 扫尾盘见 tail_sweep_*/tail_engine_mapping_*）
 ├── python/
 │   ├── v2/lib.py                     # 数据加载器（v4 回测脚本依赖，保留）
-│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）
+│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15）
 ├── v4.config.yaml                    # 全量配置示例（= 代码默认值, 有漂移守卫测试; 调参请复制成 config.local.yaml）
 ├── go.mod / go.sum
 └── CLAUDE.md                         # 本文件
@@ -235,6 +262,23 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
   锚未就绪期占槽的 tick 不追溯触发，只记 lost_triggers(anchor_pending)
 - 数据质量：无效 tick 压 0 占槽（不进触发检查，不贡献急跌窗 max）
 
+### 扫尾盘引擎状态机（`cmd/tail`，独立进程）
+
+```
+Watching ──首个有效 tick 且 rem≤150──▶ 落 frame 行（只记录）
+        ──首个有效 tick 且 rem≤60 ──▶ 落 snap 行（判定 ⑤ + 执行）──▶ Done
+   ▲                                                                    │
+   └────────────────────── 窗口结束(rem==0) ◀───────────────────────────┘
+```
+
+- 两个闩锁**互相独立**、各自一次性；无效 tick（延迟 >`tail.max_book_lat_ms` /
+  四档报价不全 / `rem ≤ 0`）不推进任何闩锁。首个有效 tick 若已在尾盘 → 两行同发。
+- 锚在产出任何行之前已定局：取锚通道 +20s 结束（`rem≈280`），最早的行在
+  `rem≤150`（`+150s`）——`anchor ≤ 0` ⇒ 本窗一行不产出（只在 `tailstats_*` 记
+  `anchor_exact=false`）。
+- σ 未就绪（`hist.Count() < 3`）⇒ 整窗跳过 `skip=no_sigma`；`tailwin_*` 是 tail
+  自己的 σ 预热源（独立于 `windows_*`，不交叉读写）。
+
 ---
 
 ## 依赖库
@@ -285,7 +329,9 @@ replace github.com/xiangxn/go-polymarket-sdk => /tmp/go-polymarket-sdk
 
 ### 测试
 ```bash
-go test ./internal/... -v              # 引擎/编排/记录器/盘口工具/结算轮询/配置（含 YAML 漂移守卫）
+go test ./internal/... -count=1        # 引擎/编排/记录器/盘口工具/结算轮询/配置（含 YAML 漂移守卫）
+go test ./internal/... -race           # 同上 + 竞态（含扫尾盘 parity 全量重放, ~2min）
+go test ./internal/tail/ -run TestParityBacktest -v   # 扫尾盘 Go↔py 逐窗对账（opt-in; data/btc 缺失即 skip）
 go build ./...                         # 全量编译检查
 go run ./cmd/flip -config v4.config.yaml -dashboard :8090   # 运行引擎 + Dashboard
 
@@ -294,6 +340,7 @@ python/venv/bin/python python/v4/01_backtest_r1.py
 python/venv/bin/python python/v4/06_oos_review.py    # 09-15 复验裁判（纯标准库）
 python/venv/bin/python python/v4/07_source_health_check.py            # 数据源健康度审计（纯标准库）
 python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book 阈值扫描/零成交代理
+python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾盘主回测（14/15 见 mapping 文档 §6）
 ```
 
 ---
@@ -543,6 +590,42 @@ python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book �
       **下单路径仍是单次网调**：`CreateOrder` 只查 tickSize/negRisk，两者由
       `PrefetchTokenInfo` 每窗预热（SDK 内部不读 feeRate，`ResolveFeeRateBps` 无调用
       点），`PostOrder` 无附加请求；撤单是独立的 `DELETE /order`（一分钟一笔量级）。
+17. **扫尾盘 ⑤ = 独立进程 + 独立引擎包 + 复用原语**（2026-09-23，用户要求「按文档逻辑
+    与 flip 代码结构实现纸面与实盘到 ./cmd/tail」）。规格见
+    `docs/tail_sweep_2026-09-22.md`，映射见 `docs/tail_engine_mapping_2026-09-23.md`。
+    `internal/tail` **单向依赖 `internal/flip`**（取 `Tick`/`Executor`/`PaperExecutor`/
+    `HistState`/`WindowEntry`/`CanTrade`/`SideYes|No`/`WonFor`/`ExecStatus*`），反向不依赖
+    ——两族独立演进，但共用同一批经对账的原语。四条关键决定：
+    - **两个独立的一次性闩锁（两帧折中）**：`rem ≤ frame_rem(150)` 首帧落**原始快照**
+      （只记录、不判定、不下单）+ `rem ≤ rem_start(60)` 首帧落**决策快照**（判定 ⑤
+      + 执行）。`ProcessTick` 返回 `[]Observation`（0~2 行，首个有效 tick 若已在尾盘
+      则两行同发）。代价：**T 不可再调**（离线只能复算 60/150）。两行共用同一锚——
+      首行落盘即冻结（`UpgradeAnchor` 此后拒收），否则帧行与快照行 `dev` 基准不同源。
+    - **前缀独立**：`tail_*`（≤2 行/窗）/ `tailwin_*`（每完成窗 1 行, σ 预热源）/
+      `tailstats_*`（**严格每窗 1 行**, 健康度 + `skip` + 锚状态）——**不得**复用
+      `windows_*`（双进程双写会毁 σ, 决策 #9 的教训）。flip 与 tail 可同目录并行。
+    - **撤单点 = 闭市 `rem ≤ 0`**（用户决定）：`trading.CancelAtClose` 哨兵 =
+      `time.Nanosecond`，⚠️ **必须微小正数**——`NewFillTracker` 对 `cancelLead ≤ 0`
+      一律回退 180s，而 tail 在 `rem≈60` 才挂单，回退会让第一轮轮询就撤单
+      （表现为「策略零成交」+ 一行看似无害的警告）。为此 `FillTracker` 增
+      `RegisterOrder(FillOrder,…)`（加法式，`Register(*flip.Record,…)` 转调它，flip
+      调用点与测试零改动）。
+    - **参数全部不可调**：`price_min 0.80` / `dev_min_usd 63` / `sigma_min_usd 40` /
+      `rem_start 60` / `frame_rem 150` / `max_book_lat_ms 300` 都是回测标定值，且
+      文档 §4.3 已判定 `40` 不可辨识（真 argmax=35，2000 次重采样里 40 一次没中）
+      ——配置键的意义是「能读能对账」，不是「该调」。`internal/config` 只做**结构性**
+      校验（阈值 > 0、价格腿 ∈ (0,1]、`frame_rem ≥ rem_start`）。
+    - **验收红线**：`internal/tail/parity_test.go`（**opt-in**, `data/btc` 不存在即
+      skip）流式重放 14 天 3753 窗驱动真实引擎，断言五格聚合 = python oracle
+      （① n=3109 WR 97.65% +72.10U … ⑤ n=1536 WR 99.61% +36.93U）+ 两个闩锁计数
+      （frame 3643 / snap 3634 窗）——实测 n 逐位相等、WR/P&L 在两位小数内相等。
+      ⚠️ 两条对账口径：宇宙须过滤「快照 tick 上 spot+twap 同时在场」；σ 须**按事件
+      索引**现算（python 语义）后注入，**不能喂 `flip.HistState`**（后者只记已 push
+      的振幅，缺窗时条数不同）。
+    - **已知未做/差异**（写进 mapping 文档 §4）：① live 是 GTC 挂单等成交（挂到闭市），
+      成交样本天然偏向「热门侧走弱」，与回测「快照瞬间即成交」**不是同一个估计量**
+      ——**首次只跑纸面**；② 两族同开实盘时日亏熔断**各自一条独立 24U 线**（等效 48U），
+      文档 §4.7 要求的合并**未实现**。
 
 ---
 
@@ -562,9 +645,13 @@ go run ./cmd/flip
 
 # 单点覆盖（最高优先级；-dashboard "" 能真的关掉配置文件里的地址）
 go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
+
+# 扫尾盘（第二条策略线, 独立进程可并行跑；无 Dashboard、无 -encrypt）
+go run ./cmd/tail -config v4.config.yaml
+go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper
 ```
 
-### CLI flag（main() 只有这 4 个引擎参数 + 1 个工具 flag）
+### CLI flag（`cmd/flip` main() 只有这 4 个引擎参数 + 1 个工具 flag）
 
 | flag | 默认 | 含义 |
 |------|------|------|
@@ -584,8 +671,13 @@ go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 | `feed.max_spot_age_ms` | 2000 | Binance spot 新鲜度：距本地接收超此值判现货缺失（`missing_spot`） |
 | `feed.max_twap_age_ms` | 10000 | TWAP-60 新鲜度：**只**管窗末 close（锚走精确匹配，不吃到达龄），超龄按缺失处理。历史上与 `anchorPickTol`(10s) 同值但语义无关，后者已随决策 #15 废除 |
 | `risk.max_daily_loss` | **−24** | 日亏熔断线（负值）：当日（UTC）已结算 P&L ≤ 此值即当日停单并锁存；两模式同源（paper 只标记不拦单） |
-| `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录，见启动时的 paper/live 混行告警） |
+| `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录，见启动时的 paper/live 混行告警；**flip 与 tail 可共用**——三前缀各自不撞） |
 | `runtime.slug_prefix` | `btc-updown-5m` | 市场 slug 前缀 |
+| `tail.*` | 见下 | 扫尾盘 7 键（`rem_start 60` / `frame_rem 150` / `price_min 0.80` / `dev_min_usd 63` / `sigma_min_usd 40` / `stake 2` / `max_book_lat_ms 300`）——⚠️ **全部不可调**，见决策 #17 与 `docs/tail_sweep_2026-09-22.md` §4.3 |
+
+`cmd/tail` 只认 **3 个 flag**（`-config` / `-mode` / `-stake`，语义同 flip 那三个，
+`-stake` 覆盖的是 `tail.stake`）——没有 `-dashboard`（Dashboard 硬绑 `*flip.Recorder`，
+泛化不划算）也没有 `-encrypt`（用 flip 的那个）。
 
 启动校验（`internal/config/validate.go`，判**最终生效值**）：三阈值必须 > 0、
 `risk.max_daily_loss` 必须 < 0、`runtime.mode ∈ {paper, live}`、`flip.stake > 0`、

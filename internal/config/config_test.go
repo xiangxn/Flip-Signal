@@ -279,6 +279,53 @@ func TestValidate(t *testing.T) {
 			mutate:  func(c *AppConfig) { c.Runtime.OutputDir = "" },
 			wantErr: "runtime.output_dir",
 		},
+		// ── tail（扫尾盘）──
+		{
+			name:    "tail 帧闸早于快照闸",
+			mutate:  func(c *AppConfig) { c.Tail.FrameRem = 30 }, // < rem_start 60
+			wantErr: "tail.frame_rem",
+		},
+		{
+			name:    "tail 时间腿非正",
+			mutate:  func(c *AppConfig) { c.Tail.RemStart = 0 },
+			wantErr: "tail.rem_start",
+		},
+		{
+			// >1 的 ask 门槛不可能有 tick 满足 → 信号永远为空。
+			name:    "tail 价格腿 > 1",
+			mutate:  func(c *AppConfig) { c.Tail.PriceMin = 1.2 },
+			wantErr: "tail.price_min",
+		},
+		{
+			name:    "tail 价格腿为 0",
+			mutate:  func(c *AppConfig) { c.Tail.PriceMin = 0 },
+			wantErr: "tail.price_min",
+		},
+		{
+			name:    "tail 美元腿非正",
+			mutate:  func(c *AppConfig) { c.Tail.DevMinUSD = 0 },
+			wantErr: "tail.dev_min_usd",
+		},
+		{
+			name:    "tail σ 腿下限为负",
+			mutate:  func(c *AppConfig) { c.Tail.SigmaMinUSD = -1 },
+			wantErr: "tail.sigma_min_usd",
+		},
+		{
+			name:    "tail stake 为零",
+			mutate:  func(c *AppConfig) { c.Tail.Stake = 0 },
+			wantErr: "tail.stake 必须 > 0",
+		},
+		{
+			name:    "tail book 阈值非正",
+			mutate:  func(c *AppConfig) { c.Tail.MaxBookLatMs = 0 },
+			wantErr: "tail.max_book_lat_ms",
+		},
+		{
+			name:     "tail book 阈值 < 100 只告警",
+			mutate:   func(c *AppConfig) { c.Tail.MaxBookLatMs = 20 },
+			wantWarn: 1,
+		},
 	}
 
 	for _, tc := range cases {

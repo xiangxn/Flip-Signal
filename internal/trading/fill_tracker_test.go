@@ -466,3 +466,39 @@ func TestFillTrackerRegisterGuards(t *testing.T) {
 		t.Fatalf("撤单提前量应回退 %v, 实际 %v", fillCancelLead, ft2.cancelLead)
 	}
 }
+
+// CancelAtClose 是 cmd/tail（扫尾盘族）的撤单点口径: 挂单一直等到**闭市**才撤。
+// 这个测试钉住两件事——① 撤单点确实落在闭市那一刻（而非提前 180s）; ② 哨兵没有被
+// NewFillTracker 的「cancelLead ≤ 0 回退默认」吞掉。后者是静默失败: 哨兵一旦写成
+// 0 或负数, rem≈60 才挂单的策略会在挂上后第一轮轮询（≤2s）就被撤, size_matched
+// 恒 0、每单都记 unfilled, 而全程只有一行 ⚠️ 回退日志。
+func TestFillTrackerCancelAtClose(t *testing.T) {
+	ft := NewFillTracker(&fakeClient{}, CancelAtClose, func(flip.FillFinal) {})
+	if ft.cancelLead != CancelAtClose {
+		t.Fatalf("CancelAtClose 被回退成默认 %v（现值 %v）——哨兵必须是微小正数, 见其类型注释",
+			fillCancelLead, ft.cancelLead)
+	}
+
+	// RegisterOrder 是兄弟策略入口（无 flip.Record）: 字段照常入表、目标股数照常折算。
+	ft.RegisterOrder(FillOrder{
+		OrderID: "order-1", ConditionID: "cond-1", Slug: "btc-updown-5m-1780000000",
+		Limit: 0.85, Stake: 2,
+	}, testWindowEnd(), false)
+	o := only(t, ft)
+	if !near(o.reqShares, 2.35) { // floor2(2/0.85) = floor2(2.3529…)
+		t.Fatalf("目标股数应为 floor2(2/0.85)=2.35, 实际 %.4f", o.reqShares)
+	}
+
+	// 撤单点 = 闭市（±1s 容差; 常规配置是闭市前 180s, 差两个数量级, 足以区分）。
+	if d := testWindowEnd().Sub(o.cancelAt); d > time.Second || d < 0 {
+		t.Fatalf("撤单点应在闭市后 %v（闭市 %v, 实际 %v）——挂到闭市口径被破坏",
+			time.Second, testWindowEnd(), o.cancelAt)
+	}
+	// rem=180（常规配置的撤单点）时不该撤——这正是哨兵写错会出现的行为
+	if !o.cancelAt.After(atRem(180)) {
+		t.Fatalf("rem=180 时不该已到撤单点（cancelAt=%v）——像是退回了 fillCancelLead 口径", o.cancelAt)
+	}
+	if o.cancelAt.After(testWindowEnd()) {
+		t.Fatalf("撤单点不该晚于闭市（cancelAt=%v）", o.cancelAt)
+	}
+}

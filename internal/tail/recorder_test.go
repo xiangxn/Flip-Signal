@@ -1,0 +1,463 @@
+package tail
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/necklace/flip-signal/internal/flip"
+)
+
+// okSnap 构造一条 ⑤ 成立、可直接下单的决策快照（hot_ask 0.92, dev +100）。
+func okSnap(ts int64, side string) *Observation {
+	o := &Observation{
+		Kind: KindSnap, FrameT: 60, Ts: ts, Rem: 55,
+		YesBid: 0.90, YesAsk: 0.92, NoBid: 0.07, NoAsk: 0.09,
+		Spot: 100100, Twap: 100050, Anchor: 100000, HistBps: 10,
+		Side: side, HotAsk: 0.92, Dev: 100, Sd: 100,
+		BookLatMs: 50, SpotAgeMs: 100, TwapAgeMs: 500,
+		Rules: Rules{Price: true, Dev63: true, Sigma: true, SigmaUSD40: true},
+		OK:    true, Shares: 2 / 0.92,
+	}
+	return o
+}
+
+func newTestRecorder(t *testing.T) (*Recorder, string) {
+	t.Helper()
+	dir := t.TempDir()
+	r, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	t.Cleanup(func() { r.Close() })
+	return r, dir
+}
+
+func readLines(t *testing.T, path string) []string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("读 %s: %v", path, err)
+	}
+	var out []string
+	for _, l := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+		if l != "" {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// TestRecorderFrameAndSnapFiles 钉住两件形制: ① 每窗两行落同一个 tail_ 文件且
+// kind 各异; ② 帧行不进 pending、不参与结算（stake 键都不该出现）。
+func TestRecorderFrameAndSnapFiles(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	conds := "0xcond1"
+	date := utcDate(1780000000000)
+	path := filepath.Join(dir, "tail_"+date+".jsonl")
+
+	// 帧行（rem≤150, 只记录）。
+	frame := okSnap(1780000000000, flip.SideYes)
+	frame.Kind, frame.FrameT, frame.Rem = KindFrame, 150, 145
+	frame.Rules, frame.OK, frame.Shares = Rules{}, false, 0
+	if _, err := r.RecordObservation(conds, "btc-updown-5m-1780000000", 1780000000, frame, 0); err != nil {
+		t.Fatalf("帧行落盘: %v", err)
+	}
+	// 快照行（rem≤60, 判定 + 成交）。
+	if _, err := r.RecordObservation(conds, "btc-updown-5m-1780000000", 1780000000, okSnap(1780000255000, flip.SideYes), 2); err != nil {
+		t.Fatalf("快照行落盘: %v", err)
+	}
+
+	lines := readLines(t, path)
+	if len(lines) != 2 {
+		t.Fatalf("一个窗口应两行, 得到 %d 行", len(lines))
+	}
+	var f, s Record
+	json.Unmarshal([]byte(lines[0]), &f)
+	json.Unmarshal([]byte(lines[1]), &s)
+	if f.Kind != KindFrame || s.Kind != KindSnap {
+		t.Fatalf("行序应为 frame→snap, 得到 %s→%s", f.Kind, s.Kind)
+	}
+	if f.Stake != 0 || strings.Contains(lines[0], `"stake"`) {
+		t.Fatalf("帧行不该有 stake（无仓位语义）: %s", lines[0])
+	}
+	if f.EventType != "tail" {
+		t.Fatalf("event_type 应为 tail, 得到 %q", f.EventType)
+	}
+	if s.Stake != 2 {
+		t.Fatalf("快照行 stake 应为 2, 得到 %.2f", s.Stake)
+	}
+	// 只有快照行进 pending（帧行 OK=false）。
+	if got := len(r.PendingSignals()); got != 1 {
+		t.Fatalf("帧行不得入 pending, 应只有 1 条快照, 得到 %d", got)
+	}
+}
+
+// TestRecorderResolvePnl 结算 P&L 三态: 赢 shares−cost / 输 −cost / paper 无 Cost
+// 时以 Stake 兜底（与回测 `shares−stake` 恒等）。
+func TestRecorderResolvePnl(t *testing.T) {
+	cases := []struct {
+		name string
+		side string
+		out  int
+		won  bool
+		pnl  float64
+	}{
+		{"yes 侧官方 Up → 赢", flip.SideYes, flip.OutcomeUp, true, 2/0.92 - 2},
+		{"yes 侧官方 Down → 输", flip.SideYes, flip.OutcomeDown, false, -2},
+		{"no 侧官方 Down → 赢", flip.SideNo, flip.OutcomeDown, true, 2/0.92 - 2},
+		{"no 侧官方 Up → 输", flip.SideNo, flip.OutcomeUp, false, -2},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r, dir := newTestRecorder(t)
+			o := okSnap(1780000255000, c.side)
+			if _, err := r.RecordObservation("0xc", "slug", 1780000000, o, 2); err != nil {
+				t.Fatal(err)
+			}
+			at := time.Unix(1780000300, 0)
+			if !r.Resolve("0xc", c.out, at) {
+				t.Fatal("Resolve 应命中 pending")
+			}
+			if r.Resolve("0xc", c.out, at) {
+				t.Fatal("重复结算应返回 false（已出 pending）")
+			}
+			// 磁盘真相: 原子重写后该行带 won/pnl/resolved_at。
+			lines := readLines(t, filepath.Join(dir, "tail_"+utcDate(1780000255000)+".jsonl"))
+			if len(lines) != 1 {
+				t.Fatalf("重写后应仍是 1 行, 得到 %d", len(lines))
+			}
+			var rec Record
+			json.Unmarshal([]byte(lines[0]), &rec)
+			if rec.Won == nil || *rec.Won != c.won {
+				t.Fatalf("won 应为 %v, 得到 %v", c.won, rec.Won)
+			}
+			if !near(rec.PnL, c.pnl) {
+				t.Fatalf("pnl 应为 %.6f, 得到 %.6f", c.pnl, rec.PnL)
+			}
+			if rec.ResolvedAt == "" {
+				t.Fatal("resolved_at 应回填")
+			}
+		})
+	}
+}
+
+func near(a, b float64) bool { return a-b < 1e-9 && b-a < 1e-9 }
+
+// TestRecorderDayRotation 按 UTC 日切分: 跨日的行进各自的文件。
+func TestRecorderDayRotation(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	day1 := time.Date(2026, 9, 22, 23, 59, 0, 0, time.UTC).UnixMilli()
+	day2 := day1 + 2*60*1000 // 跨过 UTC 午夜
+	if _, err := r.RecordObservation("0xa", "slug-a", 0, okSnap(day1, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RecordObservation("0xb", "slug-b", 0, okSnap(day2, flip.SideNo), 2); err != nil {
+		t.Fatal(err)
+	}
+	for _, date := range []string{"2026-09-22", "2026-09-23"} {
+		p := filepath.Join(dir, "tail_"+date+".jsonl")
+		if n := len(readLines(t, p)); n != 1 {
+			t.Fatalf("%s 应有 1 行, 得到 %d", p, n)
+		}
+	}
+}
+
+// TestRecorderReload 重启扫描: tail_ 行恢复内存态与 pending, tailwin_ 行恢复 σ 源。
+func TestRecorderReload(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	ts := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+	if _, err := r.RecordObservation("0xc", "slug", 1780000000, okSnap(ts, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	// 一个未结算的 ok 信号 + 一条已结算的（不应进 pending）。
+	resolved := okSnap(ts+1000, flip.SideNo)
+	resolved.OK = true
+	if _, err := r.RecordObservation("0xd", "slug-d", 1780000000, resolved, 2); err != nil {
+		t.Fatal(err)
+	}
+	r.Resolve("0xd", flip.OutcomeDown, time.UnixMilli(ts+2000))
+	if err := r.LogWindowAmplitude(flip.WindowEntry{
+		Ts: ts, ConditionID: "0xc", Slug: "slug", Anchor: 100000, Close: 100050, Amp: 50,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	obs := r2.Observations()
+	if len(obs) != 2 {
+		t.Fatalf("应恢复 2 行, 得到 %d", len(obs))
+	}
+	pend := r2.PendingSignals()
+	if len(pend) != 1 || pend[0].ConditionID != "0xc" {
+		t.Fatalf("重启后应只剩未结算的 0xc, 得到 %+v", pend)
+	}
+	wins := r2.RecentWindows(18)
+	if len(wins) != 1 || wins[0].Amp != 50 {
+		t.Fatalf("应恢复 1 条窗口振幅行, 得到 %+v", wins)
+	}
+	if wins[0].Kind != winKindAmp {
+		t.Fatalf("振幅行 kind 应为 %q, 得到 %q", winKindAmp, wins[0].Kind)
+	}
+	// 已结算行的 Won/PnL 也要恢复（不是只恢复计数）。
+	for _, o := range obs {
+		if o.ConditionID == "0xd" {
+			if o.Won == nil || !*o.Won || !near(o.PnL, float64(2)/0.92-2) {
+				t.Fatalf("已结算行未正确恢复: won=%v pnl=%.4f", o.Won, o.PnL)
+			}
+		}
+	}
+}
+
+// TestRecorderPrefixIsolation 三前缀互不串读（σ 污染红线, CLAUDE.md 决策 #9）:
+// 统计行写进 tailstats_、观测行写进 tail_，二者都**不得**进 tailwin_（σ 预热源）。
+func TestRecorderPrefixIsolation(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	ts := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+	if _, err := r.RecordObservation("0xc", "slug", 1780000000, okSnap(ts, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := r.LogWindowStats(StatsRow{Ts: ts + int64(i)*1000, Anchor: 100000, HistBps: 9, AnchorExact: true, AnchorSrc: "stream"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.LogWindowAmplitude(flip.WindowEntry{Ts: ts, Anchor: 100000, Close: 100050, Amp: 50}); err != nil {
+		t.Fatal(err)
+	}
+	// 三族各自的文件存在且行数正确。
+	date := "2026-09-22"
+	if n := len(readLines(t, filepath.Join(dir, "tail_"+date+".jsonl"))); n != 1 {
+		t.Fatalf("tail_ 应 1 行, 得到 %d", n)
+	}
+	if n := len(readLines(t, filepath.Join(dir, "tailstats_"+date+".jsonl"))); n != 3 {
+		t.Fatalf("tailstats_ 应 3 行, 得到 %d", n)
+	}
+	if n := len(readLines(t, filepath.Join(dir, "tailwin_"+date+".jsonl"))); n != 1 {
+		t.Fatalf("tailwin_ 应 1 行, 得到 %d", n)
+	}
+	// 重启后 σ 源只认振幅行——即便有人手滑把统计行写进了 tailwin_ 文件。
+	r.Close()
+	blob := readLines(t, filepath.Join(dir, "tailstats_"+date+".jsonl"))
+	extra := strings.Join(blob, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(dir, "tailwin_"+date+".jsonl"), []byte(
+		readLines(t, filepath.Join(dir, "tailwin_"+date+".jsonl"))[0]+"\n"+extra), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	if w := r2.RecentWindows(18); len(w) != 1 {
+		t.Fatalf("统计行必须被拒（口径污染会让 σ 以 Amp=0 混入）, 得到 %d 条振幅行", len(w))
+	}
+}
+
+// TestRecorderHasKind 防重入判据按 kind 分流: 帧行的存在**不得**让快照被跳过
+// （帧在 rem≤150、快照在 rem≤60, 中间 90s 的崩溃窗口；按「有帧就整窗跳过」会白丢样本）。
+func TestRecorderHasKind(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	ts := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+	frame := okSnap(ts, flip.SideYes)
+	frame.Kind, frame.Rules, frame.OK, frame.Shares = KindFrame, Rules{}, false, 0
+	if _, err := r.RecordObservation("0xc", "slug", 1780000000, frame, 0); err != nil {
+		t.Fatal(err)
+	}
+	if !r.HasKind("0xc", KindFrame) {
+		t.Fatal("帧行应可查得")
+	}
+	if r.HasKind("0xc", KindSnap) {
+		t.Fatal("帧行不得当成快照——否则崩溃重入会白丢整个尾盘样本")
+	}
+	if _, err := r.RecordObservation("0xc", "slug", 1780000000, okSnap(ts+40000, flip.SideNo), 2); err != nil {
+		t.Fatal(err)
+	}
+	if !r.HasKind("0xc", KindSnap) {
+		t.Fatal("快照行应可查得（重启后据此整窗跳过, 防双开）")
+	}
+	if r.HasKind("0xother", KindSnap) {
+		t.Fatal("按 conditionID 隔离")
+	}
+}
+
+// TestRecorderGatedLatch 日亏熔断的当日锁存判据（按 UTC 日 + 原因隔离）。
+func TestRecorderGatedLatch(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	ts := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+	if _, err := r.RecordGatedObservation("0xc", "slug", 1780000000, okSnap(ts, flip.SideYes), 2, GateDailyLoss); err != nil {
+		t.Fatal(err)
+	}
+	if !r.GatedOn("2026-09-22", GateDailyLoss) {
+		t.Fatal("当日应锁存")
+	}
+	if r.GatedOn("2026-09-23", GateDailyLoss) {
+		t.Fatal("跨日应自动归零")
+	}
+	if r.GatedOn("2026-09-22", GateFirstWindow) {
+		t.Fatal("锁存按原因隔离")
+	}
+	if n := r.GatedToday("2026-09-22", GateDailyLoss); n != 1 {
+		t.Fatalf("被闸计数应为 1, 得到 %d", n)
+	}
+	// 被闸行照常结算（方案 A）——已结算 P&L 里能看见它。
+	r.Resolve("0xc", flip.OutcomeUp, time.UnixMilli(ts+3000))
+	days := r.DailyPnl()
+	if len(days) != 1 || !near(days[0].PnL, 2/0.92-2) {
+		t.Fatalf("被闸行应照常结算, 得到 %+v", days)
+	}
+}
+
+// TestRecorderExecutionPaths live 两条回填路径: submitting → 即时终态（rejected）、
+// 以及 GTC 的 resting → FillTracker 定稿（filled/unfilled/仍是 resting）。
+func TestRecorderExecutionPaths(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	ts := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+	date := utcDate(ts)
+
+	// ① rejected（如风控闸或 CLOB 拒单）: 不入 pending。
+	if _, err := r.SubmitLiveObservation("0xr", "s", 0, okSnap(ts, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	rec, filled, err := r.CompleteExecution("0xr", flip.ExecResult{Status: flip.ExecStatusRejected, Note: "CLOB 拒绝"})
+	if err != nil || filled {
+		t.Fatalf("rejected 不应算成交: filled=%v err=%v", filled, err)
+	}
+	if rec.ExecStatus != flip.ExecStatusRejected || len(r.PendingSignals()) != 0 {
+		t.Fatalf("rejected 行不该入 pending: %+v", r.PendingSignals())
+	}
+	// 重复回填必须报错（不静默）。
+	if _, _, err := r.CompleteExecution("0xr", flip.ExecResult{Status: flip.ExecStatusFilled}); err == nil {
+		t.Fatal("重复回填应报错")
+	}
+
+	// ② resting（GTC 挂单在簿）: **不写** Shares/Cost/FillPrice, 不入 pending。
+	if _, err := r.SubmitLiveObservation("0xg", "s", 0, okSnap(ts+1000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	rec, filled, err = r.CompleteExecution("0xg", flip.ExecResult{Status: flip.ExecStatusResting, OrderID: "order-1"})
+	if err != nil || filled {
+		t.Fatalf("resting 不应算成交: filled=%v err=%v", filled, err)
+	}
+	if rec.OrderID != "order-1" || rec.Cost != 0 || rec.FillPrice != 0 {
+		t.Fatalf("resting 行不该有成交口径字段: cost=%.2f fill=%.4f", rec.Cost, rec.FillPrice)
+	}
+	if rec.Shares <= 0 {
+		t.Fatalf("resting 行保留目标股数供分析, 得到 %.4f", rec.Shares)
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatal("resting 行不入 pending（仓位未定, 中途结算会按半个仓位记账）")
+	}
+	// 定稿: 部分成交。
+	if _, err := r.CompleteRestingFill(flip.FillFinal{
+		ConditionID: "0xg", Status: flip.ExecStatusPartial, Shares: 1.5, Cost: 1.5 * 0.92, Note: "余量已撤",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pend := r.PendingSignals()
+	if len(pend) != 1 || pend[0].ConditionID != "0xg" {
+		t.Fatalf("定稿为 partial 后应入 pending, 得到 %+v", pend)
+	}
+	if !near(pend[0].FillPrice, 0.92) {
+		t.Fatalf("成交均价应为 cost/shares=0.92, 得到 %.4f", pend[0].FillPrice)
+	}
+	// 定稿后结算: 赢 = shares − cost（实际股数, 不是目标股数）。
+	if !r.Resolve("0xg", flip.OutcomeUp, time.UnixMilli(ts+600000)) {
+		t.Fatal("Resolve 应命中")
+	}
+	// ⚠️ 必须重新取行: 对外读口返回的是**字段副本**（见 copyRecords）, 上面那份
+	// pend[0] 不会跟着 Resolve 变——拿旧副本断言等于测了个假东西。
+	var xg *Record
+	for _, o := range r.Observations() {
+		if o.ConditionID == "0xg" {
+			xg = o
+		}
+	}
+	if xg == nil || xg.PnL == 0 {
+		t.Fatal("0xg 应已结算并回写 PnL")
+	}
+	if !near(xg.PnL, 1.5-1.5*0.92) {
+		t.Fatalf("赢 P&L 应为 shares−cost=%.4f, 得到 %.4f", 1.5-1.5*0.92, xg.PnL)
+	}
+
+	// ③ unfilled（撤单时 0 成交）: 目标股数保留, 不入 pending。
+	if _, err := r.SubmitLiveObservation("0xu", "s", 0, okSnap(ts+2000, flip.SideNo), 2); err != nil {
+		t.Fatal(err)
+	}
+	r.CompleteExecution("0xu", flip.ExecResult{Status: flip.ExecStatusResting, OrderID: "order-2"})
+	if _, err := r.CompleteRestingFill(flip.FillFinal{ConditionID: "0xu", Status: flip.ExecStatusUnfilled, Note: "余量已撤"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.PendingSignals()) != 0 {
+		t.Fatal("unfilled 不入 pending")
+	}
+
+	// ④ 仍是 resting（从未观测到）: 留行 + 待人工核对。
+	if _, err := r.SubmitLiveObservation("0xx", "s", 0, okSnap(ts+3000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	r.CompleteExecution("0xx", flip.ExecResult{Status: flip.ExecStatusResting, OrderID: "order-3"})
+	if _, err := r.CompleteRestingFill(flip.FillFinal{
+		ConditionID: "0xx", Status: flip.ExecStatusResting, Note: flip.ExecNoteUnknown + ": 从未观测到该单",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if n := r.NeedsReconcile(); n != 1 {
+		t.Fatalf("未确认的挂单应计 1 条待核对, 得到 %d", n)
+	}
+	// 在途的正常 resting 行（可跟踪）不计——否则告警常亮。
+	if _, err := r.SubmitLiveObservation("0xy", "s", 0, okSnap(ts+4000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	r.CompleteExecution("0xy", flip.ExecResult{Status: flip.ExecStatusResting, OrderID: "order-4"})
+	if n := r.NeedsReconcile(); n != 1 {
+		t.Fatalf("在途挂单不该计入待核对, 得到 %d", n)
+	}
+
+	// 磁盘: 每个终态都原子重写过（行数与内存一致）。
+	lines := readLines(t, filepath.Join(dir, "tail_"+date+".jsonl"))
+	if len(lines) != len(r.Observations()) {
+		t.Fatalf("重写后磁盘行数 %d ≠ 内存 %d", len(lines), len(r.Observations()))
+	}
+}
+
+// TestRecorderFindSnapNotFrame 执行回填必须落在快照行上——同窗的帧行先落盘,
+// 按 conditionID 找第一行会回填到没有 stake 的帧行（那条永远不是 submitting）。
+func TestRecorderFindSnapNotFrame(t *testing.T) {
+	r, _ := newTestRecorder(t)
+	ts := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+	frame := okSnap(ts, flip.SideYes)
+	frame.Kind, frame.Rules, frame.OK, frame.Shares = KindFrame, Rules{}, false, 0
+	if _, err := r.RecordObservation("0xc", "slug", 0, frame, 0); err != nil {
+		t.Fatal(err)
+	}
+	// live 的两阶段: submitting 行（帧行在它前面, 不能被当成回填目标）。
+	if _, err := r.SubmitLiveObservation("0xc", "slug", 0, okSnap(ts+40000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	rec, _, err := r.CompleteExecution("0xc", flip.ExecResult{Status: flip.ExecStatusRejected, Note: "x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Kind != KindSnap || rec.Stake != 2 {
+		t.Fatalf("回填应落在快照行（kind=%s stake=%.1f）", rec.Kind, rec.Stake)
+	}
+	if rec.ExecNote != "x" {
+		t.Fatalf("回填应写 ExecNote, 得到 %q", rec.ExecNote)
+	}
+	// 带 payload 的帧行也必须落盘（不是只写个骨架）。
+	obs := r.Observations()
+	if len(obs) != 2 || obs[0].HotAsk != 0.92 || obs[0].Anchor != 100000 {
+		t.Fatalf("帧行应带完整快照字段: %+v", obs[0])
+	}
+}

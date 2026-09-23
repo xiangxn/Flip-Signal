@@ -10,7 +10,8 @@
 #   ./build.sh <name> <arch>      # build cmd/<name> for linux/<arch>
 #   ./build.sh --clean            # remove dist/
 #
-# 可用命令由 cmd/ 目录自动检测（v4 分支仅剩 flip: dog@0.2 策略引擎）
+# 可用命令由 cmd/ 目录自动检测（v4 分支: flip = dog@0.2 引擎 / tail = 扫尾盘 ⑤ 引擎 /
+# btreplay = 逐笔对账重放）
 # ============================================================
 set -euo pipefail
 
@@ -111,8 +112,20 @@ echo ""
 echo "Transfer to Ubuntu:"
 echo "  ./deploy.sh $CMD"
 echo ""
-echo "Run on Ubuntu (dog@0.2 引擎，纸面模式):"
-echo "  nohup ./flip -config v4.config.yaml -dashboard :8090 >> flip.log 2>&1 &"
+case "$CMD" in
+    flip)
+        echo "Run on Ubuntu (dog@0.2 引擎，纸面模式):"
+        echo "  nohup ./flip -config v4.config.yaml -dashboard :8090 >> flip.log 2>&1 &"
+        ;;
+    tail)
+        echo "Run on Ubuntu (扫尾盘 ⑤ 引擎，纸面模式):"
+        echo "  nohup ./tail -config v4.config.yaml >> tail.log 2>&1 &"
+        ;;
+    *)
+        echo "Run on Ubuntu:"
+        echo "  nohup ./$CMD -config v4.config.yaml >> $CMD.log 2>&1 &"
+        ;;
+esac
 echo ""
 echo "注: 参数（output_dir/stake/熔断线/阈值…）都在配置文件里，二进制不再接受这些 flag。"
 echo "    服务器上需自备一份 v4.config.yaml（含密文凭证时由你手动放置，deploy.sh 不传配置文件）。"

@@ -41,5 +41,41 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 		return nil, fmt.Errorf("runtime.output_dir 不能为空（观测 JSONL 输出目录）")
 	}
 
+	// ── tail（扫尾盘, cmd/tail）──
+	// 与 flip 各自独立成节（见 AppConfig 注释），但仍由同一处校验: 配置是同一个结构体,
+	// 一个节写错却在另一个命令里静默生效更危险。
+	if cfg.Tail.MaxBookLatMs <= 0 {
+		return nil, fmt.Errorf("tail.max_book_lat_ms 必须 > 0（现值 %d）——0 会让全部 tick 判无效、信号静默归零",
+			cfg.Tail.MaxBookLatMs)
+	}
+	if cfg.Tail.MaxBookLatMs < 100 {
+		warnings = append(warnings, fmt.Sprintf("tail.max_book_lat_ms=%d < 100ms —— 同 flip 口径为负收益区（EV 单调变差），确认无误再用",
+			cfg.Tail.MaxBookLatMs))
+	}
+	if cfg.Tail.Stake <= 0 {
+		return nil, fmt.Errorf("tail.stake 必须 > 0（现值 %.3f）", cfg.Tail.Stake)
+	}
+	// 两帧的时间腿顺序: 帧闸必须**不晚于**快照闸。写反（frame_rem < rem_start）不会
+	// 报错, 只会让帧行在多数窗口里根本不产出（快照已把本窗置 Done, 而首个有效 tick
+	// 的 rem 通常还在两者之间）——静默丢一半样本, 故挡在启动前。
+	if cfg.Tail.RemStart <= 0 || cfg.Tail.FrameRem <= 0 {
+		return nil, fmt.Errorf("tail.rem_start / tail.frame_rem 必须 > 0（现值 %d / %d）",
+			cfg.Tail.RemStart, cfg.Tail.FrameRem)
+	}
+	if cfg.Tail.FrameRem < cfg.Tail.RemStart {
+		return nil, fmt.Errorf("tail.frame_rem(%d) 必须 ≥ tail.rem_start(%d)——反序会让帧行静默不产出",
+			cfg.Tail.FrameRem, cfg.Tail.RemStart)
+	}
+	// 价格腿是「热门侧 ask」——超过 1 不可能有 tick 满足（策略静默归零）, ≤0 则全部
+	// 放行（把尾盘无条件买满）。两个方向都不该由配置写出来。
+	if cfg.Tail.PriceMin <= 0 || cfg.Tail.PriceMin > 1 {
+		return nil, fmt.Errorf("tail.price_min 必须在 (0,1] 内（现值 %.3f）——>1 会让信号永远为空", cfg.Tail.PriceMin)
+	}
+	// 美元腿 ≤0 会让 dev 腿恒真（退化成只有价格腿的 ①）；σ 腿下限为负同理。
+	if cfg.Tail.DevMinUSD <= 0 || cfg.Tail.SigmaMinUSD < 0 {
+		return nil, fmt.Errorf("tail.dev_min_usd 必须 > 0、tail.sigma_min_usd 必须 ≥ 0（现值 %.3f / %.3f）",
+			cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD)
+	}
+
 	return warnings, nil
 }
