@@ -132,11 +132,12 @@ func (x *ExecState) HandleObservation(o *Observation, conditionID, slug string, 
 
 // ApplyFillFinal 回填一笔 GTC 挂单的终态成交（trading.FillTracker 在闭市前查询
 // CLOB size_matched 后经回调送到这里, 见其类型 doc）。返回值同 HandleObservation:
-// 落盘记录（回填失败返回 nil）。调用方据此注册结算轮询——注册时点从「POST 返回」
-// 推到「挂单定稿」, 但 gamma 结算远在其后（分钟级）, 口径不受影响。
+// 落盘记录（回填失败返回 nil）。调用方据此让该行进待结算队列——入队时点从
+// 「POST 返回」推到「挂单定稿」, 而定稿在 rem ≤ 策略时间腿（闭市前 ~3 分钟）,
+// 远早于结算编排 ① 层的闭市 +25s 闸, 口径不受影响。
 //
 // Status=resting 是合法的「仍未确认」终态（查询失败/重启遗留从未观测到该单）:
-// 行保持 resting + note 说明原因, 不入 pending、不注册结算、NeedsReconcile 继续
+// 行保持 resting + note 说明原因, 不入 pending、不结算、NeedsReconcile 继续
 // 计它——宁可悬着等人工核对, 也不按 0 成交记。
 func (x *ExecState) ApplyFillFinal(f FillFinal) *Record {
 	rec, err := x.Rec.CompleteRestingFill(f)

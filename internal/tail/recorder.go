@@ -438,7 +438,10 @@ func (r *Recorder) CompleteRestingFill(f flip.FillFinal) (*Record, error) {
 //
 // ⚠️ tail 的结算口径与回测一致: 赢 = 押注侧即官方赢家（不是「价格」, 是 outcome）;
 // 每股兑 1 USDC ⇒ 赢 shares−cost / 输 −cost（cost 缺省回退 Stake, paper 行即如此）。
-func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time) bool {
+//
+// src 是结算来源（internal/settle 的 SrcPush|SrcOfficial|SrcGamma; 空 = 未记），
+// 落进 settle_src 供事后按层核对（与 flip 同编排, 见 internal/settle 包注释）。
+func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time, src string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -458,6 +461,7 @@ func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time) bool {
 	rec.Won = &won
 	rec.PnL = pnl
 	rec.ResolvedAt = at.UTC().Format(time.RFC3339)
+	rec.SettleSrc = src
 	delete(r.pending, conditionID)
 
 	if err := r.rewriteDayLocked(rec.Date); err != nil {

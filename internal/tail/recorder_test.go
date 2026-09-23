@@ -119,10 +119,10 @@ func TestRecorderResolvePnl(t *testing.T) {
 				t.Fatal(err)
 			}
 			at := time.Unix(1780000300, 0)
-			if !r.Resolve("0xc", c.out, at) {
+			if !r.Resolve("0xc", c.out, at, "") {
 				t.Fatal("Resolve 应命中 pending")
 			}
-			if r.Resolve("0xc", c.out, at) {
+			if r.Resolve("0xc", c.out, at, "") {
 				t.Fatal("重复结算应返回 false（已出 pending）")
 			}
 			// 磁盘真相: 原子重写后该行带 won/pnl/resolved_at。
@@ -142,6 +142,75 @@ func TestRecorderResolvePnl(t *testing.T) {
 				t.Fatal("resolved_at 应回填")
 			}
 		})
+	}
+}
+
+// TestRecorderSettleSrcPersisted 三层结算来源必须逐行落到 JSONL 的 settle_src 字段
+// （internal/settle 的 push / official / gamma, 2026-09-24 引入, 与 flip 同口径）,
+// 且重启载入后仍在; 未结算行不该出现这个键（omitempty）。
+func TestRecorderSettleSrcPersisted(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	const start int64 = 1780000000
+	at := time.Unix(start+300, 0)
+
+	cases := []struct{ cond, src string }{
+		{"0xpush", "push"},
+		{"0xofficial", "official"},
+		{"0xgamma", "gamma"},
+	}
+	for i, c := range cases {
+		win := start + int64(i)*300 // 三个不同窗口（pending 以 conditionID 为键）
+		if _, err := r.RecordObservation(c.cond, "slug", win, okSnap(win*1000+255000, flip.SideYes), 2); err != nil {
+			t.Fatal(err)
+		}
+		if !r.Resolve(c.cond, flip.OutcomeUp, at, c.src) {
+			t.Fatalf("%s 应命中 pending", c.cond)
+		}
+	}
+	// 一条未结算的帧行——omitempty 的对照
+	frame := okSnap(start*1000+145000, flip.SideYes)
+	frame.Kind, frame.Rem = KindFrame, 145
+	if _, err := r.RecordObservation("0xframe", "slug", start, frame, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, "tail_"+utcDate(1780000255000)+".jsonl")
+	var byCond = map[string]Record{}
+	raw := readLines(t, path)
+	for _, l := range raw {
+		var rec Record
+		json.Unmarshal([]byte(l), &rec)
+		byCond[rec.ConditionID] = rec
+	}
+	for _, c := range cases {
+		if got := byCond[c.cond].SettleSrc; got != c.src {
+			t.Fatalf("%s settle_src = %q, 期望 %q", c.cond, got, c.src)
+		}
+	}
+	if n := strings.Count(strings.Join(raw, "\n"), `"settle_src"`); n != len(cases) {
+		t.Fatalf("settle_src 出现 %d 次, 期望 %d（omitempty 失效?）", n, len(cases))
+	}
+
+	// 重启（磁盘载入）不得丢字段
+	r.Close()
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	for _, c := range cases {
+		var rec Record
+		found := false
+		for _, l := range readLines(t, path) {
+			json.Unmarshal([]byte(l), &rec)
+			if rec.ConditionID == c.cond {
+				found = true
+				break
+			}
+		}
+		if !found || rec.SettleSrc != c.src {
+			t.Fatalf("重启后 %s settle_src = %q, 期望 %q", c.cond, rec.SettleSrc, c.src)
+		}
 	}
 }
 
@@ -179,7 +248,7 @@ func TestRecorderReload(t *testing.T) {
 	if _, err := r.RecordObservation("0xd", "slug-d", 1780000000, resolved, 2); err != nil {
 		t.Fatal(err)
 	}
-	r.Resolve("0xd", flip.OutcomeDown, time.UnixMilli(ts+2000))
+	r.Resolve("0xd", flip.OutcomeDown, time.UnixMilli(ts+2000), "")
 	if err := r.LogWindowAmplitude(flip.WindowEntry{
 		Ts: ts, ConditionID: "0xc", Slug: "slug", Anchor: 100000, Close: 100050, Amp: 50,
 	}); err != nil {
@@ -311,7 +380,7 @@ func TestRecorderGatedLatch(t *testing.T) {
 		t.Fatalf("被闸计数应为 1, 得到 %d", n)
 	}
 	// 被闸行照常结算（方案 A）——已结算 P&L 里能看见它。
-	r.Resolve("0xc", flip.OutcomeUp, time.UnixMilli(ts+3000))
+	r.Resolve("0xc", flip.OutcomeUp, time.UnixMilli(ts+3000), "")
 	days := r.DailyPnl()
 	if len(days) != 1 || !near(days[0].PnL, 2/0.92-2) {
 		t.Fatalf("被闸行应照常结算, 得到 %+v", days)
@@ -372,7 +441,7 @@ func TestRecorderExecutionPaths(t *testing.T) {
 		t.Fatalf("成交均价应为 cost/shares=0.92, 得到 %.4f", pend[0].FillPrice)
 	}
 	// 定稿后结算: 赢 = shares − cost（实际股数, 不是目标股数）。
-	if !r.Resolve("0xg", flip.OutcomeUp, time.UnixMilli(ts+600000)) {
+	if !r.Resolve("0xg", flip.OutcomeUp, time.UnixMilli(ts+600000), "") {
 		t.Fatal("Resolve 应命中")
 	}
 	// ⚠️ 必须重新取行: 对外读口返回的是**字段副本**（见 copyRecords）, 上面那份
@@ -484,14 +553,14 @@ func TestRecorderSignalsCountsDrawdown(t *testing.T) {
 	if _, err := r.RecordObservation("0xc3", "s", 0, okSnap(base+600000, flip.SideYes), 2); err != nil {
 		t.Fatal(err)
 	}
-	if !r.Resolve("0xc3", flip.OutcomeUp, time.Unix(0, 0)) {
+	if !r.Resolve("0xc3", flip.OutcomeUp, time.Unix(0, 0), "") {
 		t.Fatal("Resolve 应命中")
 	}
 	// 窗 4: ok 行 → 结算输（−2）。
 	if _, err := r.RecordObservation("0xc4", "s", 0, okSnap(base+900000, flip.SideYes), 2); err != nil {
 		t.Fatal(err)
 	}
-	r.Resolve("0xc4", flip.OutcomeDown, time.Unix(0, 0))
+	r.Resolve("0xc4", flip.OutcomeDown, time.Unix(0, 0), "")
 	// 窗 5: ok 行 → 被闸（仍计入 Signals / Counts.ok）。
 	if _, err := r.RecordGatedObservation("0xc5", "s", 0, okSnap(base+1200000, flip.SideYes), 2, GateDailyLoss); err != nil {
 		t.Fatal(err)
@@ -541,14 +610,14 @@ func TestRecorderScanRowIsolation(t *testing.T) {
 	if _, err := r.RecordObservation("0xc1", "s", 0, scan, 2); err != nil {
 		t.Fatal(err)
 	}
-	if !r.Resolve("0xc1", flip.OutcomeUp, time.Unix(0, 0)) {
+	if !r.Resolve("0xc1", flip.OutcomeUp, time.Unix(0, 0), "") {
 		t.Fatal("scan 行应挂结算（isSettlable 必须收 scan）")
 	}
 	// 窗 2: 真实快照 ok → 结算赢。它才是当日 P&L 的唯一来源。
 	if _, err := r.RecordObservation("0xc2", "s", 0, okSnap(base+300000, flip.SideYes), 2); err != nil {
 		t.Fatal(err)
 	}
-	r.Resolve("0xc2", flip.OutcomeUp, time.Unix(0, 0))
+	r.Resolve("0xc2", flip.OutcomeUp, time.Unix(0, 0), "")
 
 	// 2+3: 统计口径只认 snap 行（窗 1 的否决行 + 窗 2 的 ok 行 = 2; scan 不得计入）。
 	snap, ok, won := r.Counts()

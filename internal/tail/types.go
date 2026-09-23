@@ -36,8 +36,9 @@ const (
 	//   - **绝不下单**: 本行只落盘（exec_state.HandleScan 不碰 Ex、不过风控闸）, 它是一条
 	//     「另一个口径本会成交」的反事实样本, 不是仓位。风控闸之所以**不**施加于它:
 	//     对照物是回测的监听口径 B（14 天回放里没有熔断器）, 施加熔断会让两边不可比。
-	//   - **会结算**: 注册 gamma 结算轮询拿官方 outcome, 只为把该反事实算成 P&L
-	//     （否则没有任何地方能知道那一窗最后谁赢）——故它满足 isSettlable。所有 P&L
+	//   - **会结算**: 落盘即进待结算队列, 由 settle.Resolver 三层回退拿官方 outcome
+	//     （决策 #19）——否则没有任何地方能知道那一窗最后谁赢, 反事实就永远算不成
+	//     P&L。故它满足 isSettlable。所有 P&L
 	//     聚合（DailyPnl 日亏熔断 / MaxDrawdown / Judge 五格 / 逐日表）都**必须**按
 	//     Kind 过滤, 见 recorder.go 的 isSettlable 与 DailyPnl 注。
 	//   - **与 snap 互斥**: 只在 snap 行未达标时才产出（snap 达标则两口径同 tick,
@@ -210,6 +211,11 @@ type Record struct {
 	Won         *bool   `json:"won,omitempty"`         // 结算后填充（所押侧是否赢）
 	PnL         float64 `json:"pnl,omitempty"`         // 结算后填充（USDC）
 	ResolvedAt  string  `json:"resolved_at,omitempty"` // 结算时间（RFC3339）
+
+	// SettleSrc 结算来源（internal/settle 的三层回退, 2026-09-24 起）: push = 边界
+	// 推送自算 / official = 官方接口兜底 / gamma = UMA 轮询; 空 = 未记（旧行）。
+	// 与 flip.Record 同字段同语义（两族共用同一套结算编排）。
+	SettleSrc string `json:"settle_src,omitempty"`
 
 	// GateReason 风控闸原因（GateDailyLoss/GateFirstWindow; 空 = 未被闸）。
 	// 两模式都写（与 flip 方案 A 同口径）: paper 被闸行 schema 与正常信号一致

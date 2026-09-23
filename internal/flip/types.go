@@ -201,6 +201,11 @@ type Record struct {
 	PnL         float64 `json:"pnl,omitempty"`         // 结算后填充（USDC）
 	ResolvedAt  string  `json:"resolved_at,omitempty"` // 结算时间（RFC3339）
 
+	// SettleSrc 结算来源（internal/settle 的三层回退, 2026-09-24 起）:
+	// push = 边界推送自算（主路径）/ official = 官方接口兜底 / gamma = UMA 轮询。
+	// 空 = 未记（本字段引入之前的行）。事后核对「自算是否与官方一致」靠它分桶。
+	SettleSrc string `json:"settle_src,omitempty"`
+
 	// GateReason 风控闸原因（GateDailyLoss/GateFirstWindow; 空 = 未被闸）。
 	//
 	// 两模式都写（2026-09-16 方案 A, docs §3.5）: paper 被闸行行 schema 与正常信号

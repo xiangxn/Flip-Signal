@@ -181,7 +181,7 @@ func TestTailStateCounts(t *testing.T) {
 			t.Fatalf("快照行: %v", err)
 		}
 	}
-	rec.Resolve("0xcond1", 0, time.Now()) // outcome 0 = Up; 押 yes(UP) → 赢
+	rec.Resolve("0xcond1", 0, time.Now(), "") // outcome 0 = Up; 押 yes(UP) → 赢
 
 	var got tailStateResponse
 	getJSON(t, s.handleState, "/api/state", &got)
@@ -321,7 +321,7 @@ func TestTailJudgeInsufficient(t *testing.T) {
 	if _, err := rec.RecordObservation("0xc1", "btc-updown-5m", 1780000000, tailObs(tail.KindSnap, 1780000001000), 2); err != nil {
 		t.Fatalf("快照行: %v", err)
 	}
-	rec.Resolve("0xc1", flip.OutcomeUp, time.Now()) // 押 yes(UP) + outcome Up → 赢
+	rec.Resolve("0xc1", flip.OutcomeUp, time.Now(), "") // 押 yes(UP) + outcome Up → 赢
 
 	var got judgeResp
 	getJSON(t, s.handleJudge, "/api/judge", &got)

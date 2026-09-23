@@ -155,7 +155,7 @@ func TestExecStateGate(t *testing.T) {
 	if _, err := rec.RecordObservation("0xpre", "s", 0, okSnap(ts-1000, flip.SideYes), 2); err != nil {
 		t.Fatal(err)
 	}
-	rec.Resolve("0xpre", flip.OutcomeDown, time.UnixMilli(ts)) // yes 押 Down = 输 −2U
+	rec.Resolve("0xpre", flip.OutcomeDown, time.UnixMilli(ts), "") // yes 押 Down = 输 −2U
 	// 线是构造参数: 直接压到 −1 比造一笔大额亏损干净（今日已结算 −2 ≤ −1 → 熔断）。
 	x.MaxDailyLoss = -1
 	g := x.HandleObservation(okSnap(ts, flip.SideNo), "0xgated", "slug-g", 1780000000)
@@ -173,7 +173,7 @@ func TestExecStateGate(t *testing.T) {
 		t.Fatalf("被闸行应照常入 pending（0xpre 已结算, 只剩被闸行）: %+v", pending)
 	}
 	// 锁存: 被闸行照常结算, 赢下来 P&L 回升过线——无锁存则当日自动复牌。
-	if !rec.Resolve("0xgated", flip.OutcomeUp, time.UnixMilli(ts+1000)) {
+	if !rec.Resolve("0xgated", flip.OutcomeUp, time.UnixMilli(ts+1000), "") {
 		t.Fatal("被闸行应在 pending（能结算）")
 	}
 	if !x.breakerTripped() {

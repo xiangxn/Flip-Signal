@@ -68,6 +68,7 @@ import (
 	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
+	"github.com/necklace/flip-signal/internal/settle"
 	"github.com/necklace/flip-signal/internal/tail"
 	"github.com/necklace/flip-signal/internal/trading"
 )
@@ -453,17 +454,47 @@ func main() {
 			// Resolve 返回 false = recorder.pending 中无此市场（重复回调/已结算摘除）。
 			// ⚠️ 帧行不注册结算, 注册的只有 snap 与 scan 行——而两者**按窗口互斥**
 			// （scan 只在 snap 未达标时产出）, 故 pending 里每窗至多一条, 无歧义。
-			if !recorder.Resolve(conditionID, outcome, time.Now()) {
+			if !recorder.Resolve(conditionID, outcome, time.Now(), settle.SrcGamma) {
 				log.Printf("[Tail] ⚠️ 结算回填未命中 %s outcome=%d（pending 中无此市场）",
 					conditionID, outcome)
 			}
 			return nil
 		},
 	)
-	// 重启恢复: 磁盘上未结算信号（崩溃遗留）重新注册结算轮询
-	for _, sig := range recorder.PendingSignals() {
-		resolutionPoller.Register(sig.ConditionID, sig.Slug)
-		log.Printf("[Tail] 🔄 恢复未结算信号: %s slug=%s", sig.ConditionID, sig.Slug)
+
+	// ── 结算编排（2026-09-24, internal/settle; 与 cmd/flip 同一套）──
+	// 主路径 = **推送自算**: 官方 open/close 实测就是边界 N 与 N+300 那两秒的推送值
+	// （逐位相等）, 故两条边界推送在手即闭市 +25s 定案, 不必等 UMA 结算。推送缺失的
+	// 窗口才取官方接口（**闭市 +45s 后**——官方值头几十秒是未收敛的临时值）,
+	// 官方也失败才交回 gamma 轮询。三层来源都落盘行 settle_src 可事后审计。
+	// 缺失面: 实测 854 个实盘窗里 15 个（1.76%）拿不到精确推送, 而一次结算要**两条**
+	// 边界推送（N 与 N+300）⇒ 约 3.5% 的结算会走官方层（两边界缺一即算）。
+	//
+	// 触发点（snap/scan 行落盘、挂单定稿、重启恢复）全部收敛到这里的 Pending 扫描
+	// ——**不再往 gamma 预先注册**: 两个注册点抢同一行会有一边报「结算回填未命中」。
+	anchors := settle.NewAnchors()
+	resolver := settle.New(anchors, settle.Options{
+		Fetch: feed.NewPricePairFetcher(client, sdk.BTC, sdk.Fiveminute, twapLookbackSeconds),
+		Pending: func() []settle.Row {
+			sigs := recorder.PendingSignals()
+			rows := make([]settle.Row, 0, len(sigs))
+			for _, sig := range sigs {
+				rows = append(rows, settle.Row{
+					ConditionID: sig.ConditionID,
+					Slug:        sig.Slug,
+					EventStart:  sig.EventStart,
+				})
+			}
+			return rows
+		},
+		Settle: func(row settle.Row, outcome int, src string) bool {
+			return recorder.Resolve(row.ConditionID, outcome, time.Now(), src)
+		},
+		GiveUp: func(row settle.Row) { resolutionPoller.Register(row.ConditionID, row.Slug) },
+	})
+	go resolver.Run(ctx)
+	if n := len(recorder.PendingSignals()); n > 0 {
+		log.Printf("[Tail] 🔄 重启恢复 %d 条未结算行（交结算编排: 推送→官方→gamma）", n)
 	}
 	go resolutionPoller.Run(ctx)
 
@@ -507,10 +538,9 @@ func main() {
 	// ⚠️ cancelLead 必须是**微小正数**: ≤0 会被 NewFillTracker 当成"未配置"回退 180s。
 	fillTracker := trading.NewFillTracker(&trading.SdkClient{Client: client},
 		trading.CancelAtClose, func(f flip.FillFinal) {
-			rec := exec.ApplyFillFinal(f)
-			if rec != nil && rec.IsFilled() {
-				resolutionPoller.Register(rec.ConditionID, rec.Slug)
-			}
+			// 定稿后行即进 recorder.pending → 结算编排（resolver）下轮自动接管;
+			// 这里不再注册 gamma——注册点已收敛到 settle.Resolver 的 GiveUp。
+			exec.ApplyFillFinal(f)
 		})
 	go fillTracker.Run(ctx)
 	// 重启接管: 进程死在挂单期间 → 磁盘上的 resting 行交回跟踪
@@ -751,6 +781,9 @@ func main() {
 				})
 			for r := range ups {
 				bps := hist.Bps(r.Price)
+				// 边界锚入结算表（无条件: 无论引擎是否接纳, 这条值就是官方 open/close
+				// 口径, 结算要用——引擎拒收只代表本窗不再判定, 不影响已成交行的结算）。
+				anchors.Put(nextStart.Unix(), r.Price)
 				if !engine.UpgradeAnchor(r.Price, bps) {
 					continue // 本窗已产出帧（锚已冻结）或窗口已结束
 				}
@@ -801,25 +834,21 @@ func main() {
 						}
 						continue
 					case tail.KindScan:
-						// 监听口径对账行: 只记录。**仍要注册结算**——它是该窗唯一能拿到
-						// 官方 outcome 的行（snap 被拒的窗没有别的可结算行）, 结算后
+						// 监听口径对账行: 只记录。**仍要结算**——它是该窗唯一能拿到
+						// outcome 的行（snap 被拒的窗没有别的可结算行）, 结算后
 						// 才能在离线脚本里与快照口径逐窗配对算 P&L（isSettlable 已收）。
-						if r := exec.HandleScan(&o, conditionID, slug, nextStart.Unix()); r != nil && r.OK {
-							resolutionPoller.Register(conditionID, slug)
-						}
+						// 注册点不在这里: 落盘即进 pending, 交 settle.Resolver 编排。
+						exec.HandleScan(&o, conditionID, slug, nextStart.Unix())
 						continue
 					}
 					rec := exec.HandleObservation(&o, conditionID, slug, nextStart.Unix())
 					if rec == nil || !rec.OK {
 						continue
 					}
-					// 结算只注册确定持仓（paper 行恒成交; live filled/partial）。
-					// GTC 的 resting 行仓位未定——交 FillTracker 定稿, 由它的回调注册。
-					switch {
-					case rec.ExecStatus == flip.ExecStatusResting:
+					// 结算不再在这里注册（落盘即进 pending, 交 settle.Resolver 统一编排）。
+					// GTC 的 resting 行仓位未定——先交 FillTracker 定稿, 定稿后才进 pending。
+					if rec.ExecStatus == flip.ExecStatusResting {
 						fillTracker.RegisterOrder(fillOrderOf(rec), endTime, false)
-					case rec.IsFilled():
-						resolutionPoller.Register(conditionID, slug)
 					}
 				}
 				if rem == 0 {

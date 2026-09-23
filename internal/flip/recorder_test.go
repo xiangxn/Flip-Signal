@@ -135,16 +135,16 @@ func TestResolveMapping(t *testing.T) {
 	// no 狗 + outcome 0(Up) → 输
 	r.RecordObservation("cond-c", "slug", tsB+1000, mkObs(tsB+1000, SideNo, true, 0.19), 2)
 
-	if !r.Resolve("cond-a", OutcomeUp, at) {
+	if !r.Resolve("cond-a", OutcomeUp, at, "") {
 		t.Fatal("cond-a 应命中")
 	}
-	if !r.Resolve("cond-b", OutcomeDown, at) {
+	if !r.Resolve("cond-b", OutcomeDown, at, "") {
 		t.Fatal("cond-b 应命中")
 	}
-	if !r.Resolve("cond-c", OutcomeUp, at) {
+	if !r.Resolve("cond-c", OutcomeUp, at, "") {
 		t.Fatal("cond-c 应命中")
 	}
-	if r.Resolve("cond-a", OutcomeDown, at) {
+	if r.Resolve("cond-a", OutcomeDown, at, "") {
 		t.Fatal("重复结算应 false")
 	}
 	if len(r.PendingSignals()) != 0 {
@@ -164,6 +164,64 @@ func TestResolveMapping(t *testing.T) {
 	}
 }
 
+// TestResolveSettleSrcPersisted 三层结算来源必须逐行落到 JSONL 的 settle_src 字段
+// （internal/settle 的 push / official / gamma, 2026-09-24 引入）, 且重启载入后仍在
+// ——事后核对「推送自算与官方是否一致」只能按它分桶, 丢了就无从追溯。
+// 同时钉住 omitempty: 未结算行不该出现这个键（否则旧行/新行的区分哨兵失效）。
+func TestResolveSettleSrcPersisted(t *testing.T) {
+	dir := t.TempDir()
+	r, _ := NewRecorder(dir)
+	ts, _, at := testTs(t)
+
+	cases := []struct{ cond, src string }{
+		{"cond-push", "push"},
+		{"cond-official", "official"},
+		{"cond-gamma", "gamma"},
+	}
+	for i, c := range cases {
+		tick := ts + int64(i*1000)
+		if _, err := r.RecordObservation(c.cond, "slug", tick, mkObs(tick, SideYes, true, 0.19), 2); err != nil {
+			t.Fatal(err)
+		}
+		if !r.Resolve(c.cond, OutcomeUp, at, c.src) {
+			t.Fatalf("%s 应命中", c.cond)
+		}
+	}
+	// 一条失败观测（永不结算）——omitempty 的对照行
+	if _, err := r.RecordObservation("cond-rejected", "slug", ts+9000, mkObs(ts+9000, SideNo, false, 0.15), 2); err != nil {
+		t.Fatal(err)
+	}
+
+	day := readDay(t, dir, "2026-09-02")
+	for _, c := range cases {
+		if got := day[c.cond].SettleSrc; got != c.src {
+			t.Fatalf("%s settle_src = %q, 期望 %q", c.cond, got, c.src)
+		}
+	}
+
+	// omitempty: 未结算行不该出现这个键（3 条已结算 → 恰好 3 次）
+	raw, err := os.ReadFile(recordFilePath(dir, "2026-09-02"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(raw), `"settle_src"`); n != len(cases) {
+		t.Fatalf("settle_src 出现 %d 次, 期望 %d（omitempty 失效?）", n, len(cases))
+	}
+
+	// 重启（磁盘载入）不得丢字段
+	if err := r.Close(); err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	if got := readDay(t, dir, "2026-09-02")["cond-push"].SettleSrc; got != "push" {
+		t.Fatalf("重启后 settle_src = %q, 期望 push", got)
+	}
+}
+
 func TestDailyPnlAndDrawdown(t *testing.T) {
 	dir := t.TempDir()
 	r, _ := NewRecorder(dir)
@@ -171,8 +229,8 @@ func TestDailyPnlAndDrawdown(t *testing.T) {
 	// 先输后赢（按 ts 序 → 结算序一致）
 	r.RecordObservation("lose", "slug", tsA, mkObs(tsA, SideNo, true, 0.19), 2)
 	r.RecordObservation("win", "slug", tsB, mkObs(tsB, SideYes, true, 0.19), 2)
-	r.Resolve("lose", OutcomeUp, at) // no 狗 + Up → 输 −2
-	r.Resolve("win", OutcomeUp, at)  // yes 狗 + Up → 赢 shares−2
+	r.Resolve("lose", OutcomeUp, at, "") // no 狗 + Up → 输 −2
+	r.Resolve("win", OutcomeUp, at, "")  // yes 狗 + Up → 赢 shares−2
 
 	dp := r.DailyPnl()
 	if len(dp) != 1 || dp[0].N != 2 || !approxEq(dp[0].PnL, 2/0.19-4) {
@@ -203,7 +261,7 @@ func TestRestartRecovery(t *testing.T) {
 		t.Fatalf("重启恢复: obs/pending = %d/%d, 期望 1/1",
 			len(r2.Observations()), len(r2.PendingSignals()))
 	}
-	if !r2.Resolve("cond-a", OutcomeUp, ts2time(ts)) {
+	if !r2.Resolve("cond-a", OutcomeUp, ts2time(ts), "") {
 		t.Fatal("重启后应能结算")
 	}
 	day := readDay(t, dir, "2026-09-02")
@@ -550,7 +608,7 @@ func TestLiveTwoPhaseFill(t *testing.T) {
 	}
 
 	// 结算按真实 cost: 赢 → shares − cost（每股兑 1U）
-	if !r.Resolve("cond-live", OutcomeUp, ts2time(ts)) {
+	if !r.Resolve("cond-live", OutcomeUp, ts2time(ts), "") {
 		t.Fatal("应能结算")
 	}
 	if rec.Won == nil || !*rec.Won || !approxEq(rec.PnL, 10.20-1.938) {
@@ -578,7 +636,7 @@ func TestLiveUnfilledNoPending(t *testing.T) {
 	if len(r.PendingSignals()) != 0 {
 		t.Fatal("unfilled 不应入 pending")
 	}
-	if r.Resolve("cond-u", OutcomeUp, ts2time(ts)) {
+	if r.Resolve("cond-u", OutcomeUp, ts2time(ts), "") {
 		t.Fatal("unfilled 不应能结算")
 	}
 
@@ -790,7 +848,7 @@ func TestReadAccessorsConcurrentResolve(t *testing.T) {
 		defer wg.Done()
 		defer close(stop)
 		for i := 0; i < n; i++ {
-			r.Resolve(fmt.Sprintf("cond-%d", i), OutcomeUp, ts2time(ts))
+			r.Resolve(fmt.Sprintf("cond-%d", i), OutcomeUp, ts2time(ts), "")
 		}
 	}()
 	wg.Add(1)

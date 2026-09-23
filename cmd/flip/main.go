@@ -52,6 +52,7 @@ import (
 	"github.com/necklace/flip-signal/internal/dashboard"
 	"github.com/necklace/flip-signal/internal/feed"
 	"github.com/necklace/flip-signal/internal/flip"
+	"github.com/necklace/flip-signal/internal/settle"
 	"github.com/necklace/flip-signal/internal/trading"
 )
 
@@ -321,17 +322,47 @@ func main() {
 			// 摘除——重复回调、或轮询表与记录器失步）。poller 先回调后移除，正常
 			// 每市场仅命中一次；未命中即结算从未回填（won/pnl 永远悬空，静默），
 			// 记日志兜底排查。磁盘重写失败不影响此布尔（recorder 内部已记 ⚠️）。
-			if !recorder.Resolve(conditionID, outcome, time.Now()) {
+			if !recorder.Resolve(conditionID, outcome, time.Now(), settle.SrcGamma) {
 				log.Printf("[Dog] ⚠️ 结算回填未命中 %s outcome=%d（pending 中无此市场）",
 					conditionID, outcome)
 			}
 			return nil
 		},
 	)
-	// 重启恢复: 磁盘上未结算信号（崩溃遗留）重新注册结算轮询
-	for _, sig := range recorder.PendingSignals() {
-		resolutionPoller.Register(sig.ConditionID, sig.Slug)
-		log.Printf("[Dog] 🔄 恢复未结算信号: %s slug=%s", sig.ConditionID, sig.Slug)
+
+	// ── 结算编排（2026-09-24, internal/settle）──
+	// 主路径 = **推送自算**: 官方 open/close 实测就是边界 N 与 N+300 那两秒的推送值
+	// （逐位相等）, 故两条边界推送在手即闭市 +25s 定案, 不必等 UMA 结算（gamma 快几分钟）。
+	// 推送缺失的窗口才取官方接口（**闭市 +45s 后**——官方值头几十秒是未收敛的临时值）,
+	// 官方也失败才交回 gamma 轮询。三层来源都落盘行 settle_src 可事后审计。
+	// 缺失面: 实测 854 个实盘窗里 15 个（1.76%）拿不到精确推送, 而一次结算要**两条**
+	// 边界推送（N 与 N+300）⇒ 约 3.5% 的结算会走官方层（两边界缺一即算）。
+	//
+	// 触发点（信号落盘/挂单定稿/重启恢复）全部收敛到这里的 Pending 扫描——**不再往
+	// gamma 预先注册**: 两个注册点抢同一行会有一边报「结算回填未命中」。
+	anchors := settle.NewAnchors()
+	resolver := settle.New(anchors, settle.Options{
+		Fetch: feed.NewPricePairFetcher(client, sdk.BTC, sdk.Fiveminute, twapLookbackSeconds),
+		Pending: func() []settle.Row {
+			sigs := recorder.PendingSignals()
+			rows := make([]settle.Row, 0, len(sigs))
+			for _, sig := range sigs {
+				rows = append(rows, settle.Row{
+					ConditionID: sig.ConditionID,
+					Slug:        sig.Slug,
+					EventStart:  sig.EventStart,
+				})
+			}
+			return rows
+		},
+		Settle: func(row settle.Row, outcome int, src string) bool {
+			return recorder.Resolve(row.ConditionID, outcome, time.Now(), src)
+		},
+		GiveUp: func(row settle.Row) { resolutionPoller.Register(row.ConditionID, row.Slug) },
+	})
+	go resolver.Run(ctx)
+	if n := len(recorder.PendingSignals()); n > 0 {
+		log.Printf("[Dog] 🔄 重启恢复 %d 条未结算信号（交结算编排: 推送→官方→gamma）", n)
 	}
 	go resolutionPoller.Run(ctx)
 
@@ -379,10 +410,9 @@ func main() {
 	// rem ≤ 它之后的成交不属于这条策略（触发瞬间必成交是回测前提）。
 	fillTracker := trading.NewFillTracker(&trading.SdkClient{Client: client},
 		time.Duration(cfg.Flip.RemMin)*time.Second, func(f flip.FillFinal) {
-			rec := runtime.Exec.ApplyFillFinal(f)
-			if rec != nil && rec.IsFilled() {
-				resolutionPoller.Register(rec.ConditionID, rec.Slug)
-			}
+			// 定稿后行即进 recorder.pending → 结算编排（resolver）下轮自动接管;
+			// 这里不再注册 gamma——注册点已收敛到 settle.Resolver 的 GiveUp。
+			runtime.Exec.ApplyFillFinal(f)
 		})
 	go fillTracker.Run(ctx)
 	// 重启接管: 进程死在挂单期间 → 磁盘上的 resting 行交回跟踪（撤单点早已过则
@@ -675,6 +705,9 @@ func main() {
 				})
 			for r := range ups {
 				bps := hist.Bps(r.Price)
+				// 边界锚入结算表（无条件: 无论引擎是否接纳, 这条值就是官方 open/close
+				// 口径, 结算要用——引擎拒收只代表本窗不再触发, 不影响已成交行的结算）。
+				anchors.Put(nextStart.Unix(), r.Price)
 				if !engine.UpgradeAnchor(r.Price, bps) {
 					continue // 本窗已产出观测 → 锚已冻结
 				}
@@ -716,17 +749,14 @@ func main() {
 				lastSampleAt = time.Now()
 				lastTick = sampleTick(tickTime, rem, runtime, cfg.Feed.MaxSpotAgeMs)
 
-				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘/注册结算）
-				// 结算只注册确定持仓（paper 行 ExecStatus 空恒成交; live filled/partial;
-				// unfilled/rejected/风控停单不注册）。GTC 的 resting 行仓位未定
-				// （挂单在簿）——交 FillTracker 定稿, 由它的回调注册结算。
+				// 引擎驱动（首个触底 tick → 观测判定 → 执行/落盘）
+				// 结算不再在这里注册: 落盘即进 recorder.pending, 由 settle.Resolver
+				// 统一编排（推送自算 → 官方 → gamma）。GTC 的 resting 行仓位未定
+				// （挂单在簿）——先交 FillTracker 定稿, 定稿后才进 pending。
 				if o := engine.ProcessTick(lastTick); o != nil {
 					if rec := runtime.Exec.HandleObservation(o, conditionID, slug, nextStart.Unix()); rec != nil && rec.OK {
-						switch {
-						case rec.ExecStatus == flip.ExecStatusResting:
+						if rec.ExecStatus == flip.ExecStatusResting {
 							fillTracker.Register(rec, endTime, false)
-						case rec.IsFilled():
-							resolutionPoller.Register(conditionID, slug)
 						}
 					}
 				}

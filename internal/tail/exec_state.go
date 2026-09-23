@@ -81,8 +81,9 @@ func (x *ExecState) HandleFrame(o *Observation, conditionID, slug string, eventS
 // 与对照物可比: 回测的监听口径 B 是在**没有熔断器**的 14 天回放里算的, 施加熔断会
 // 让纸面样本与它不同分布。
 //
-// 仍然要**结算**（调用方注册 gamma 轮询）: 只有官方 outcome 能把这条反事实算成 P&L,
-// 而 snap 被拒的窗没有任何别的可结算行（见 recorder.isSettlable）。
+// 仍然要**结算**（落盘即进待结算队列, 由 settle.Resolver 三层回退取官方 outcome,
+// 决策 #19）: 只有官方 outcome 能把这条反事实算成 P&L, 而 snap 被拒的窗没有任何别的
+// 可结算行（见 recorder.isSettlable）。
 //
 // 重入去重同 HandleFrame: 同窗已有 scan 行时跳过（崩溃重启会让引擎在新进程里重新
 // 闩锁, 不查磁盘就会写重）。stake 记账 = x.Stake（P&L 公式需要它, 与回测 STAKE 同源;
@@ -200,11 +201,12 @@ func (x *ExecState) HandleObservation(o *Observation, conditionID, slug string, 
 
 // ApplyFillFinal 回填一笔 GTC 挂单的终态成交（trading.FillTracker 撤单/闭市查询
 // size_matched 后经回调送到这里, 见其类型 doc）。返回值同 HandleObservation。
-// 调用方据此注册结算轮询——注册时点从「POST 返回」推到「挂单定稿」, 但 gamma 结算
-// 远在其后（分钟级）, 口径不受影响。
+// 调用方据此让该行进待结算队列——入队时点从「POST 返回」推到「挂单定稿」，
+// 而定稿在闭市后十几秒内（撤单点 = 闭市, 见决策 #17）, 早于结算编排 ① 层的
+// +25s 闸, 口径不受影响（三层判据只看时钟, 不看入队时刻）。
 //
 // Status=resting 是合法的「仍未确认」终态（查询失败/重启遗留从未观测到该单）:
-// 行保持 resting + note 说明原因, 不入 pending、不注册结算、NeedsReconcile 继续计它。
+// 行保持 resting + note 说明原因, 不入 pending、不结算、NeedsReconcile 继续计它。
 func (x *ExecState) ApplyFillFinal(f flip.FillFinal) *Record {
 	rec, err := x.Rec.CompleteRestingFill(f)
 	if err != nil {

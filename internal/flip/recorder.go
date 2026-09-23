@@ -427,8 +427,8 @@ func (r *Recorder) CompleteExecution(conditionID string, res ExecResult) (*Recor
 // 时间腿撤单时查 CLOB size_matched 得到, 见 trading.FillTracker doc）——与 CompleteExecution
 // 并列的第二条 live 回填路径, 把 resting 行定稿:
 //   - filled/partial: 写实际 Shares/Cost/FillPrice → isSettlable 入 pending
-//     （调用方据此注册结算轮询。注册晚于 POST 但早于 gamma 结算——后者分钟级,
-//     口径不受影响）;
+//     （由 settle.Resolver 按三层回退结算, 决策 #19。入队晚于 POST 但早于闭市,
+//     更早于 ① 层的闭市 +25s 闸）;
 //   - unfilled: 0 成交, 保留目标股数（与 CompleteExecution 同口径）;
 //   - resting: **仍未确认**（查询失败/重启遗留从未观测到该单）——只更新
 //     ExecNote 说明原因, 行保持 resting: 不入 pending、不注册结算、
@@ -479,7 +479,10 @@ func (r *Recorder) CompleteRestingFill(f FillFinal) (*Record, error) {
 
 // Resolve 结算一个 ok 信号：按官方 outcome 判定狗侧输赢并回填记录，
 // 原子重写该日文件。命中返回 true。
-func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time) bool {
+//
+// src 是结算来源（internal/settle 的 SrcPush|SrcOfficial|SrcGamma; 空 = 未记），
+// 落进 settle_src 供事后按层核对（2026-09-24 起三层回退, 见 internal/settle 包注释）。
+func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time, src string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -501,6 +504,7 @@ func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time) bool {
 	rec.Won = &won
 	rec.PnL = pnl
 	rec.ResolvedAt = at.UTC().Format(time.RFC3339)
+	rec.SettleSrc = src
 	delete(r.pending, conditionID)
 
 	if err := r.rewriteDayLocked(rec.Date); err != nil {

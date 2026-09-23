@@ -154,7 +154,7 @@ func TestExecLiveDailyLossBreaker(t *testing.T) {
 
 	// 先成交一笔并结算为输（side=yes 买 UP, outcome=1 → −2U 已结算）
 	x.HandleObservation(mkExecObs(SideYes), "condA", "slug", 1_800_000_000_000)
-	if !rec.Resolve("condA", 1, time.Now()) {
+	if !rec.Resolve("condA", 1, time.Now(), "") {
 		t.Fatal("首笔结算失败")
 	}
 	// 第二笔应被熔断拦截（今日已结算 −2 ≤ −0.5）
@@ -219,7 +219,7 @@ func TestExecBreakerParityPaperLive(t *testing.T) {
 	// paper: 先结算一笔输单（−2U ≤ −0.5U）→ 第二笔被闸, 但仍是"成交"行
 	xp, recP := mkExecRec(t, PaperExecutor{}, false, line)
 	xp.HandleObservation(mkExecObs(SideYes), "pA", "slug", 1_800_000_000_000)
-	if !recP.Resolve("pA", OutcomeDown, time.Now()) {
+	if !recP.Resolve("pA", OutcomeDown, time.Now(), "") {
 		t.Fatal("paper 首笔结算失败")
 	}
 	gotP := xp.HandleObservation(mkExecObs(SideYes), "pB", "slug", 1_800_000_000_000)
@@ -238,7 +238,7 @@ func TestExecBreakerParityPaperLive(t *testing.T) {
 	sc := &scriptedExecutor{res: mkFilled("o9")}
 	xl, recL := mkExecRec(t, sc, true, line)
 	xl.HandleObservation(mkExecObs(SideYes), "lA", "slug", 1_800_000_000_000)
-	if !recL.Resolve("lA", OutcomeDown, time.Now()) {
+	if !recL.Resolve("lA", OutcomeDown, time.Now(), "") {
 		t.Fatal("live 首笔结算失败")
 	}
 	gotL := xl.HandleObservation(mkExecObs(SideYes), "lB", "slug", 1_800_000_000_000)
@@ -258,14 +258,14 @@ func TestExecBreakerLatch(t *testing.T) {
 
 	// 1) 输一笔: 今日 −2U ≤ −1.5U → 熔断
 	x.HandleObservation(mkExecObs(SideYes), "a", "slug", 1_800_000_000_000)
-	rec.Resolve("a", OutcomeDown, time.Now())
+	rec.Resolve("a", OutcomeDown, time.Now(), "")
 
 	// 2) 被闸行（照常结算）: 结算为赢 +8U → 今日回升到 +6U（已过线）
 	gated := x.HandleObservation(mkExecObs(SideYes), "b", "slug", 1_800_000_000_000)
 	if gated == nil || gated.GateReason != GateDailyLoss {
 		t.Fatalf("第二笔应被闸: %+v", gated)
 	}
-	if !rec.Resolve("b", OutcomeUp, time.Now()) {
+	if !rec.Resolve("b", OutcomeUp, time.Now(), "") {
 		t.Fatal("被闸行应可结算（方案 A）")
 	}
 	if pnl := x.todaySettledPnl(); pnl <= line {
