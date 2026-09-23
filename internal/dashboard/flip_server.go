@@ -48,7 +48,8 @@ func (s *FlipState) routes() *http.ServeMux {
 	mux := http.NewServeMux()
 
 	// 静态资源与单页（FS 根 = 本族的 flip/ 目录, URL 前缀仍是 /static/）
-	mux.Handle("/static/", http.StripPrefix("/static/", http.FileServer(http.FS(flipStatic))))
+	// noStore: embed.FS 无 ModTime/ETag ⇒ 不禁缓存就会拿旧副本渲染（见 common.go）
+	mux.Handle("/static/", noStore(http.StripPrefix("/static/", http.FileServer(http.FS(flipStatic)))))
 	mux.HandleFunc("/", s.handleIndex)
 
 	// JSON API

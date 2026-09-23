@@ -118,6 +118,7 @@ func queryLimit(r *http.Request, def int) int {
 // writeJSON 统一 JSON 响应。
 func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		log.Printf("[Dashboard] 编码响应失败: %v", err)
 	}
@@ -148,7 +149,27 @@ func serveIndex(fsys fs.FS, w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	w.Write(index)
+}
+
+// noStore 给静态资源响应加 `Cache-Control: no-store`（包在各自的 /static/ 路由外）。
+//
+// 为什么必须显式禁缓存（2026-09-24 用户报「被闸行结果列还显示待结算」的根因）:
+// 前端三件套走 `go:embed`，而 embed.FS 的 ModTime 恒为零值 ⇒ 响应里**既没有
+// Last-Modified 也没有 ETag**，浏览器拿不到任何再验证凭据，只能按启发式决定要不要
+// 复用标签页里那份旧副本。服务端一切正常（/static/app.js 与本地逐字节相同、
+// /api/signals 里 gate_reason/exec_status 齐备），页面却停在旧渲染——诊断为
+// 浏览器侧的陈旧 app.js。
+//
+// 页面必须永远等于正在运行的二进制（前端与引擎同一次构建、同一次部署），
+// 故静态资源与单页一律 no-store：三件套合计 ~35KB，不值得为省这点流量换
+// 「部署了新代码、页面还是旧样子」的排查成本。
+func noStore(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		next.ServeHTTP(w, r)
+	})
 }
 
 // remainingSec 计算当前窗口剩余秒（未到窗口起点或已结束为 0）。

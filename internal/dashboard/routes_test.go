@@ -78,6 +78,51 @@ func TestTailRoutes(t *testing.T) {
 	}
 }
 
+// TestNoStoreHeaders 两族的前端三件套与 JSON API 都必须显式禁缓存。
+//
+// 起因（用户反馈的线上现象, 2026-09-24）: 改了「结果列显示被风控闸拦下的行」并部署后,
+// 页面上那一列还是旧渲染（仍显示「待结算」）。排查结论是**浏览器侧**：服务端一切正常
+// （/static/app.js 与本地构建逐字节相同、/api/signals 里 gate_reason/exec_status 齐备）,
+// 是标签页里那份旧 app.js 没被换掉。根因: 静态资源走 `go:embed`，embed.FS 的 ModTime
+// 恒为零值 ⇒ 响应不带 Last-Modified/ETag ⇒ 浏览器没有再验证凭据, 只能按启发式复用旧副本。
+// 本测试钉住「页面永远等于正在运行的二进制」: 三处出口（单页 / 静态资源 / JSON API）
+// 都必须 `Cache-Control: no-store`。
+func TestNoStoreHeaders(t *testing.T) {
+	flipRec, err := flip.NewRecorder(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	defer flipRec.Close()
+	tailRec, err := tail.NewRecorder(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	defer tailRec.Close()
+
+	fs := NewFlipState(flipRec, fakeSnap{flip.LiveSnapshot{}}, flip.DefaultConfig(), "paper", SourceLimits{})
+	ts := NewTailState(tailRec, fakeTailSnap{tail.LiveSnapshot{}}, tail.DefaultConfig(), "paper", SourceLimits{})
+
+	for _, tc := range []struct {
+		family string
+		mux    *http.ServeMux
+		api    string
+	}{
+		{"flip", fs.routes(), "/api/signals"},
+		{"tail", ts.routes(), "/api/snaps"},
+	} {
+		for _, path := range []string{"/", "/static/app.js", "/static/style.css", tc.api} {
+			w := serve(t, tc.mux, path)
+			if w.Code != http.StatusOK {
+				t.Fatalf("%s GET %s = %d", tc.family, path, w.Code)
+			}
+			if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+				t.Fatalf("%s GET %s Cache-Control = %q, 期望 no-store（陈旧前端会让页面与二进制脱节）",
+					tc.family, path, cc)
+			}
+		}
+	}
+}
+
 // TestFlipRoutes flip 侧的路由回归（重构 static/ → flip/ 后必须一模一样）。
 func TestFlipRoutes(t *testing.T) {
 	rec, err := flip.NewRecorder(t.TempDir())
