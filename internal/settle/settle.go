@@ -8,7 +8,7 @@
 //
 // 三层回退（每一层都写进记录行的 settle_src 字段, 事后可审计）:
 //
-//	push     两个边界的推送都在手（实盘 ~98.2% 的窗口）——闭市后 ~25s 即定案
+//	push     两个边界的推送都在手（实盘 ~98.2% 的窗口）——闭市后 ~10s 即定案
 //	official 推送缺失（上游那一秒没发/网络丢）→ 官方接口取 open/close 比较。
 //	         ⚠️ 必须**闭市 +45s 后**才取: 官方值头几十秒是未收敛的临时值
 //	         （决策 #14 实测 +40s 才收敛, p90 差 9.5 美元）。
@@ -49,8 +49,20 @@ const windowSpan = 300 * time.Second
 
 // Options 零值时的默认参数。
 const (
-	defaultPoll         = 5 * time.Second
-	defaultPushWait     = 25 * time.Second // 取锚通道预算 20s + 5s 余量
+	defaultPoll = 5 * time.Second
+
+	// defaultPushWait 是「推送层定案」前的等待时长。原值 25s 是**照抄决策 #15 取锚通道
+	// 的 20s 预算 + 5s 余量**, 但结算这条路上用不着那么久: 开窗那条推送（边界 N）在窗口
+	// 开局 ~2s 内就进了 Anchors, 闭市时唯一还在等的是 close 那条（边界 N+300, 闭市那一
+	// 刻才发布）——实盘 880 个命中窗口里它的本地到达延迟只有 1s(771 窗) / 2s(94 窗)
+	// 两档, 没有一窗晚于 2s（决策 #15 记的「最晚 +12.1s」是取锚通道 500ms 轮询下的观测
+	// 上界, 不是推送本身的延迟）。25s 的实际代价是每条信号白等 15s——用户实测「结算
+	// 仍要 40-50s」的主因。2026-09-24 下调到 10s（1~2s 到达 + 8s 余量 = 5 倍实测上界）,
+	// 推送层定案时点 26s → ~10-15s。
+	// 官方层时点不受影响（它有自己的 45s 门槛, 与 PushWait 无关）: 真丢推送的窗口仍
+	// 在闭市 +45s 走官方, 只是比原口径早 ~15s 尝试——而 45s 门槛未到, 故实为不变。
+	defaultPushWait = 10 * time.Second
+
 	defaultOfficialWait = 45 * time.Second // 官方值 ~+40s 才收敛（决策 #14）
 	defaultFetchTimeout = 10 * time.Second
 	defaultMaxTries     = 6
@@ -124,7 +136,7 @@ type Row struct {
 // Options 是 Resolver 的注入参数（零值可用: 时间/次数取默认）。
 type Options struct {
 	Poll         time.Duration // 扫描间隔（≤0 = 5s）
-	PushWait     time.Duration // 边界后 ≥ 此值才判「推送缺失」（≤0 = 25s）
+	PushWait     time.Duration // 边界后 ≥ 此值才判「推送缺失」（≤0 = 10s）
 	OfficialWait time.Duration // 边界后 ≥ 此值才允许官方取数（≤0 = 45s）
 	FetchTimeout time.Duration // 单次官方请求超时（≤0 = 10s）
 	MaxTries     int           // 官方最多次数（≤0 = 6; 用尽即交 gamma）
@@ -188,8 +200,9 @@ func (r *Resolver) tick(ctx context.Context, now time.Time) {
 		sinceEnd := now.Sub(time.Unix(row.EventStart, 0).Add(windowSpan))
 
 		// ── ① 推送层: 两个边界推送都在手 → 直接定案 ──
-		// 未到 PushWait 时**什么都不做**（不是走官方）: 取锚通道的 20s 预算还没走完,
-		// 「没有」此刻还不能算缺失。
+		// 未到 PushWait 时**什么都不做**（不是走官方）: 开窗那条推送（边界 N）若命中
+		// 早已入表, 闭市时还在等的只有 close 那条（边界 N+300, 闭市那一刻才发布）,
+		// 此刻「没有」只说明它还在路上, 不能算缺失（实测到达 +1~2s, 见 defaultPushWait）。
 		if sinceEnd < r.pushWait() {
 			continue
 		}

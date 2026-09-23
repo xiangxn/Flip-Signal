@@ -120,7 +120,7 @@ func (h *resolverHarness) at(offset time.Duration) time.Time {
 	return time.Unix(h.start, 0).Add(windowSpan).Add(offset)
 }
 
-// 推送层: 两条边界推送在手 → 闭市 +25s 定案, src=push; 未到点则一动不动。
+// 推送层: 两条边界推送在手 → 闭市 +10s 定案, src=push; 未到点则一动不动。
 func TestResolverPushTier(t *testing.T) {
 	h := newHarness(t, Options{Fetch: func(context.Context, time.Time, time.Time) (float64, float64) {
 		t.Error("推送命中时不该走官方层")
@@ -130,13 +130,13 @@ func TestResolverPushTier(t *testing.T) {
 	h.r.anchors.Put(h.start+300, 84002)
 
 	h.r.tick(context.Background(), h.at(0))
-	h.r.tick(context.Background(), h.at(24*time.Second))
+	h.r.tick(context.Background(), h.at(9*time.Second))
 	if len(h.settled) != 0 {
-		t.Fatalf("未到 +25s 不该定案（取锚预算未走完）, 实际结算 %d 条", len(h.settled))
+		t.Fatalf("未到 +10s 不该定案（close 那条推送可能还在路上）, 实际结算 %d 条", len(h.settled))
 	}
-	h.r.tick(context.Background(), h.at(25*time.Second))
+	h.r.tick(context.Background(), h.at(10*time.Second))
 	if len(h.settled) != 1 || h.settled[0].src != SrcPush || h.settled[0].outcome != outcomeUp {
-		t.Fatalf("+25s 应推送自算结算 Up, got %+v", h.settled)
+		t.Fatalf("+10s 应推送自算结算 Up, got %+v", h.settled)
 	}
 }
 
@@ -199,7 +199,7 @@ func TestResolverNoOfficialLayer(t *testing.T) {
 	h := newHarness(t, Options{})
 	h.r.tick(context.Background(), h.at(time.Second))
 	if len(h.gaveUp) != 0 {
-		t.Fatal("未到 +25s 不该交 gamma")
+		t.Fatal("未到 +10s 不该交 gamma")
 	}
 	h.r.tick(context.Background(), h.at(30*time.Second))
 	if len(h.gaveUp) != 1 || len(h.settled) != 0 {
