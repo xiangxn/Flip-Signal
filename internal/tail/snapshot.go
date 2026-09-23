@@ -51,9 +51,10 @@ type LiveSnapshot struct {
 	Dev     float64 // 位移（**美元**, 正 = 朝热门侧方向）
 	Sd      float64 // 该窗 1σ 折美元（0 = σ 不可用）
 
-	// 本窗两个闩锁（dashboard 显示「帧已落 / 快照已落 / 锚已冻结」）
+	// 本窗三个闩锁（dashboard 显示「帧已落 / 快照已落 / 监听行已落 / 锚已冻结」）
 	FrameSent    bool
 	SnapSent     bool
+	ScanSent     bool // 监听口径对账行已产出（或无需产出——snap 已达标）
 	AnchorFrozen bool
 
 	// Stats 为本窗 tick 健康度（引擎计数器, 窗口间/未开始为 nil）

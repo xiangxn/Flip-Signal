@@ -225,21 +225,24 @@ func (r *Recorder) loadFileLocked(path string) (int, int, error) {
 			skipped++
 			continue
 		}
-		// 行 schema 守卫: kind 必须是 frame/snap。空串 = 无法判类型, 拒收
-		// （本族的行**恒**带 kind, 与 flip 的 touces_ 相反——那里的旧行没有这个键）。
-		if rec.Kind != KindFrame && rec.Kind != KindSnap {
-			log.Printf("⚠️ [Tail] %s: 跳过 kind=%q 的行（非 frame/snap）", path, rec.Kind)
+		// 行 schema 守卫: kind 必须是 frame/snap/scan（isKnownKind）。空串 = 无法判类型,
+		// 拒收（本族的行**恒**带 kind, 与 flip 的 touches_ 相反——那里的旧行没有这个键）。
+		if !isKnownKind(rec.Kind) {
+			log.Printf("⚠️ [Tail] %s: 跳过 kind=%q 的行（非 frame/snap/scan）", path, rec.Kind)
 			skipped++
 			continue
 		}
 		r.recs = append(r.recs, &rec)
-		// 崩溃恢复: pending 只收「决策已下、仓位待结算」的行（snap && ok && 未结算
+		// 崩溃恢复: pending 只收「决策已下、仓位待结算」的行（snap/scan && ok && 未结算
 		// && paper 或 live filled/partial）。帧行 OK=false 天然不入。
-		if rec.Kind == KindSnap && rec.OK && rec.Won == nil && rec.ConditionID != "" {
+		// scan 行同样收: 它没有仓位, 但它是那一窗**唯一**能拿到官方 outcome 的行
+		//（snap 被拒的窗没有别的可结算行, 丢了这条该窗的对账样本永久缺失）。
+		if (rec.Kind == KindSnap || rec.Kind == KindScan) && rec.OK && rec.Won == nil && rec.ConditionID != "" {
 			if isSettlable(&rec) {
 				r.pending[rec.ConditionID] = &rec // 重启后重新注册结算轮询
-			} else if rec.ExecStatus == flip.ExecStatusSubmitting || rec.ExecStatus == flip.ExecStatusResting ||
-				strings.HasPrefix(rec.ExecNote, flip.ExecNoteUnknown) {
+			} else if rec.Kind == KindSnap &&
+				(rec.ExecStatus == flip.ExecStatusSubmitting || rec.ExecStatus == flip.ExecStatusResting ||
+					strings.HasPrefix(rec.ExecNote, flip.ExecNoteUnknown)) {
 				log.Printf("⚠️ [Tail] %s: condition=%s exec=%s 执行中断待定稿——勿自动补单, 按 order_id 去 data-api 核对。slug=%s event_start=%d ts=%d side=%s hot_ask=%.3f stake=%.1f note=%q",
 					filepath.Base(path), rec.ConditionID, rec.ExecStatus,
 					rec.Slug, rec.EventStart, rec.Ts, rec.Side, rec.HotAsk, rec.Stake, rec.ExecNote)
@@ -845,13 +848,14 @@ func (r *Recorder) GatedToday(date, reason string) int {
 }
 
 // DailyPnl 按日汇总已结算 P&L（正序; 日亏熔断的输入）。
-// 只统计 snap 行的 ok 信号（帧行无仓位, 且 Won 恒 nil）。
+// 只统计 **snap** 行的 ok 信号（帧行无仓位且 Won 恒 nil; **scan 行必须排除**——
+// 它没有真实仓位, 混进来会让一条不存在的反事实盈亏去开/关熔断闸）。
 func (r *Recorder) DailyPnl() []DayPnl {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	byDay := map[string]*DayPnl{}
 	for _, rec := range r.recs {
-		if !rec.OK || rec.Won == nil {
+		if rec.Kind != KindSnap || !rec.OK || rec.Won == nil {
 			continue
 		}
 		d := byDay[rec.Date]
@@ -971,11 +975,16 @@ func trackableResting(rec *Record) bool {
 	return rec.OrderID != "" && rec.HotAsk > 0 && rec.Stake > 0
 }
 
-// isSettlable 判断记录是否应挂结算（真实持仓 + 未结算）: snap 行 && ok && 未结算 &&
-// paper 行（ExecStatus 空, 模拟成交）或 live filled/partial。unfilled/rejected/
-// submitting/resting 行无确定持仓——不入 pending、不注册结算轮询。
+// isSettlable 判断记录是否应挂结算: snap 行（真实持仓）或 **scan 行（反事实仓位）**,
+// 且 ok、未结算、conditionID 非空; paper 行（ExecStatus 空, 模拟成交）或 live
+// filled/partial。unfilled/rejected/submitting/resting 行无确定持仓——不入 pending、
+// 不注册结算轮询。
+//
+// ⚠️ scan 行也要结算, 但它**不是仓位**: 它需要官方 outcome 才能把「监听口径本会在
+// 这一 tick 成交」算成 P&L。所有消费 pending/PnL 的聚合都必须自己按 Kind 过滤
+// （DailyPnl 已排除 scan; Signals/Counts/MaxDrawdown/LiveSummary 均按 KindSnap 取数）。
 func isSettlable(rec *Record) bool {
-	if rec.Kind != KindSnap || !rec.OK || rec.Won != nil || rec.ConditionID == "" {
+	if (rec.Kind != KindSnap && rec.Kind != KindScan) || !rec.OK || rec.Won != nil || rec.ConditionID == "" {
 		return false
 	}
 	switch rec.ExecStatus {

@@ -8,9 +8,10 @@ import (
 
 // Engine 是「扫尾盘」的快照状态机。
 //
-// 每 300s 窗口重置一次（或每窗新建实例）: 有效 tick 上按两个**独立的一次性闩锁**
-// 取两帧——rem ≤ Config.FrameRem 首帧（原始快照, 只记录）与 rem ≤ Config.RemStart
-// 首帧（决策快照, 判定 ⑤ 并执行）。产出决策快照后转 Done, 本窗不再检测。
+// 每 300s 窗口重置一次（或每窗新建实例）: 有效 tick 上按三个**独立的一次性闩锁**
+// 取帧——rem ≤ Config.FrameRem 首帧（原始快照, 只记录）、rem ≤ Config.RemStart
+// 首帧（决策快照, 判定 ⑤ 并执行）, 以及决策快照**之后**第一个 ⑤ 达标的 tick
+// （监听口径对账行, **只记录**）。产出决策快照后转 Scanning, 本窗不再判定/下单。
 //
 // 本包零第三方依赖、无 I/O, 判定输入全部经 Tick / BeginWindow 注入, 可独立测试：
 //   - **有效 tick** = BookLatMs ≤ MaxBookLatMs ∧ UP(≈yes)/DOWN(≈no) 双侧四档报价
@@ -26,6 +27,10 @@ import (
 //     接上）: 两行同发、内容同源、FrameT 不同——与 python 对每个 T 各取一次首帧等价
 //     （两个 T 的 snapshots() 本就会选中同一条 tick）。
 //   - **帧行绝不下单**: 只有 Kind=KindSnap 且 OK 的行进执行编排（策略本体是 T=60）。
+//   - **监听对账行也绝不下单**且判定规则与 snap 有一处**刻意的**不同: snap 是「整窗
+//     一次性」（判定失败/缺 spot 即 Done, 不往后找）, scan 是「逐 tick 独立」
+//     （缺 spot/twap 的 tick 只是跳过它, 与 python 监听口径 tail_ticks 逐条对齐）。
+//     两者不是同一个估计量, 这正是本行存在的理由——见 KindScan 的类型注释。
 //   - rem ≤ 0 终 tick 处理完置 Done（不产出观测）。
 type Engine struct {
 	mu sync.Mutex
@@ -38,9 +43,22 @@ type Engine struct {
 
 	frameSent bool // rem≤FrameRem 首帧已产出
 	snapSent  bool // rem≤RemStart 首帧（决策快照）已产出
-	emitted   bool // 本窗已产出过任何行 → 锚冻结（UpgradeAnchor 拒收）
+	// scanSent 监听口径对账行已定局: 要么已产出, 要么因决策快照自身达标而不可能有
+	// 增量行（快照与监听两口径在同一个 tick 成交 = B ⊇ A 的相等情形）。
+	scanSent bool
+	emitted  bool // 本窗已产出过任何行 → 锚冻结（UpgradeAnchor 拒收）
 
 	stats WindowStats // 本窗 tick 健康度（纯计数, 不参与判定; 每窗重置）
+}
+
+// Latches 是本窗三个一次性闩锁 + 锚冻结状态的只读快照（dashboard 展示本窗进度用）:
+// Frame = 帧已落 / Snap = 决策快照已落 / Scan = 监听对账已定局 / Frozen = 已产出过行
+// （锚自此冻结, 也是 UpgradeAnchor 此后拒收的判据）。判定路径不读它。
+type Latches struct {
+	Frame  bool `json:"frame"`
+	Snap   bool `json:"snap"`
+	Scan   bool `json:"scan"`
+	Frozen bool `json:"frozen"`
 }
 
 // NewEngine 创建一个处于 Watching 态的空引擎（窗口上下文由 BeginWindow 注入）。
@@ -60,6 +78,7 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.histBps = histBps
 	e.frameSent = false
 	e.snapSent = false
+	e.scanSent = false
 	e.emitted = false
 	e.stats = WindowStats{}
 }
@@ -77,7 +96,7 @@ func (e *Engine) UpgradeAnchor(anchor, histBps float64) bool {
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if e.state != stateWatching || e.emitted {
+	if e.state == stateDone || e.emitted {
 		return false // 已产出观测（锚已冻结）或窗口已结束
 	}
 	e.anchor = anchor
@@ -111,13 +130,13 @@ func (e *Engine) Config() Config {
 // ProcessTick 处理一个 1s tick, 返回本 tick 产出的观测（0 行 / 1 行 / 2 行）。
 //
 // 两行同发只出现在「首个有效 tick 已 rem ≤ RemStart」的情形（见 Engine 类型注释）。
-// 调用方按 Kind 分流: frame 只落盘, snap 进执行编排。
+// 调用方按 Kind 分流: frame 与 scan **只落盘**, 只有 snap 进执行编排。
 func (e *Engine) ProcessTick(t flip.Tick) []Observation {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.state != stateWatching {
-		return nil // 已判定/已结束, 本窗不再观测（无重试）
+	if e.state == stateDone {
+		return nil // 窗口已结束, 本窗不再观测（无重试）
 	}
 	if t.Rem <= 0 {
 		e.state = stateDone // rem==0 终 tick: 窗口结束
@@ -149,11 +168,24 @@ func (e *Engine) ProcessTick(t flip.Tick) []Observation {
 	}
 	if !e.snapSent && t.Rem <= e.cfg.RemStart {
 		e.snapSent = true
-		out = append(out, e.snapshot(t, KindSnap, e.cfg.RemStart))
-		e.state = stateDone // 决策快照已产出, 本窗不再观测
+		o := e.snapshot(t, KindSnap, e.cfg.RemStart)
+		out = append(out, o)
+		// 决策快照自身达标 ⇒ 监听口径与本行同 tick（B ⊇ A 的相等情形, 无增量行）。
+		e.scanSent = o.OK
+		e.state = stateScanning // 决策已闭环; 转监听段（只可能再落一条对账行）
+	} else if e.state == stateScanning && !e.scanSent {
+		// 监听口径对账行: 决策快照之后的第一个 ⑤ 达标 tick, **只记录、绝不下单**。
+		// 与 snap 的一处刻意差异（见 KindScan 注释）: 本支逐 tick 独立求规则, 某个
+		// tick 缺 spot/twap **只是跳过它**（不像 snap 那样整窗丢弃）——缺 spot 时
+		// Dev=0 天然过不了规则, 缺 twap 不影响 ⑤。分支走向与 python 监听口径
+		// （16_tail_t150_scan.py:tail_ticks）逐条对齐。
+		if o := e.snapshot(t, KindScan, e.cfg.RemStart); o.OK {
+			e.scanSent = true
+			out = append(out, o)
+		}
 	}
 	if len(out) > 0 {
-		e.emitted = true // 锚自此冻结（两行共用同一锚）
+		e.emitted = true // 锚自此冻结（本窗各行共用同一锚）
 		e.stats.Frames += len(out)
 	}
 	return out
@@ -166,16 +198,15 @@ func (e *Engine) WindowStats() WindowStats {
 	return e.stats
 }
 
-// LatchState 返回两个一次性闩锁与锚冻结状态（只读, dashboard 展示本窗进度用）:
-// frameSent = 帧已落 / snapSent = 决策快照已落 / frozen = 已产出过行（锚自此冻结,
-// 也是 UpgradeAnchor 此后拒收的判据）。判定路径不读它。
-func (e *Engine) LatchState() (frameSent, snapSent, frozen bool) {
+// Latches 返回本窗三个一次性闩锁与锚冻结状态（只读, dashboard 展示本窗进度用）。
+// 判定路径不读它。
+func (e *Engine) Latches() Latches {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.frameSent, e.snapSent, e.emitted
+	return Latches{Frame: e.frameSent, Snap: e.snapSent, Scan: e.scanSent, Frozen: e.emitted}
 }
 
-// snapshot 采集一条快照行（原始字段 + 派生量; snap 行另做判定）。
+// snapshot 采集一条快照行（原始字段 + 派生量; snap/scan 行另做判定）。
 // 调用方已持锁、已保证 anchor > 0 且本 tick 为有效 tick。
 func (e *Engine) snapshot(t flip.Tick, kind string, frameT int) Observation {
 	// 热门侧 = ask 高的一侧（平局取 yes）——口径见 decide.go SideOfHot。
@@ -197,8 +228,21 @@ func (e *Engine) snapshot(t flip.Tick, kind string, frameT int) Observation {
 		o.Dev = DevUSD(side, t.BinPrice, e.anchor)
 	}
 	o.Sd = SigmaUSD(e.histBps, e.anchor)
-	if kind != KindSnap {
+	if kind == KindFrame {
 		return o // 帧行只记录, 不带规则与判定
+	}
+	o.Rules = EvalRules(e.cfg, hotAsk, o.Dev, o.Sd, e.histBps > 0)
+	if kind == KindScan {
+		// 监听口径对账行: **只有达标才产出**（引擎在 ProcessTick 里按 OK 决定收不收）,
+		// 故不带 RejectReason 分支——那条「逐 tick 跳过缺 spot/twap 的 tick」的语义
+		// 已经由 Dev=0 / 规则不用 twap 天然实现（见 KindScan 注释）。
+		// ⚠️ OK 判据**不含 twap**（⑤ 不用它, 与 python 监听口径逐条一致; snap 的
+		// missing_twap 腿是为了与回测宇宙对齐才有的）——被拒的 tick 不落行、不记原因。
+		o.OK = o.Rules.Rule5() && t.BinPrice > 0 && e.histBps > 0
+		if o.OK {
+			o.Shares = e.cfg.Stake / hotAsk // 假想股数（本行无真实仓位）
+		}
+		return o
 	}
 
 	// 判定顺序固定（文档化, 复验按原因计数）:

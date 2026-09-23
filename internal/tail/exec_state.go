@@ -14,7 +14,8 @@ import (
 // 镜像 flip.ExecState 的形态（engine 判定 / recorder 记账 / executor 成交三段分离,
 // 编排只有一处）, 但只保留本族需要的那部分:
 //   - **帧行**（KindFrame）走 HandleFrame: 只落盘, 永不下单;
-//   - **决策快照**（KindSnap）走 HandleObservation: 落盘 → 风控闸 → 执行 → 回填。
+//   - **决策快照**（KindSnap）走 HandleObservation: 落盘 → 风控闸 → 执行 → 回填;
+//   - **监听对账行**（KindScan）走 HandleScan: 只落盘（不过闸、不碰 Ex）, 见其注释。
 //
 // 纸面/实盘同源:
 //   - 判定/股数/P&L 公式全部同源（engine + recorder.Resolve）, mode 永不进入判定;
@@ -70,6 +71,40 @@ func (x *ExecState) HandleFrame(o *Observation, conditionID, slug string, eventS
 	}
 	log.Printf("[Tail] 📸 帧 rem=%ds hot=%s ask=%.3f dev=%.1f sd=%.1f spot=%.2f anchor=%.2f σ=%.2fbps",
 		o.Rem, o.Side, o.HotAsk, o.Dev, o.Sd, o.Spot, o.Anchor, o.HistBps)
+	return rec
+}
+
+// HandleScan 落盘一条监听口径对账行（决策快照之后第一个 ⑤ 达标的 tick）。
+//
+// **绝不下单、也不过风控闸**: 本行是一条反事实样本（「若把一次快照改成持续监听,
+// 会在哪里成交」）, 不是仓位——碰 Ex 就等于开了一笔策略里不存在的单。不过闸是为了
+// 与对照物可比: 回测的监听口径 B 是在**没有熔断器**的 14 天回放里算的, 施加熔断会
+// 让纸面样本与它不同分布。
+//
+// 仍然要**结算**（调用方注册 gamma 轮询）: 只有官方 outcome 能把这条反事实算成 P&L,
+// 而 snap 被拒的窗没有任何别的可结算行（见 recorder.isSettlable）。
+//
+// 重入去重同 HandleFrame: 同窗已有 scan 行时跳过（崩溃重启会让引擎在新进程里重新
+// 闩锁, 不查磁盘就会写重）。stake 记账 = x.Stake（P&L 公式需要它, 与回测 STAKE 同源;
+// 行里 Shares 是假想股数）——它**不是**真实投入, 见 Record.Stake 的类型语义。
+//
+// 返回落盘记录（跳过/落盘失败返回 nil）。
+func (x *ExecState) HandleScan(o *Observation, conditionID, slug string, eventStart int64) *Record {
+	if o.Kind != KindScan {
+		log.Printf("⚠️ [Tail] HandleScan 收到非监听行（kind=%q）——拒绝落盘, 请检查调用点", o.Kind)
+		return nil
+	}
+	if x.Rec.HasKind(conditionID, KindScan) {
+		log.Printf("[Tail] 监听行已存在, 跳过重写: condition=%s slug=%s rem=%d", conditionID, slug, o.Rem)
+		return nil
+	}
+	rec, err := x.Rec.RecordObservation(conditionID, slug, eventStart, o, x.Stake)
+	if err != nil {
+		log.Printf("[Tail] 监听行落盘失败: %v", err)
+		return nil
+	}
+	log.Printf("[Tail] 👁️ 监听口径达标（只记录, 不下单） side=%s rem=%ds hot_ask=%.3f dev=%.1f sd=%.1f shares=%.2f anchor=%.2f σ=%.2fbps spot=%.2f",
+		o.Side, o.Rem, o.HotAsk, o.Dev, o.Sd, o.Shares, o.Anchor, o.HistBps, o.Spot)
 	return rec
 }
 

@@ -90,7 +90,7 @@ func TestEngineTwoFrames(t *testing.T) {
 		t.Fatalf("frame 已产出后不该再产 frame, 得到 %+v", out)
 	}
 
-	// rem≤60 → snap 行（带判定）, 随后转 Done。
+	// rem≤60 → snap 行（带判定）, 随后转 Scanning（监听段还会继续看, 但只记录）。
 	out = e.ProcessTick(tailTick(59))
 	if len(out) != 1 || out[0].Kind != KindSnap {
 		t.Fatalf("rem=59 应产出 1 行 snap, 得到 %+v", out)
@@ -105,11 +105,21 @@ func TestEngineTwoFrames(t *testing.T) {
 	if want := 2 / 0.92; s.Shares != want {
 		t.Fatalf("股数应为 stake/hotAsk = %.6f, 得到 %.6f", want, s.Shares)
 	}
-	if e.State() != stateDone {
-		t.Fatalf("产出 snap 后应转 Done, 实为 %v", e.State())
+	// snap 已达标 ⇒ 监听行冗余（两口径同 tick）: 状态转 Scanning, 但监听闩锁同时
+	// 已被判为「已定」, 后续 tick 一行都不该再产出。
+	if e.State() != stateScanning {
+		t.Fatalf("产出 snap 后应转 Scanning, 实为 %v", e.State())
+	}
+	if l := e.Latches(); !l.Snap || !l.Scan {
+		t.Fatalf("snap 达标时监听闩锁应同时为真（不产冗余行）, 得到 %+v", l)
 	}
 	if out := e.ProcessTick(tailTick(30)); len(out) != 0 {
-		t.Fatalf("Done 之后不该再产出, 得到 %+v", out)
+		t.Fatalf("snap 达标后不该再产出（监听行冗余）, 得到 %+v", out)
+	}
+	// 窗口结束（rem==0）→ Done。
+	e.ProcessTick(tailTick(0))
+	if e.State() != stateDone {
+		t.Fatalf("rem==0 应转 Done, 实为 %v", e.State())
 	}
 }
 
@@ -278,15 +288,22 @@ func TestEngineRejectReasons(t *testing.T) {
 			if !o.OK && o.Shares != 0 {
 				t.Fatalf("未成交行不该有股数: %+v", o)
 			}
-			if e.State() != stateDone {
-				t.Fatalf("判定后应转 Done（首触不重试）, 实为 %v", e.State())
+			// 判定一次即闭环: 转入监听段（不会再判定、更不会下单）——监听段只可能
+			// 补一行只记录的 scan, 那属于另一个口径, 见 TestEngineScanLatchAfterRejectedSnap。
+			if e.State() != stateScanning {
+				t.Fatalf("判定后应转 Scanning（首触不重试）, 实为 %v", e.State())
 			}
 		})
 	}
 }
 
-// TestEngineMissingSpotOrTwapAbandonsWindow 快照 tick 缺 spot/twap ⇒ 整窗丢弃:
-// 后续有齐全数据的 tick 也不再判定（与回测的整窗 continue 一致, **不是**往后找）。
+// TestEngineMissingSpotOrTwapAbandonsWindow 快照 tick 缺 spot/twap ⇒ **决策**整窗丢弃:
+// 该窗不再有第二次判定（与回测的整窗 continue 一致, **不是**往后找下一个齐全 tick）。
+//
+// ⚠️ 2026-09-23 起「整窗丢弃」只约束 snap 行: 监听段（KindScan, 只记录）**逐 tick
+// 独立**求 ⑤——数据重新齐全的 tick 上该落行就得落, 否则这条反事实样本永久缺失
+// （python 的监听口径 tail_ticks 本身就是逐 tick 跳过缺 spot 的 tick, 不是整窗丢）。
+// 缺 spot 那一 tick 的 dev=0 天然过不了规则; 缺 twap 压根不影响 ⑤（规则不用它）。
 func TestEngineMissingSpotOrTwapAbandonsWindow(t *testing.T) {
 	for _, c := range []struct {
 		name string
@@ -301,11 +318,46 @@ func TestEngineMissingSpotOrTwapAbandonsWindow(t *testing.T) {
 			if o.OK {
 				t.Fatalf("应产出被拒行, 得到 %+v", o)
 			}
-			// 紧随其后一个数据齐全的 tick（dev=+100 本会构成 ⑤）**不得**产出。
-			if out := e.ProcessTick(tailTick(58)); len(out) != 0 {
-				t.Fatalf("整窗已在首个快照 tick 上判定完毕, 不该顺延重试, 得到 %+v", out)
+			// 紧随其后一个数据齐全的 tick（dev=+100 本会构成 ⑤）: **不得**再产 snap,
+			// 但监听段应落下一行达标 scan。
+			out := e.ProcessTick(tailTick(58))
+			if len(out) != 1 || out[0].Kind != KindScan {
+				t.Fatalf("决策不重试, 但监听段应产出 1 行 scan, 得到 %+v", out)
+			}
+			if !out[0].OK || !out[0].Rules.Rule5() {
+				t.Fatalf("scan 行只在达标时产出, 得到 ok=%v rules=%+v", out[0].OK, out[0].Rules)
+			}
+			// 监听闩锁同样一次性。
+			if out := e.ProcessTick(tailTick(57)); len(out) != 0 {
+				t.Fatalf("监听行已产出后不该再产, 得到 %+v", out)
 			}
 		})
+	}
+}
+
+// TestEngineScanLatchAfterRejectedSnap 监听段的主路径: snap 被 ⑤ 拒（价格腿/位移腿不
+// 达标）后, 监听段在第一个达标 tick 落一行只记录的 scan；期间不达标的 tick 一行不落。
+func TestEngineScanLatchAfterRejectedSnap(t *testing.T) {
+	e := newTestEngine(t, 10) // sd = 100 美元
+	// 快照 tick: 价格腿过（0.85 ≥ 0.80）但位移腿不过（dev=+10 < 63 且 < sd）→ 拒。
+	o := snapRow(t, e, 59, func(x *flip.Tick) { x.BinPrice = testAnchor + 10 })
+	if o.OK || o.RejectReason != RejectLegOut {
+		t.Fatalf("快照应被位移腿拒, 得到 ok=%v reason=%s", o.OK, o.RejectReason)
+	}
+	// 仍未达标的一 tick: 一行不落（被拒的 tick 不落行, 没有 RejectReason 段可挂）。
+	if out := e.ProcessTick(tailTick(58, func(x *flip.Tick) { x.BinPrice = testAnchor + 20 })); len(out) != 0 {
+		t.Fatalf("监听段未达标的 tick 不该落行, 得到 %+v", out)
+	}
+	// 达标: dev=+100 → 落 scan（带假想股数, OK 恒真）。
+	out := e.ProcessTick(tailTick(57))
+	if len(out) != 1 || out[0].Kind != KindScan {
+		t.Fatalf("监听段首个达标 tick 应落 1 行 scan, 得到 %+v", out)
+	}
+	if s := out[0]; !s.OK || s.Shares != 2/0.92 || s.FrameT != 60 {
+		t.Fatalf("scan 行应带假想股数 stake/hotAsk 且 FrameT=60: %+v", s)
+	}
+	if l := e.Latches(); !l.Scan {
+		t.Fatalf("监听闩锁应转真, 得到 %+v", l)
 	}
 }
 

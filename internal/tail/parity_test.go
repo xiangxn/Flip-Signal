@@ -15,7 +15,8 @@ import (
 // parity_test.go —— Go 引擎 ↔ python 回测的逐窗对账（**opt-in**）。
 //
 // 重放 data/btc/events_*.jsonl（14 天）驱动本包引擎，断言五格聚合等于
-// python/v4/13_tail_sweep.py + 15_tail_sweep_union_sigma.py 的 oracle。
+// python/v4/13_tail_sweep.py + 15_tail_sweep_union_sigma.py 的 oracle，断言监听
+// 增量（B∖A）等于 16_tail_t150_scan.py 的 scan60∖snap60。
 // 与 cmd/btreplay 同一形制（那边对 flip 做同样的事），区别只在本文件是**测试**：
 // `go test` 触发、不新增交付二进制。
 //
@@ -34,6 +35,7 @@ import (
 //
 //	frame 行（rem ≤ frame_rem 150） ⇔ snapshots(T=150) 的首个有效 tick
 //	snap  行（rem ≤ rem_start   60） ⇔ snapshots(T=60)   的首个有效 tick
+//	scan  行（snap 之后首个达标）   ⇔ scan60∖snap60（16_tail_t150_scan.py 的监听增量）
 //
 // 两边**都要**再按「快照 tick 上 spot 与 twap 同时在场」过滤才是同一宇宙
 // （python 是整窗丢弃，Go 是落一行 missing_spot/missing_twap 后继续——记录更全，
@@ -55,11 +57,22 @@ var parityOracle = []struct {
 }
 
 // paritySnap 把一条 snap 观测与它所属事件的官方结果配对（Observation 本身不带
-// outcome——结算字段在 Record 段，本测试没有 recorder）。
+// outcome——结算字段在 Record 段，本测试没有 recorder）。listen 行（KindScan）共用
+// 同一形制——判定与 P&L 公式都相同，区别只在「有没有真下单」。
 type paritySnap struct {
 	obs     Observation
 	outcome int
 }
+
+// parityScanOracle = 监听增量 B∖A 的 python oracle（2026-09-23 现算核对）:
+// B（rem≤60 起首个达标 tick）n=2021 WR 99.26% +43.93U 减去 A（快照）n=1536
+// WR 99.61% +36.93U。⚠️ 该增量**不显著**（日级 bootstrap 95% 区间跨 0:
+// [−9.1, +22.5], 2000 次重采样）——它正是本行的存在理由: 只登记、不改引擎。
+var parityScanOracle = struct {
+	n  int
+	wr float64
+	pl float64
+}{485, 98.14, 7.0}
 
 // TestParityBacktest 是 14 天全量对账（唯一一条 Go↔py 红线测试）。
 func TestParityBacktest(t *testing.T) {
@@ -77,7 +90,9 @@ func TestParityBacktest(t *testing.T) {
 	var (
 		frames, framesUni int // 帧行: 全部 / 通过 spot+twap 在场
 		snaps, snapsUni   int // snap 行: 全部 / 同上
+		scans             int // 监听增量行（B∖A, 只记录; 同样取 spot+twap 在场的宇宙）
 		universe          []paritySnap
+		scanUniverse      []paritySnap
 	)
 	for i := range events {
 		ev := &events[i]
@@ -91,7 +106,8 @@ func TestParityBacktest(t *testing.T) {
 		eng := NewEngine(cfg)
 		eng.BeginWindow(ev.TwapOpen, hb)
 
-		done := false
+		// ⚠️ 不在 snap 行处 break: 监听段（只记录）要继续跑到闭市, 否则这条增量
+		// 曲线永远没法与 python 的 scan60 对账（见 parityScanOracle）。
 		for _, tk := range ev.Ticks {
 			for _, o := range eng.ProcessTick(tk) {
 				present := o.Spot > 0 && o.Twap > 0 // python 的宇宙: 缺一则整窗丢弃（13:99-101）
@@ -103,14 +119,20 @@ func TestParityBacktest(t *testing.T) {
 					}
 				case KindSnap:
 					snaps++
-					done = true
 					if present {
 						snapsUni++
 						universe = append(universe, paritySnap{obs: o, outcome: *ev.Outcome})
 					}
+				case KindScan:
+					// 宇宙同 snap: python 的 scan60 也要求该 tick spot+twap 在场
+					//（valid_ticks 逐 tick 过滤），缺 twap 的 tick 它根本看不到。
+					if present {
+						scans++
+						scanUniverse = append(scanUniverse, paritySnap{obs: o, outcome: *ev.Outcome})
+					}
 				}
 			}
-			if done || tk.Rem <= 0 {
+			if tk.Rem <= 0 {
 				break
 			}
 		}
@@ -127,7 +149,32 @@ func TestParityBacktest(t *testing.T) {
 	if frames < framesUni || snaps < snapsUni {
 		t.Errorf("全部行数 frame=%d snap=%d 不得少于宇宙窗数 %d/%d", frames, snaps, framesUni, snapsUni)
 	}
-	t.Logf("行数: frame %d（宇宙 %d）snap %d（宇宙 %d）", frames, framesUni, snaps, snapsUni)
+	t.Logf("行数: frame %d（宇宙 %d）snap %d（宇宙 %d）scan %d", frames, framesUni, snaps, snapsUni, scans)
+
+	// 监听增量（B∖A）与 python 的 scan60∖snap60 对账: n 必须是精确整数,
+	// WR/P&L 两位小数内相等（同五格口径: 赢 shares−stake, 输 −stake）。
+	if scans != parityScanOracle.n {
+		t.Errorf("监听增量宇宙窗数 = %d, 期望 %d（python scan60∖snap60 的 n）", scans, parityScanOracle.n)
+	}
+	if scans > 0 {
+		k := 0
+		pl := 0.0
+		for i := range scanUniverse {
+			o := &scanUniverse[i].obs
+			if flip.WonFor(o.Side, scanUniverse[i].outcome) {
+				k++
+				pl += cfg.Stake/o.HotAsk - cfg.Stake
+			} else {
+				pl -= cfg.Stake
+			}
+		}
+		if wr := float64(k) / float64(scans) * 100; math.Abs(wr-parityScanOracle.wr) > 5e-3 {
+			t.Errorf("监听增量 WR = %.4f%%, 期望 %.2f%%", wr, parityScanOracle.wr)
+		}
+		if math.Abs(pl-parityScanOracle.pl) > 5e-3 {
+			t.Errorf("监听增量 P&L = %+.4fU, 期望 %+.2fU", pl, parityScanOracle.pl)
+		}
+	}
 
 	// 五格聚合（P&L 口径 = 13_tail_sweep.py 的 stat: 赢 shares−stake, 输 −stake）
 	for _, ora := range parityOracle {

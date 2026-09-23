@@ -9,15 +9,20 @@
 // + Binance BTCUSDT spot（位移腿）。锚走决策 #15 的精确取锚（边界那一秒的推送,
 // 500ms × 40 = 20s 预算）；σ 走 flip.HistState（前 ≤18 已完窗 |close−anchor| 均值）。
 //
-// ⚠️ 本窗**至多两行**（2026-09-23 用户口径「两帧折中」，见 tail.Config.FrameRem）:
+// ⚠️ 本窗**至多三行**（2026-09-23 用户口径「两帧折中」+ 监听对账，见 tail.KindScan）:
 //   - `rem ≤ frame_rem(150)` 的首个有效 tick → **帧行**（kind=frame）: 只落盘原始快照,
 //     不判定、绝不下单——离线可据此复算 T=150 及更早的规则形态;
 //   - `rem ≤ rem_start(60)` 的首个有效 tick → **决策快照**（kind=snap）: 五格判定 +
-//     执行/结算。**只有这一行可能下单**。
+//     执行/结算。**只有这一行可能下单**;
+//   - 决策快照**之后**第一个 ⑤ 达标的 tick → **监听对账行**（kind=scan）: 只记录、
+//     不过风控闸、绝不下单。它回答「若把一次快照改成 rem≤60 起持续监听, 会在哪里
+//     成交」——**仅在 snap 行未达标时**才可能有（snap 达标则两口径同 tick, 冗余）。
+//     仍注册结算轮询拿官方 outcome（否则无法离线算它的 P&L; snap 被拒的窗没有
+//     别的可结算行）。所有 P&L 聚合都按 Kind 过滤, 见 tail.Recorder.DailyPnl 注。
 //
 // 记录三族（前缀刻意与 flip 的 touches_/windows_/winstats_ 不重合）:
 //
-//	tail_YYYY-MM-DD.jsonl      每窗 ≤2 行（frame + snap），观测/成交/结算
+//	tail_YYYY-MM-DD.jsonl      每窗 ≤3 行（frame + snap + scan），观测/成交/结算
 //	tailwin_YYYY-MM-DD.jsonl   每完成窗 1 行（σ 重启本地预热的数据源）
 //	tailstats_YYYY-MM-DD.jsonl **严格每窗 1 行**（tick 健康度 + skip 原因 + 锚状态）
 //
@@ -218,12 +223,13 @@ func (rt *runtimeState) Snapshot() tail.LiveSnapshot {
 		snap.AnchorArrivedMs = ai.atMs - snap.EventStart*1000
 	}
 
-	// 本窗 tick 健康度与两个闩锁放锁外: 引擎自锁（诊断计数, 与本窗同一窗口上下文）。
+	// 本窗 tick 健康度与三个闩锁放锁外: 引擎自锁（诊断计数, 与本窗同一窗口上下文）。
 	// 窗口间（clearWindow 后 Engine=nil）为 nil——前端隐藏本窗统计块、闩锁全灭。
 	if eng != nil {
 		st := eng.WindowStats()
 		snap.Stats = &st
-		snap.FrameSent, snap.SnapSent, snap.AnchorFrozen = eng.LatchState()
+		l := eng.Latches()
+		snap.FrameSent, snap.SnapSent, snap.ScanSent, snap.AnchorFrozen = l.Frame, l.Snap, l.Scan, l.Frozen
 	}
 
 	// live/风控摘要放锁外: Exec 构造后不变且方法内部自锁（Recorder 域, 与窗口快照无关）
@@ -445,7 +451,8 @@ func main() {
 		10*time.Second,
 		func(conditionID string, outcome int) error {
 			// Resolve 返回 false = recorder.pending 中无此市场（重复回调/已结算摘除）。
-			// ⚠️ 帧行不注册结算, 故本族只有 snap 行可能命中（一窗至多一行, 无歧义）。
+			// ⚠️ 帧行不注册结算, 注册的只有 snap 与 scan 行——而两者**按窗口互斥**
+			// （scan 只在 snap 未达标时产出）, 故 pending 里每窗至多一条, 无歧义。
 			if !recorder.Resolve(conditionID, outcome, time.Now()) {
 				log.Printf("[Tail] ⚠️ 结算回填未命中 %s outcome=%d（pending 中无此市场）",
 					conditionID, outcome)
@@ -674,6 +681,9 @@ func main() {
 		// 为键, 后记覆盖先记 → 先记的一笔永不结算）且可能同窗二次下单。
 		// ⚠️ 只认 KindSnap: 帧行存在**不足以**跳窗（帧在 rem≤150、快照在 rem≤60，
 		// 中间有 90s 的崩溃窗口）——那种情形要续跑, 帧的重写由 HandleFrame 自己跳过。
+		// ⚠️ 整窗跳过的代价含**监听对账行**: 崩溃于 snap 与 scan 之间时该窗的 scan
+		// 样本一起丢（它不可补——那个 tick 早已过去）。一窗样本的缺失 vs 双记一笔
+		// 真实仓位, 取舍显然（scan 是反事实, 不能为它冒重下单的风险）。
 		if recorder.HasKind(conditionID, tail.KindSnap) {
 			log.Printf("[Cycle] ⚠️ 窗口 %s 已有决策快照（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
 			logStats(conditionID, slug, nextStart.Unix(), 0, 0, tail.WindowStats{}, "dup_record", anchorInfo{})
@@ -778,13 +788,24 @@ func main() {
 				lastSampleAt = time.Now()
 				lastTick = runtime.tick(tickTime, rem, cfg.Feed.MaxSpotAgeMs)
 
-				// 引擎驱动: 0~2 行（帧 + 决策快照）。**帧行只落盘**——它不带判定、
-				// 更不带仓位, 走执行路径会让本窗在价格还没到 0.80 时就下单。
+				// 引擎驱动: 0~3 行（帧 + 决策快照 + 监听对账行）。三条路径互不合并:
+				//   - 帧行只落盘（不带判定、不带仓位, 走执行路径会在价格没到 0.80 时就下单）;
+				//   - 监听行只落盘（不过风控闸、不碰执行器——它是反事实样本不是仓位）;
+				//   - 只有决策快照进执行路径。
 				for _, o := range engine.ProcessTick(lastTick) {
-					if o.Kind == tail.KindFrame {
+					switch o.Kind {
+					case tail.KindFrame:
 						if r := exec.HandleFrame(&o, conditionID, slug, nextStart.Unix()); r != nil {
 							log.Printf("[Tail] 📸 帧已落盘 %s rem=%d hot=%s ask=%.3f（原始快照, 不判定）",
 								conditionID, o.Rem, o.Side, o.HotAsk)
+						}
+						continue
+					case tail.KindScan:
+						// 监听口径对账行: 只记录。**仍要注册结算**——它是该窗唯一能拿到
+						// 官方 outcome 的行（snap 被拒的窗没有别的可结算行）, 结算后
+						// 才能在离线脚本里与快照口径逐窗配对算 P&L（isSettlable 已收）。
+						if r := exec.HandleScan(&o, conditionID, slug, nextStart.Unix()); r != nil && r.OK {
+							resolutionPoller.Register(conditionID, slug)
 						}
 						continue
 					}
@@ -976,11 +997,14 @@ func warnLiveStartup(r *tail.Recorder) {
 	}
 	// 混合目录提示: 当日已有 paper 行（ExecStatus 空）混入会污染信号频率口径与日亏
 	// 现算线——live 建议独立 runtime.output_dir（如 data/tail-live）。
+	// ⚠️ 判据必须限定 **KindSnap**: 监听对账行（KindScan）恒为 paper 形态且**从不下单**,
+	// 它是本族标准输出的一部分（live 下也照记）, 拿它当「目录里混了 paper 行」的
+	// 证据会让本告警在 live 每次启动都误报。
 	// ⚠️ 两族（flip/tail）也建议分目录: 同一个目录会各写各的前缀, 不会串读,
 	// 但「当日 P&L」这类按目录现算的口径会把两族混在一起。
 	today := time.Now().UTC().Format("2006-01-02")
 	for _, rec := range r.Observations() {
-		if rec.Date == today && rec.ExecStatus == "" {
+		if rec.Date == today && rec.Kind == tail.KindSnap && rec.ExecStatus == "" {
 			log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（tail_%s.jsonl）—— live 建议独立 runtime.output_dir 目录, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
 			return
 		}

@@ -51,9 +51,12 @@ type tailStateResponse struct {
 	Dev     float64 `json:"dev"` // 位移（**美元**, 正 = 朝热门侧方向）
 	Sd      float64 `json:"sd"`  // 该窗 1σ 折美元（0 = σ 不可用）
 
-	// 本窗两个闩锁（帧 rem≤150 / 决策快照 rem≤60）+ 锚冻结
+	// 本窗三个闩锁（帧 rem≤150 / 决策快照 rem≤60 / 监听对账行）+ 锚冻结。
+	// scan_sent 的语义 = 「监听行已定」——snap 达标时它同时为真（两口径同 tick, 不再产
+	// 监听行）, 故三真 ≠ 本窗一定落过三条行, 前端文案按「已定」而非「已落」写。
 	FrameSent    bool `json:"frame_sent"`
 	SnapSent     bool `json:"snap_sent"`
+	ScanSent     bool `json:"scan_sent"`
 	AnchorFrozen bool `json:"anchor_frozen"`
 
 	// 三源新鲜度阈值（前端按此标红，勿硬编码）
@@ -138,14 +141,21 @@ type tailRecordResponse struct {
 	ExecNote   string  `json:"exec_note,omitempty"`
 }
 
-// tailDailyRow 是 tail /api/daily 的一行（= 共用骨架 + 帧/注数细分）。
+// tailDailyRow 是 tail /api/daily 的一行（= 共用骨架 + 帧/监听/注数细分）。
 //
-// Obs（骨架里 = 全部行数）在 tail 里 = Frames + Snaps; NotesPerDay 是判决频率闸的
-// 输入（文档 §5.2: ⑤ 应落 90~120 注/日）, 放在这里让「哪一天频率异常」一眼可见。
+// Obs（骨架里 = 全部行数）在 tail 里 = Frames + Snaps + Scans; NotesPerDay 是判决
+// 频率闸的输入（文档 §5.2: ⑤ 应落 90~120 注/日）, 放在这里让「哪一天频率异常」
+// 一眼可见。
+//
+// ⚠️ Scans（监听口径对账行）**不计入** Signals/Won/Lost/PnL 任何一格——它没有真实
+// 仓位, 混进 P&L 会让日表与熔断口径（DailyPnl 已排除 scan）对不上。它只出现在日表
+// 的「监听」列, 供「今天监听口径本会成交几笔」的粗看; 真正的配对判定在离线脚本
+// python/v4/18_tail_scan_register.py。
 type tailDailyRow struct {
 	dayAgg
 	Frames      int     `json:"frames"`        // 本日帧行数（rem≤150 的原始快照）
 	Snaps       int     `json:"snaps"`         // 本日决策快照行数（rem≤60）
+	Scans       int     `json:"scans"`         // 本日监听对账行数（只记录, 无仓位）
 	NotesPerDay float64 `json:"notes_per_day"` // 注/日（= Signals; 与 90~120 对照）
 }
 
@@ -232,6 +242,7 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 		Sd:              live.Sd,
 		FrameSent:       live.FrameSent,
 		SnapSent:        live.SnapSent,
+		ScanSent:        live.ScanSent,
 		AnchorFrozen:    live.AnchorFrozen,
 		Limits:          s.limits,
 		WindowStats:     live.Stats,
@@ -261,6 +272,15 @@ func (s *TailState) handleSnaps(w http.ResponseWriter, r *http.Request) {
 	writePage(w, r, all, tailRecTs, mapTailRecord, 50)
 }
 
+// handleScans 返回监听口径对账行（快照未达标后首个 ⑤ 达标 tick，时间倒序分页）。
+//
+// 与 snap 表分开的理由同 frames: 语义不同（本族唯一**没有仓位**的行）, 混排只会
+// 让「这一条到底下没下单」变得要逐行读 gate/exec 字段才能判。
+func (s *TailState) handleScans(w http.ResponseWriter, r *http.Request) {
+	all := filterKind(s.recorder.Observations(), tail.KindScan)
+	writePage(w, r, all, tailRecTs, mapTailRecord, 50)
+}
+
 // handleFrames 返回原始帧行（rem≤150 快照，时间倒序分页）。
 //
 // 与 snap 表分开的理由: 帧行是「那一刻市场长什么样」的原稿, 数量与快照行同阶
@@ -277,6 +297,7 @@ func (s *TailState) handleDaily(w http.ResponseWriter, r *http.Request) {
 	for _, d := range days {
 		total.Frames += d.Frames
 		total.Snaps += d.Snaps
+		total.Scans += d.Scans
 	}
 	if len(days) > 0 {
 		total.NotesPerDay = float64(total.Signals) / float64(len(days)) // 合计行 = 日均注数
@@ -376,13 +397,15 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 
 // collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（任意序输入，输出时间正序）。
 //
-// Obs（骨架字段）= 帧行 + 快照行——它回答的是「这一天引擎写了多少行」;
-// Frames/Snaps 拆开看, NotesPerDay = 当日 ok 信号数（逐日就是「注/日」本身, 与
-// 判决的频率闸 90~120 同量纲）。
+// Obs（骨架字段）= 帧行 + 快照行 + 监听行——它回答的是「这一天引擎写了多少行」;
+// Frames/Snaps/Scans 拆开看, NotesPerDay = 当日 ok 信号数（逐日就是「注/日」本身,
+// 与判决的频率闸 90~120 同量纲）。
+// ⚠️ scan 行在计数后**直接跳过**骨架的 ok/结算段: 它没有仓位, 归入 Signals/Won/Lost/PnL
+// 任何一格都会与 DailyPnl（熔断口径, 已排除 scan）打架。
 func (s *TailState) collectDaily() []tailDailyRow {
 	type acc struct {
-		agg          dayAgg
-		frames, snap int
+		agg                 dayAgg
+		frames, snap, scans int
 	}
 	byDay := map[string]*acc{}
 	for _, rec := range s.recorder.Observations() {
@@ -396,6 +419,9 @@ func (s *TailState) collectDaily() []tailDailyRow {
 		case tail.KindFrame:
 			a.frames++
 			continue // 帧行没有判定/仓位段
+		case tail.KindScan:
+			a.scans++
+			continue // 监听行只计数, 不进 P&L 骨架（无仓位, 见 tailDailyRow 注）
 		case tail.KindSnap:
 			a.snap++
 		}
@@ -422,7 +448,7 @@ func (s *TailState) collectDaily() []tailDailyRow {
 			g.WinRate = float64(g.Won) / float64(n)
 		}
 		out = append(out, tailDailyRow{
-			dayAgg: g, Frames: a.frames, Snaps: a.snap,
+			dayAgg: g, Frames: a.frames, Snaps: a.snap, Scans: a.scans,
 			NotesPerDay: float64(g.Signals),
 		})
 	}

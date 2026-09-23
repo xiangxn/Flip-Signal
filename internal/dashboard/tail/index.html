@@ -99,6 +99,7 @@
       <div class="latches">
         <span class="latch" id="latchFrame">帧 · —</span>
         <span class="latch" id="latchSnap">快照 · —</span>
+        <span class="latch" id="latchScan">监听 · —</span>
         <span class="latch" id="latchAnchor">锚 · —</span>
       </div>
       <div class="win-grid">
@@ -164,6 +165,30 @@
       <div class="empty" id="snapsEmpty" hidden>暂无决策快照</div>
     </section>
 
+    <!-- 监听口径对账行（快照未达标后首个 ⑤ 达标 tick; 只记录、无仓位） -->
+    <section class="card collapsed" id="scansCard">
+      <div class="list-head">
+        <h2 class="list-toggle" tabindex="0" aria-expanded="false" title="点击折叠 / 展开"><span class="caret">▾</span>监听对账（rem ≤ 60 起, 只记录）</h2>
+        <button class="refresh" id="btnScans">刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table id="scansTable">
+          <thead><tr>
+            <th>时间</th><th>侧</th><th>rem</th><th>ask</th><th>dev$</th><th>sd$</th><th>五格</th><th>判定</th><th>份额</th><th>结果</th><th>P&amp;L</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="pager" id="scansPager" hidden>
+        <button class="pg" data-act="first" title="首页">«</button>
+        <button class="pg" data-act="prev" title="上一页">‹</button>
+        <span class="pg-info" id="scansPgInfo"></span>
+        <button class="pg" data-act="next" title="下一页">›</button>
+        <button class="pg" data-act="last" title="末页">»</button>
+      </div>
+      <div class="empty" id="scansEmpty" hidden>暂无监听行（只在快照未达标、监听段又达标时才产出）</div>
+    </section>
+
     <!-- 原始帧（rem ≤ 150，只记录不判定; 离线据此复算任意 T 的规则） -->
     <section class="card collapsed" id="framesCard">
       <div class="list-head">
@@ -203,7 +228,9 @@
       <div class="modal-body">
         <table id="dailyTable">
           <thead><tr>
-            <th>日期 (UTC)</th><th>帧</th><th>快照</th><th>注数</th><th>待结算</th><th>胜率</th><th>P&amp;L</th>
+            <th>日期 (UTC)</th><th>帧</th><th>快照</th>
+            <th title="监听口径对账行：快照未达标后首个 ⑤ 达标的 tick。只记录、无仓位，不计入注数与 P&amp;L">监听</th>
+            <th>注数</th><th>待结算</th><th>胜率</th><th>P&amp;L</th>
           </tr></thead>
           <tfoot></tfoot>
           <tbody></tbody>

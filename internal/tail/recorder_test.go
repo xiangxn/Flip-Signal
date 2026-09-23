@@ -521,6 +521,106 @@ func TestRecorderSignalsCountsDrawdown(t *testing.T) {
 	}
 }
 
+// TestRecorderScanRowIsolation 钉住监听对账行（KindScan）的四条红线:
+//  1. 可落盘、可结算（否则离线无从算它的 P&L）;
+//  2. **不进** DailyPnl —— 它没有真实仓位, 混进去会拿一条反事实盈亏去开关熔断闸;
+//  3. **不进** Signals/Counts/MaxDrawdown —— 那些是决策快照的统计口径;
+//  4. 重启载入时进 pending（未结算的 scan 行要重新注册轮询）。
+func TestRecorderScanRowIsolation(t *testing.T) {
+	r, dir := newTestRecorder(t)
+	base := time.Date(2026, 9, 22, 12, 0, 0, 0, time.UTC).UnixMilli()
+
+	// 窗 1: 被否决的 snap（不入 pending、不进 P&L）+ 监听行（结算赢）。
+	rej := okSnap(base, flip.SideYes)
+	rej.OK, rej.RejectReason, rej.Shares = false, RejectLegOut, 0
+	if _, err := r.RecordObservation("0xc1", "s", 0, rej, 2); err != nil {
+		t.Fatal(err)
+	}
+	scan := okSnap(base, flip.SideYes)
+	scan.Kind, scan.Rem = KindScan, 40 // 监听段晚于快照
+	if _, err := r.RecordObservation("0xc1", "s", 0, scan, 2); err != nil {
+		t.Fatal(err)
+	}
+	if !r.Resolve("0xc1", flip.OutcomeUp, time.Unix(0, 0)) {
+		t.Fatal("scan 行应挂结算（isSettlable 必须收 scan）")
+	}
+	// 窗 2: 真实快照 ok → 结算赢。它才是当日 P&L 的唯一来源。
+	if _, err := r.RecordObservation("0xc2", "s", 0, okSnap(base+300000, flip.SideYes), 2); err != nil {
+		t.Fatal(err)
+	}
+	r.Resolve("0xc2", flip.OutcomeUp, time.Unix(0, 0))
+
+	// 2+3: 统计口径只认 snap 行（窗 1 的否决行 + 窗 2 的 ok 行 = 2; scan 不得计入）。
+	snap, ok, won := r.Counts()
+	if snap != 2 || ok != 1 || won != 1 {
+		t.Errorf("Counts = (%d, %d, %d), want (2, 1, 1)（scan 不得计入）", snap, ok, won)
+	}
+	if sigs := r.Signals(); len(sigs) != 1 || sigs[0].ConditionID != "0xc2" {
+		t.Errorf("Signals 混入 scan 行: %+v", sigs)
+	}
+	if dd := r.MaxDrawdown(); dd != 0 {
+		t.Errorf("MaxDrawdown = %v, want 0（两笔都赢; scan 不得计入）", dd)
+	}
+	// 2: DailyPnl 只吃 snap。
+	days := r.DailyPnl()
+	one := 2/0.92 - 2 // 单笔赢的 P&L
+	if len(days) != 1 || days[0].N != 1 || days[0].PnL < one-1e-9 || days[0].PnL > one+1e-9 {
+		t.Fatalf("DailyPnl 应按 1 笔 snap 计 %.4f, 得到 %+v（scan 混入即为 bug）", one, days)
+	}
+
+	// 1: 两行都落盘且 kind 正确。
+	lines := readLines(t, filepath.Join(dir, "tail_2026-09-22.jsonl"))
+	if len(lines) != 3 {
+		t.Fatalf("应有 3 行（rej snap + scan + ok snap）, 得到 %d", len(lines))
+	}
+	var kinds []string
+	for _, l := range lines {
+		var m map[string]any
+		if err := json.Unmarshal([]byte(l), &m); err != nil {
+			t.Fatal(err)
+		}
+		kinds = append(kinds, m["kind"].(string))
+	}
+	want := []string{KindSnap, KindScan, KindSnap}
+	for i := range want {
+		if kinds[i] != want[i] {
+			t.Fatalf("行 kind 序 = %v, want %v", kinds, want)
+		}
+	}
+
+	// 4: 重启载入——未结算的 scan 行进 pending。
+	r2, err := NewRecorder(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	if n := len(r2.PendingSignals()); n != 0 {
+		t.Errorf("本用例两行都已结算, 重启后 pending 应为 0, 得到 %d", n)
+	}
+
+	// 未结算的 scan 行: 重开一个目录单独验证。
+	dir3 := t.TempDir()
+	r3, err := NewRecorder(dir3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s3 := okSnap(base, flip.SideYes)
+	s3.Kind = KindScan
+	if _, err := r3.RecordObservation("0xc9", "s", 0, s3, 2); err != nil {
+		t.Fatal(err)
+	}
+	r3.Close()
+	r4, err := NewRecorder(dir3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r4.Close()
+	pend := r4.PendingSignals()
+	if len(pend) != 1 || pend[0].ConditionID != "0xc9" || pend[0].Kind != KindScan {
+		t.Fatalf("重启后未结算 scan 行应进 pending, 得到 %+v", pend)
+	}
+}
+
 // TestRecorderTodayStats 健康度读口: 只读当日文件、坏行跳过、无文件返回空。
 func TestRecorderTodayStats(t *testing.T) {
 	r, dir := newTestRecorder(t)

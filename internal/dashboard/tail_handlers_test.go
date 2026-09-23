@@ -326,8 +326,8 @@ func TestTailJudgeInsufficient(t *testing.T) {
 	var got judgeResp
 	getJSON(t, s.handleJudge, "/api/judge", &got)
 
-	if len(got.Grids) != 6 {
-		t.Fatalf("格数 = %d, 期望 6（①~⑤ + T=150 对照）", len(got.Grids))
+	if len(got.Grids) != 7 {
+		t.Fatalf("格数 = %d, 期望 7（①~⑤ + T=150 对照 + 监听增量）", len(got.Grids))
 	}
 	for _, g := range got.Grids {
 		if g.Ready {
@@ -337,9 +337,14 @@ func TestTailJudgeInsufficient(t *testing.T) {
 			t.Fatalf("格 %s 判词 = %q, 期望 %q", g.Rule, g.Verdict, tail.VerdictPending)
 		}
 		// 四个价格腿在本行全真 → 五格与 T=150 对照格都应收进这一注
-		// （T=150 格的结果借自同窗快照行, 见 judge.go 的 outcomeByCond）
-		if g.N != 1 {
-			t.Fatalf("格 %s N = %d, 期望 1", g.Rule, g.N)
+		// （T=150 格的结果借自同窗快照行, 见 judge.go 的 outcomeByCond）。
+		// 监听增量格**为 0**: 本用例没落 scan 行（snap 达标时引擎本就不产它）。
+		want := 1
+		if g.Rule == "scan" {
+			want = 0
+		}
+		if g.N != want {
+			t.Fatalf("格 %s N = %d, 期望 %d", g.Rule, g.N, want)
 		}
 	}
 	// ⑤ 本尊由 handler 单独摘出来（前端判决卡直取, 不按字符串找）

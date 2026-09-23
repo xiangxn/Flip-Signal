@@ -75,7 +75,7 @@ type Grid struct {
 	FreqOK      bool    `json:"freq_ok"`       // 频率闸是否在带内
 }
 
-// 五格 + T=150 对照格的口径描述（顺序即展示顺序）。
+// 五格 + 两个对照格的口径描述（顺序即展示顺序）。
 var gridLabels = []struct {
 	rule  string
 	label string
@@ -86,20 +86,24 @@ var gridLabels = []struct {
 	{"4", "④ 联合（dev ≥ 63 或 dev ≥ sd）"},
 	{"5", "⑤ 定向（dev ≥ 63 或 40 ≤ sd ≤ dev）← 引擎下单格"},
 	{"t150", "T=150 的 ⑤（帧行复算, 对照；T 不可再调。只覆盖同窗快照已结算的窗口）"},
+	{"scan", "监听增量 B∖A（快照未达标后首个 ⑤ 达标 tick；只记录、无仓位）"},
 }
 
-// Judge 计算五格与 T=150 对照格的判决读数。
+// Judge 计算五格与两个对照格（T=150 / 监听增量）的判决读数。
 //
-// 输入是 Recorder.Observations() 的全量行（frame + snap 混装）:
+// 输入是 Recorder.Observations() 的全量行（frame + snap + scan 混装）:
 //   - 主格用 kind=snap 行, 规则取落盘时已算好的 Rules.RuleN();
 //   - T=150 对照格用 kind=frame 行, 规则由 EvalRules 现算（帧行不带规则标记）,
 //     结算取自**同窗快照行**（见 outcomeByCond 注释）;
+//   - 监听增量格用 kind=scan 行（自带结算与仓位字段, 直接聚合——见 pickScans）;
 //   - **被闸行（gate_reason 非空）一律剔除**（映射文档 §2.2: 纸面被闸行照记照结算,
-//     分析须显式过滤——它们是「不熔断会怎样」的反事实, 不是策略样本）;
+//     分析须显式过滤——它们是「不熔断会怎样」的反事实, 不是策略样本）。scan 行
+//     **从不过闸**（HandleScan 不碰 gate）, 故这一条对它天然无效;
 //   - 未结算行（Won == nil）不计入 n/胜率/P&L（判决只吃已结算样本）。
 func Judge(recs []*Record, cfg Config) []Grid {
 	snaps := make([]*Record, 0, len(recs))
 	frames := make([]*Record, 0, len(recs))
+	scans := make([]*Record, 0, len(recs))
 	// 窗口 → 官方结果（0=Up / 1=Down）。**含被闸行**: gate 只决定「这一注算不算
 	// 策略样本」, 不改变那个窗口市场的真实结果。
 	//
@@ -125,6 +129,8 @@ func Judge(recs []*Record, cfg Config) []Grid {
 			snaps = append(snaps, rec)
 		case KindFrame:
 			frames = append(frames, rec)
+		case KindScan:
+			scans = append(scans, rec)
 		}
 	}
 
@@ -134,6 +140,8 @@ func Judge(recs []*Record, cfg Config) []Grid {
 		switch g.rule {
 		case "t150":
 			picked = pickFrames(frames, cfg, outcomeByCond, func(r Rules) bool { return r.Rule5() })
+		case "scan":
+			picked = pickScans(scans)
 		default:
 			n := int(g.rule[0] - '0')
 			picked = pickSnaps(snaps, n)
@@ -164,6 +172,29 @@ func pickSnaps(recs []*Record, n int) []*Record {
 			ok = rec.Rules.Rule5()
 		}
 		if ok {
+			out = append(out, rec)
+		}
+	}
+	return out
+}
+
+// pickScans 取已结算的 kind=scan 行（监听增量格）。
+//
+// 与 pickSnaps 的两点不同:
+//   - **不再判规则**: scan 行是引擎只在那个 tick 达标时才产出的（OK 恒真, 落盘前已过
+//     `Rules.Rule5() && spot>0 && histBps>0`）, 被拒的 tick 根本不落行——没有
+//     RejectReason 段可读, 也就无需重判;
+//   - **不需要 frameAsBet**: scan 行落盘时就按 cfg.Stake 与 hot_ask 折好了
+//     Stake/Shares（假想仓位）, 故直接聚合即可。⚠️ 这些字段是**反事实记账**, 不代表
+//     账户里真有仓位——这也是它不进 DailyPnl 的原因（见 recorder.DailyPnl 注）。
+//
+// 与 snap 的互斥性保证这一格恰是 **B∖A**: 引擎在 snap 达标时不再产监听行, 故 scan
+// 行的窗口集合 = 「快照没成交、监听段成交」的那些窗（B = A 格 + 本格, 离线脚本
+// python/v4/18_tail_scan_register.py 据此配对算增量与区间）。
+func pickScans(recs []*Record) []*Record {
+	out := make([]*Record, 0, len(recs))
+	for _, rec := range recs {
+		if rec.Won != nil {
 			out = append(out, rec)
 		}
 	}

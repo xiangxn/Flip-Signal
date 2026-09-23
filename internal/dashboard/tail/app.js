@@ -287,12 +287,21 @@
       slugLink.removeAttribute('href');
     }
 
-    // 两个闩锁 + 锚（帧 rem≤150 / 快照 rem≤60，闸值取自配置）
+    // 三个闩锁 + 锚（帧 rem≤150 / 快照 rem≤60 / 监听行，闸值取自配置）
     var fr = CFG ? CFG.frame_rem : 150, rs = CFG ? CFG.rem_start : 60;
     $('latchFrame').textContent = '帧（rem≤' + fr + '）· ' + (s.frame_sent ? '已落' : '未落');
     $('latchFrame').className = 'latch' + (s.frame_sent ? ' on' : '');
     $('latchSnap').textContent = '快照（rem≤' + rs + '）· ' + (s.snap_sent ? '已落' : '未落');
     $('latchSnap').className = 'latch' + (s.snap_sent ? ' on' : '');
+    // 监听闩锁的「已定」= 本窗不会再产监听行——快照达标时它同时为真（两口径同 tick，
+    // 监听行冗余）; 未达标时它要等监听段第一个达标 tick 才转真; 一直没人达标则窗口
+    // 结束时仍是 false（引擎状态转 Done）——那种情形显示「无」而不是「未定」，免得
+    // 看着像还在等。文案用「已定」而非「已落」以免读者以为一定有第三行落盘。
+    var scanTxt = s.scan_sent
+      ? (s.snap_sent ? '已定（快照已达标本窗无监听行）' : '已定')
+      : (s.engine_state === 'Done' ? '无（本窗未达标）' : '未定');
+    $('latchScan').textContent = '监听 · ' + scanTxt;
+    $('latchScan').className = 'latch' + (s.scan_sent ? ' on' : '');
     var anchorTxt;
     if (s.anchor > 0) {
       anchorTxt = '锚 ' + s.anchor.toFixed(2) + (s.anchor_exact ? '（边界精确命中' : '（未精确命中') +
@@ -395,14 +404,20 @@
   var PAGE_SIZE = 50;
   var LISTS = {
     snaps: { url: '/api/snaps', cardId: 'snapsCard', pagerId: 'snapsPager', infoId: 'snapsPgInfo', page: 1, pages: 1, total: 0, auto: true },
+    scans: { url: '/api/scans', cardId: 'scansCard', pagerId: 'scansPager', infoId: 'scansPgInfo', page: 1, pages: 1, total: 0, auto: true },
     frames: { url: '/api/frames', cardId: 'framesCard', pagerId: 'framesPager', infoId: 'framesPgInfo', page: 1, pages: 1, total: 0, auto: true }
   };
 
   // 快照行: 时间 侧 rem ask dev$ sd$ 五格 判定 份额 结果 P&L
-  function renderSnaps(resp) {
-    var tb = document.querySelector('#snapsTable tbody');
+  function renderSnaps(resp) { renderBetRows(resp, '#snapsTable tbody', 'snapsEmpty'); }
+  // 监听行与快照行**同列**（同样带判定、假想份额与结算结果）——区别只在语义:
+  // 它从不过风控闸（gate_reason 恒空）、也从没真实下过单。
+  function renderScans(resp) { renderBetRows(resp, '#scansTable tbody', 'scansEmpty'); }
+
+  function renderBetRows(resp, tbSel, emptyId) {
+    var tb = document.querySelector(tbSel);
     tb.innerHTML = '';
-    $('snapsEmpty').hidden = resp.items.length > 0;
+    $(emptyId).hidden = resp.items.length > 0;
     resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
       var status;
@@ -467,7 +482,9 @@
         return;
       }
       L.pages = pages;
-      if (name === 'snaps') renderSnaps(resp); else renderFrames(resp);
+      if (name === 'snaps') renderSnaps(resp);
+      else if (name === 'scans') renderScans(resp);
+      else renderFrames(resp);
       updatePager(name);
     });
   }
@@ -513,7 +530,7 @@
   // localStorage（key 带 tail. 前缀，与 flip 面板同浏览器互不干扰）。默认帧表收起
   // （它是原稿，快照表才是结论）。localStorage 不可用（隐私模式）时静默降级。
   var COLLAPSE_KEY = 'tail.collapsedTables';
-  var COLLAPSE_DEFAULT = { snaps: false, frames: true };
+  var COLLAPSE_DEFAULT = { snaps: false, scans: true, frames: true };
 
   function loadCollapsed() {
     try {
@@ -574,6 +591,8 @@
       '<td class="' + (isTotal ? 'muted' : '') + '">' + tag + '</td>' +
       '<td>' + r.frames + '</td>' +
       '<td>' + r.snaps + '</td>' +
+      // 监听列: 只记录、无仓位的对账行（不进注数/P&L, 见 /api/daily 的 tailDailyRow 注）
+      '<td class="muted">' + r.scans + '</td>' +
       '<td>' + r.signals + '</td>' +
       '<td>' + r.pending + '</td>' +
       '<td>' + wr + '</td>' +
@@ -644,15 +663,19 @@
   // 自动轮询只刷第 1 页（最新）; 用户翻历史页期间暂停对应表; 收起的表不拉（展开时补拉）
   function tickLists() {
     if (LISTS.snaps.auto && !isCollapsed('snaps')) fetchList('snaps');
+    if (LISTS.scans.auto && !isCollapsed('scans')) fetchList('scans');
     if (LISTS.frames.auto && !isCollapsed('frames')) fetchList('frames');
   }
 
   $('btnSnaps').addEventListener('click', function () { fetchList('snaps'); });
+  $('btnScans').addEventListener('click', function () { fetchList('scans'); });
   $('btnFrames').addEventListener('click', function () { fetchList('frames'); });
   $('btnJudge').addEventListener('click', tickJudge);
   bindPager('snaps');
+  bindPager('scans');
   bindPager('frames');
   bindCollapse('snaps');
+  bindCollapse('scans');
   bindCollapse('frames');
 
   fetchJSON('/api/config', function (c) { CFG = c; renderConfig(); });

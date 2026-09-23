@@ -20,15 +20,40 @@ import "github.com/necklace/flip-signal/internal/flip"
 // ── 行类型 ──
 
 // 行类型标识（Observation.Kind 取值 = tail_*.jsonl 的 kind 字段）。
-// 一个窗口至多两行: 先 frame（rem≤FrameRem 首帧, 只记录）、后 snap（rem≤RemStart
-// 首帧, 判定 + 执行）。见 Config.FrameRem 的「两帧折中」说明。
+// 一个窗口至多三行: 先 frame（rem≤FrameRem 首帧, 只记录）、再 snap（rem≤RemStart
+// 首帧, 判定 + 执行）、最后 scan（**仅当 snap 未达标时**才可能有, 只记录）。
+// 见 Config.FrameRem 的「两帧折中」说明与 KindScan 的类型注释。
 const (
 	// KindFrame 原始快照帧: 只记录 §5.3 要求的字段, 不下单、不带规则标记
 	//（离线据此复算任意 T 的规则）。
 	KindFrame = "frame"
 	// KindSnap 决策快照帧（策略本体 T=60）: 带五格规则标记 + ok/reject + 执行字段。
 	KindSnap = "snap"
+	// KindScan 监听口径对账行（2026-09-23 追加）: 决策快照**之后**第一个 ⑤ 达标的
+	// tick——回答「若把一次性快照改成『rem≤60 起持续监听、达标即下单』, 会在哪里成交」。
+	//
+	// ⚠️ 三个不可混淆的点:
+	//   - **绝不下单**: 本行只落盘（exec_state.HandleScan 不碰 Ex、不过风控闸）, 它是一条
+	//     「另一个口径本会成交」的反事实样本, 不是仓位。风控闸之所以**不**施加于它:
+	//     对照物是回测的监听口径 B（14 天回放里没有熔断器）, 施加熔断会让两边不可比。
+	//   - **会结算**: 注册 gamma 结算轮询拿官方 outcome, 只为把该反事实算成 P&L
+	//     （否则没有任何地方能知道那一窗最后谁赢）——故它满足 isSettlable。所有 P&L
+	//     聚合（DailyPnl 日亏熔断 / MaxDrawdown / Judge 五格 / 逐日表）都**必须**按
+	//     Kind 过滤, 见 recorder.go 的 isSettlable 与 DailyPnl 注。
+	//   - **与 snap 互斥**: 只在 snap 行未达标时才产出（snap 达标则两口径同 tick,
+	//     本行冗余）。故任一窗口**至多一条**可结算行（要么 snap、要么 scan）,
+	//     Recorder.pending 以 conditionID 为键不会打架。
+	//
+	// 判定语义 = python 的「监听」口径（16_tail_t150_scan.py 的 tail_ticks）:
+	// **逐 tick 独立**求 ⑤, 某个 tick 缺 spot/twap 只是跳过它（不像 snap 那样整窗丢弃）。
+	// 缺 spot 时 dev=0 天然过不了规则; 缺 twap 不影响 ⑤（规则不用它）。
+	KindScan = "scan"
 )
+
+// isKnownKind 判断 kind 是否为本族认识的行类型（载入期的 schema 守卫用）。
+func isKnownKind(kind string) bool {
+	return kind == KindFrame || kind == KindSnap || kind == KindScan
+}
 
 // 拒绝原因常量（Record.RejectReason 取值; 空 + ok=false 不应出现）。
 //
@@ -70,7 +95,11 @@ type engineState int
 
 const (
 	stateWatching engineState = iota // 等待本轮的两帧（frame ≤ FrameRem / snap ≤ RemStart）
-	stateDone                        // 决策快照已产出或窗口已结束
+	// stateScanning 决策快照已产出, 监听段: 只可能再产出一条 **只记录** 的
+	// KindScan 对账行（或窗口结束）。判定与下单已在 snap 那一步闭环, 本段不可再
+	// 决策、更不可下单——它存在的唯一理由是回答「监听口径本会在哪里成交」。
+	stateScanning
+	stateDone // 窗口已结束（rem==0 终 tick）或监听对账行已产出/不可能再产出
 )
 
 // String 返回状态机可读名（日志用）。
@@ -78,6 +107,8 @@ func (s engineState) String() string {
 	switch s {
 	case stateWatching:
 		return "Watching"
+	case stateScanning:
+		return "Scanning"
 	case stateDone:
 		return "Done"
 	}
@@ -119,14 +150,15 @@ func (r Rules) Rule4() bool { return r.Price && (r.Dev63 || r.Sigma) }
 // （docs/tail_sweep_2026-09-22.md §1.3）。
 func (r Rules) Rule5() bool { return r.Price && (r.Dev63 || r.SigmaUSD40) }
 
-// Observation 是一次快照观测（帧行与快照行共用本类型, 由 Kind 区分）。
+// Observation 是一次快照观测（帧行/快照行/监听对账行共用本类型, 由 Kind 区分）。
 //
 // 字段即 docs/tail_sweep_2026-09-22.md §5.3 要求的记录集（四档报价 + spot + twap
 // + anchor + hist_bps + rem + book_latency_ms + spot_age_ms）+ 判定派生量。
-// 帧行只填原始段（Rules/OK/RejectReason/Shares 留空）——离线可据此复算任意 T 的规则。
+// 帧行只填原始段（Rules/OK/RejectReason/Shares 留空）——离线可据此复算任意 T 的规则;
+// 监听对账行（KindScan）填满判定段但**恒 OK**（引擎只在达标时才产出它）。
 type Observation struct {
-	Kind   string `json:"kind"`    // KindFrame | KindSnap
-	FrameT int    `json:"frame_t"` // 本行闸值（frame = Config.FrameRem, snap = Config.RemStart）
+	Kind   string `json:"kind"`    // KindFrame | KindSnap | KindScan
+	FrameT int    `json:"frame_t"` // 本行闸值（frame = Config.FrameRem, snap/scan = Config.RemStart）
 	Ts     int64  `json:"ts"`      // 快照 tick 采样时刻（unix 毫秒）
 	Rem    int    `json:"rem"`     // 快照 tick 的窗口剩余秒（≤ frame_t）
 
@@ -155,11 +187,11 @@ type Observation struct {
 	SpotAgeMs int64 `json:"spot_age_ms"`     // spot 距本地接收毫秒（-1 = 尚无推送; 诊断）
 	TwapAgeMs int64 `json:"twap_age_ms"`     // TWAP 距上次推送毫秒（诊断）
 
-	// ── 决策（仅 snap 行）──
+	// ── 决策（snap 与 scan 行; 帧行全空）──
 	Rules        Rules   `json:"rules"`                   // 四条原始腿（①②③④⑤ 由 RuleN() 派生）
 	OK           bool    `json:"ok"`                      // 是否构成信号（= Rules.Rule5() 且输入齐备）
-	RejectReason string  `json:"reject_reason,omitempty"` // 未构成信号的原因
-	Shares       float64 `json:"shares,omitempty"`        // 目标股数 = Stake/HotAsk（仅 ok=true）
+	RejectReason string  `json:"reject_reason,omitempty"` // 未构成信号的原因（scan 行恒空——它只在 OK 时产出）
+	Shares       float64 `json:"shares,omitempty"`        // 目标股数 = Stake/HotAsk（仅 ok=true; scan 行为**假想**股数）
 }
 
 // Record 是一条快照观测的完整落盘记录（纸面/实盘同 schema）。
