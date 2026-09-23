@@ -12,7 +12,7 @@ source .env
 SYMBOL="${1:-}"
 
 if [ -z "$SYMBOL" ]; then
-    echo "用法: $0 <v4|v3|btc|eth>"
+    echo "用法: $0 <v4|v3|btc|eth|v4live>"
     exit 1
 fi
 
@@ -29,8 +29,11 @@ case "$SYMBOL" in
     eth)
         REMOTE_DIR="/root/lastrading/eth/data"
         ;;
+    v4live)
+        REMOTE_DIR="/root/lastrading/data/v4live"
+        ;;
     *)
-        echo "错误: 无效参数 '$SYMBOL'，只支持 v4、v3、btc 或 eth"
+        echo "错误: 无效参数 '$SYMBOL'，只支持 v4、v3、btc、v4live 或 eth"
         exit 1
         ;;
 esac
