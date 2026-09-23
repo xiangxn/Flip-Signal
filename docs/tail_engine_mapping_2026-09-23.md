@@ -2,7 +2,8 @@
 
 > 策略规格 = [tail_sweep_2026-09-22.md](tail_sweep_2026-09-22.md)（§1 口径 / §5 纸面登记）。
 > 唯一权威规则源 = [python/v4/13_tail_sweep.py](../python/v4/13_tail_sweep.py)（主回测）
-> 与 [15_tail_sweep_union_sigma.py](../python/v4/15_tail_sweep_union_sigma.py)（联合格 σ / 门槛）。
+> 与 [15_tail_sweep_union_sigma.py](../python/v4/15_tail_sweep_union_sigma.py)（联合格 σ / 门槛）；
+> 监听口径（§2.4）的 oracle = [16_tail_t150_scan.py](../python/v4/16_tail_t150_scan.py)。
 > 引擎实现 = [cmd/tail/main.go](../cmd/tail/main.go) + [internal/tail/](../internal/tail/)。
 > 本文档固定**回测 ↔ 引擎记录 JSON ↔ 三个日志前缀**的映射，供纸面登记（§5.2 判据）
 > 与日常对账使用。与 dog@0.2 的关系：两族独立、方向相反，共用原语（`flip.Tick` /
@@ -14,6 +15,7 @@
 |---|---|---|---|---|
 | `T = 60`（尾盘快照） | `Tail.RemStart` | `tail.rem_start` | 60 | 首个 `rem ≤ 60` 的**有效** tick 取决策快照（策略本体） |
 | （纸面前置，§5.3） | `Tail.FrameRem` | `tail.frame_rem` | 150 | 首个 `rem ≤ 150` 的有效 tick **只记一行原始快照**，不判定不下单 |
+| `scan60∖snap60`（16 的监听增量） | —（复用 `Tail.RemStart`） | —（**无独立键**） | 60 | 快照未达标后的监听段，首个 ⑤ 达标的 tick 落 `kind=scan` **只记录**行——纸面口径对照，不是交易路径（§2.4） |
 | `PRICE_MIN = 0.80` | `Tail.PriceMin` | `tail.price_min` | 0.80 | 热门侧 ask ≥ 此值——**全部五格的前置**（见 §3.1） |
 | `DEV_USD = 63` | `Tail.DevMinUSD` | `tail.dev_min_usd` | 63 | 位移腿：`dev ≥ 63 美元` 即放行 |
 | `SIGMA_USD = 40` | `Tail.SigmaMinUSD` | `tail.sigma_min_usd` | 40 | σ 腿门槛：`sd ≥ 40 美元` 才允许「dev ≥ sd」放行（⑤ 相对 ④ 的唯一差别） |
@@ -35,7 +37,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 
 | 文件 | 粒度 | 用途 |
 |---|---|---|
-| `tail_YYYY-MM-DD.jsonl` | 每窗 ≤ 2 行（`kind=frame` / `kind=snap`） | §5.3 的纸面登记；判定 / 成交 / 结算全在这 |
+| `tail_YYYY-MM-DD.jsonl` | 每窗 ≤ 3 行（`kind=frame` / `kind=snap` / `kind=scan`） | §5.3 的纸面登记；判定 / 成交 / 结算全在这（`scan` = 只记录对账行，见 §2.4） |
 | `tailwin_YYYY-MM-DD.jsonl` | **每完成窗 1 行** | tail 自己的 σ 预热源（`flip.WindowEntry` 形状） |
 | `tailstats_YYYY-MM-DD.jsonl` | **严格每窗 1 行** | tick 健康度 + `skip` 原因 + 锚状态（§5.2 辅助闸门 3） |
 
@@ -49,7 +51,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 | python（13_tail_sweep.py） | 引擎 `Observation` json | 说明 |
 |---|---|---|
 | `event_start` | `event_start` | 窗口起点 unix 秒（**对账主键**） |
-| （按 T 的 snapshots） | `kind` + `frame_t` | `frame`+150 / `snap`+60；两行共用同一批字段 |
+| （按 T 的 snapshots） | `kind` + `frame_t` | `frame`+150 / `snap`+60；两行共用同一批字段（`scan` 行的 `frame_t` = `rem_start`，见 §2.4） |
 | — | `ts` / `rem` | 快照 tick 的采样时刻（unix 毫秒）/ 剩余秒（`≤ frame_t`） |
 | `yes_bid/yes_ask/no_bid/no_ask` | 同名字段 | 四档报价（§5.3 原始字段，离线可复算任意 T） |
 | `spot` | `spot` | Binance 最新价（0 = 缺失/陈旧 >2s） |
@@ -79,6 +81,34 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
    **不用 twap**，`missing_twap` 纯粹是为了与回测宇宙一致（n=1536 是在「spot 与 twap
    同时在场」的约束下算出来的）。
 
+### 2.4 监听对账行 `kind=scan`（2026-09-23 追加，**只记录**）
+
+**它回答什么**：现行快照口径 A = 「`rem ≤ 60` 的第一个有效 tick 取快照当场判定」。
+用户提出的口径 B = 「`rem ≤ 60` 起**持续监听**，第一个 ⑤ 达标的 tick 才下单」（更接近
+人工盯盘）。14 天回测里 B 比 A 只多 **+7.00U**、日级 bootstrap 95% 区间
+**[−9.1, +22.5] 跨 0**（n=485，WR 98.14%）⇒ 按 §5.2 判据**不显著**，**不改引擎**；
+改为在纸面上同窗配对攒样本，故引擎多产一类**不下单**的对账行。
+
+| 维度 | 语义 |
+|---|---|
+| 触发 | 第三个独立一次性闩锁：`snap` 行**未达标**（`ok=false`）后，监听段继续跑，第一个「⑤ 达标且 `spot>0 ∧ hist_bps>0`」的有效 tick 落一行 |
+| 不触发 | `snap` 已达标 ⇒ `scanSent` 立即置真、本窗**不产**监听行（⇒ `scan` 行的窗口集合 ≡ B∖A，B = snap 行 ∪ scan 行，同窗不重复计数） |
+| 何时停 | `rem == 0`（闭市）——状态机 `Watching → Scanning → Done`，`Done` 只在闭市 |
+| 判定 | `ok = Rule5() ∧ spot > 0 ∧ hist_bps > 0`；`shares = Stake/hot_ask`（**假想**股数，没真下单）；落行**只在 OK 时**⇒ `reject_reason` 恒空 |
+| 下单 | **不下单**：`ExecState.HandleScan` 不碰 Executor、**不调 `gate()`**（风控闸只对真订单生效）——与回测里的 B 变体同条件（回测无熔断） |
+| 结算 | **照常注册 `ResolutionPoller`**：`won`/`pnl` 回填。这不是可选项——「快照没成交」的窗口没有别的窗口结果来源，不注册就永远判不了 B |
+| P&L 隔离（红线） | `DailyPnl`（熔断输入）/ `Signals` / `Counts` / `MaxDrawdown` / `LiveSummary` **全部按 `Kind == KindSnap` 过滤**：对账行**永远不能**开/关日亏熔断。有回归测试钉住（`recorder_test.go: TestRecorderScanRowIsolation`） |
+
+⚠️ **一处已知口径差**（写进代码注释）：监听段从**快照 tick 的下一个** tick 起算，而
+python 的 B 是同一 tick 上就允许 ⑤ 达标。这**只在快照 tick 恰好缺 twap**
+（`reject_reason=missing_twap`）时差一个 tick——python 的 B 会在那一 tick 就命中、
+Go 的 scan 要等下一秒。14 天里该情形**一次都没发生**（parity 的 n=485 逐位对上）。
+若将来出现，scan 行会晚一秒、价可能略不同，属可接受偏差。
+
+**消费点**：Dashboard `/api/scans`（分页表）+ `/api/judge` 的「监听增量 B∖A」格；
+**配对判定（唯一权威）** = `python/v4/18_tail_scan_register.py`（A / B / 配对的
+Δ 日级 bootstrap 区间 + 逐日明细 + 增量按 `price_low`/`leg_out` 分桶）。
+
 ## 3. 与 dog@0.2 引擎的结构差异（有意为之）
 
 ### 3.1 两帧折中（用户决定，2026-09-23）
@@ -90,6 +120,10 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 
 两个闩锁是**独立的一次性闩锁**：无效 tick 不推进任何闩锁；首个有效 tick 若已
 `rem ≤ 60`，则两行**同发**（与 python 对两个 T 各取一次首帧等价）。
+
+2026-09-23 追加**第三个闩锁**：`snap` 未达标时开监听段（`kind=scan`，只记录）——
+`rem ≤ 60` 起逐 tick 找第一个 ⑤ 达标的 tick，闭市收尾。三闩锁之间：frame 只记录、
+snap 决定下单、scan 与 snap **同窗互斥**（见 §2.4）。
 
 ### 3.2 锚：精确取锚 + 「产出任何行之前已定局」
 
@@ -127,6 +161,7 @@ tail 独有的时序性质：取锚通道在边界 **+20s（rem≈280）** 就�
 | tick 相位 | 数据行内 rem | 1s ticker，相位 ±1-2 tick | 尾盘闸是 `≤` 判定、两帧各取首帧，相位只影响落在闸上那一两秒——记录时按 `ts` 对齐，勿用 `rem` 逐笔对账 |
 | **频率** | ⑤ 110 注/日（样本内均值，区间 27~192） | 见 §5.2 辅助闸门 1：90~120 注/日 | 引擎侧可选：每窗最多 1 注（快照唯一），故频率 = 通过 ⑤ 的窗数 |
 | **跨进程熔断** | — | flip 与 tail 各自一条独立 24U 日亏线（等效 48U） | 文档 §4.7 要求两族同开实盘时**仓位与熔断必须合并**——**本次未实现**，只写在这里。要做需另开特性（共用账本 / 单进程双引擎） |
+| **监听口径 B** | `scan60∖snap60`：快照 tick **同刻**即可命中 ⑤（n=485, WR 98.14%, +7.00U） | `kind=scan`：监听段从快照 tick 的**下一个** tick 起算 | 仅在「快照 tick 恰缺 twap」时差一个 tick；14 天里 0 次发生 ⇒ parity n 逐位相等（详见 §2.4） |
 
 ## 5. 运行、验收与纸面登记
 
@@ -181,8 +216,10 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 | ④ ①∧(dev≥63∨dev≥1σ) | 1747 | 99.37% | +33.98U |
 | **⑤** ①∧(dev≥63∨(sd≥40∧dev≥1σ)) | **1536** | **99.61%** | **+36.93U** |
 
-外加两个闩锁计数：frame 宇宙 **3643** 窗 / snap 宇宙 **3634** 窗（= python
-`snapshots(T=150/60)` 的 n）。**n 逐位相等、WR/P&L 在两位小数舍入内相等**。
+外加三个闩锁计数：frame 宇宙 **3643** 窗 / snap 宇宙 **3634** 窗（= python
+`snapshots(T=150/60)` 的 n）；**监听增量 B∖A = 485 行, WR 98.14%, +7.00U**
+（= python `scan60∖snap60`，即 16_tail_t150_scan.py 的监听增量）。
+**n 逐位相等、WR/P&L 在两位小数舍入内相等**。
 
 ⚠️ 两条对账口径：① 宇宙过滤必须含「快照 tick 上 spot 与 twap 同时在场」（python
 整窗丢弃、Go 落行后继续——聚合时要对齐）；② σ 必须**按事件索引**现算后注入
@@ -191,15 +228,16 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 ### 5.4 Dashboard（判决速览）口径
 
 `cmd/tail -dashboard :8091`（或配置键 `runtime.tail_dashboard_addr`）起一块只读面板，
-把 §5.2 的判据做成常显读数——**页面不参与判定、不写任何文件**，全部读数现算。六个口：
+把 §5.2 的判据做成常显读数——**页面不参与判定、不写任何文件**，全部读数现算。七个口：
 
 | 路由 | 内容 |
 |---|---|
-| `/api/state` | 当前窗口（热门侧/`dev`/`sd`/锚与 σ/两个闩锁/三源新鲜度）+ 统计汇总 + **今日健康度**（读当日 `tailstats_*`） |
+| `/api/state` | 当前窗口（热门侧/`dev`/`sd`/锚与 σ/三个闩锁/三源新鲜度）+ 统计汇总 + **今日健康度**（读当日 `tailstats_*`） |
 | `/api/snaps` | 决策快照行分页（成功 + 否决 + 被闸，各带判定段与结算回填） |
+| `/api/scans` | **监听对账行**分页（只记录、无仓位；§2.4） |
 | `/api/frames` | 原始帧行分页（rem≤150，只记录——「那一刻市场长什么样」的原稿） |
-| `/api/daily` | 逐日：帧/快照/注数/**注/日**/待结算/胜率/P&L |
-| `/api/judge` | **判决速览本尊**：①~⑤ 五格 + T=150 对照格 |
+| `/api/daily` | 逐日：帧/快照/监听/**注数**/**注/日**/待结算/胜率/P&L |
+| `/api/judge` | **判决速览本尊**：①~⑤ 五格 + T=150 对照格 + 监听增量 B∖A 格 |
 | `/api/config` | `tail.*` 7 键（键名 = mapstructure tag，前端展示标定参数） |
 
 **判决口径（`internal/tail/judge.go`，与 §5.2 逐条对应）**：
@@ -215,7 +253,7 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 - 被闸行（`gate_reason` 非空）**不进任何格**（§2.2 红线），但仍在快照表里可见；
 - 未结算行不进 n/胜率/P&L（判决只吃已结算样本）。
 
-⚠️ **三处已知口径差异**（别把页面读数当成 python 的等价物）：
+⚠️ **四处已知口径差异**（别把页面读数当成 python 的等价物）：
 
 1. **T=150 对照格的结果是借来的**：帧行自己不挂结算（recorder 只对 snap+ok+成交的行
    注册结算轮询），故按 `condition_id` 借**同窗快照行**的官方结果。这意味着该格只覆盖
@@ -226,6 +264,10 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 3. **σ 用的是落盘时的本窗值**（`hist_bps`），与 python 按事件索引现算的口径一致；
    但页面**实时**读数（`/api/state` 的 `dev`/`sd`）用的是**当前**盘口与 spot——同一窗内
    与落盘行不会逐位相同（落盘行是快照 tick 那一刻的值）。判定路径不读页面。
+4. **监听增量格 = 只对 scan 行本身算区间**（它自己的 n/WR/P&L 与日级区间），**不是**
+   §5.2 意义上的配对 Δ——配对（同一批重采样日期上算 B−A）在离线脚本
+   `python/v4/18_tail_scan_register.py` 里做，因为那才是消掉日效应后的正确检验。
+   页面这一格是**速览**：它的区间跨 0 ⇔ 增量不显著，与配对结论方向一致时才可互相印证。
 
 ## 6. 复现
 
@@ -233,5 +275,6 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 python/venv/bin/python python/v4/13_tail_sweep.py              # 主回测 / 候选格排名
 python/venv/bin/python python/v4/14_tail_sweep_sigma.py        # σ 尺子 / 窗长 / 日级 bootstrap
 python/venv/bin/python python/v4/15_tail_sweep_union_sigma.py  # 联合格 σ / 门槛稳定性
+python/venv/bin/python python/v4/18_tail_scan_register.py      # 纸面 A vs B 配对判定（读 data/v4/tail_*.jsonl）
 go test ./internal/tail/ -run TestParityBacktest -v            # Go↔py 逐窗对账
 ```

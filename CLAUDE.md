@@ -111,6 +111,20 @@
   做首次判决，主判据为**日级 bootstrap（重采样日期 2000 次）P&L 的 95% 区间**：
   下界 > 0 通过 / 上界 < 0 判负 / 跨 0 不显著（延到 28 日）。**未上实盘**
   （live 是 GTC 挂单等成交，成交样本天然偏向「热门侧走弱」，与回测不是同一个估计量）。
+- 🧭 **2026-09-23 追加：监听口径对账行 `kind=scan`（只记录，不改引擎）**（映射文档 §2.4）。
+  用户假设「`rem ≤ 60` 起持续监听、第一个 ⑤ 达标 tick 才下单」（B）优于现行「首个
+  `rem ≤ 60` 有效 tick 取一次快照」（A）。14 天回测里 B 只比 A 多 **+7.00U**（n=485,
+  WR 98.14%）、日级 bootstrap 95% 区间 **[−9.1, +22.5] 跨 0 ⇒ 不显著 ⇒ 不改引擎**，
+  改为纸面同窗配对攒样本。为此引擎加**第三个独立一次性闩锁**（`Watching → Scanning →
+  Done`，`Done` 只在闭市）：快照未达标时监听段继续跑，首个 ⑤ 达标的 tick 落一行
+  `kind=scan`——**不下单、不调 `gate()`、但照常注册结算**（否则「快照没成交」的窗口
+  永远没有窗口结果）；快照已达标则本窗不产监听行 ⇒ **scan 行 ≡ B∖A**。红线：`DailyPnl`
+  （熔断输入）/`Signals`/`Counts`/`MaxDrawdown`/`LiveSummary` **全部按 `KindSnap` 过滤**
+  ——对账行永远不能开关日亏熔断（有回归测试钉住）。已知口径差：监听段从快照 tick 的
+  **下一个** tick 起算，仅「快照 tick 恰缺 twap」时比 python 的 B 晚一秒（14 天 0 次）。
+  消费点：Dashboard `/api/scans` + `/api/judge` 的「监听增量」格（速览）；
+  **配对判定（权威）= `python/v4/18_tail_scan_register.py`**（A / B / 配对 Δ 区间 +
+  逐日明细 + 增量按 `price_low`/`leg_out` 分桶）。
 
 ### 版本管理约定（2026-08-31 起生效，v4 分支沿用）
 - **分支即版本**：当前分支 `v4`（从 v3 切出，dog@0.2 全新独立实现）。
@@ -129,7 +143,7 @@ FlipSignal/
 ├── cmd/flip/                         # 狗@0.2 引擎主入口（纸面/实盘同源，-mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
 ├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
-│   └── main.go                       # 同上接线, 但两帧闩锁/尾盘闸/GTC 挂到闭市（决策 #17）+ 窗口运行时载体（决策 #18）
+│   └── main.go                       # 同上接线, 但三闩锁（帧/快照/监听对账）/尾盘闸/GTC 挂到闭市（决策 #17）+ 窗口运行时载体（决策 #18）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── internal/
 │   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
@@ -153,11 +167,11 @@ FlipSignal/
 │   │   ├── flip_server.go            # go:embed flip + 路由装配（/api/state, /api/observations, /api/signals, /api/daily, /api/config）
 │   │   ├── flip_handlers.go          # 上述 flip API 的 handler + 映射
 │   │   ├── flip_state.go             # FlipState + NewFlipState（运行时组件引用）
-│   │   ├── tail_server.go            # go:embed tail + 路由装配（/api/state, /api/snaps, /api/frames, /api/daily, /api/judge, /api/config）
+│   │   ├── tail_server.go            # go:embed tail + 路由装配（/api/state, /api/snaps, /api/scans, /api/frames, /api/daily, /api/judge, /api/config）
 │   │   ├── tail_handlers.go          # 上述 tail API 的 handler + 映射
 │   │   ├── tail_state.go             # TailState + NewTailState
 │   │   ├── flip/                     # flip 前端三件套 index.html, app.js, style.css（手机优先）
-│   │   └── tail/                     # tail 前端三件套（判决速览/五格对照/快照与帧两表）
+│   │   └── tail/                     # tail 前端三件套（判决速览/七格对照/快照·监听·帧三表）
 │   ├── feed/
 │   │   ├── anchor_recover.go         # 取锚通道（精确命中边界那一秒的推送, 500ms×40 重试；官方 open HTTP 段保留但休眠）
 │   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
@@ -167,11 +181,11 @@ FlipSignal/
 │   │   ├── config.go                 # Config + DefaultConfig()（7 个键, 全部不可调; 见决策 #17）
 │   │   ├── types.go                  # Observation/Rules/Record/WindowStats + 行类型/闸原因常量 + 状态机
 │   │   ├── decide.go                 # 纯函数 EvalRules + Rules.Rule1()…Rule5()（价格腿 = 全部五格前置）
-│   │   ├── engine.go                 # 状态机: 两个独立一次性闩锁（rem≤150 帧 / rem≤60 快照）, ProcessTick 返回 0~2 行
+│   │   ├── engine.go                 # 状态机: 三个独立一次性闩锁（rem≤150 帧 / rem≤60 快照 / 监听段对账行）, ProcessTick 返回 0~2 行
 │   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* 三前缀（独立于 flip 三前缀, 决策 #9 红线）
 │   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像）
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费; 决策 #18）
-│   │   ├── judge.go                  # 判决纯函数: Judge（五格 + T=150 对照格）/ BootstrapCI / verdictFor
+│   │   ├── judge.go                  # 判决纯函数: Judge（五格 + T=150 对照格 + 监听增量格）/ BootstrapCI / verdictFor
 │   │   ├── mt19937.go                # CPython 的 MT19937 + randrange 复刻（bootstrap 与 python 逐位一致）
 │   │   └── *_test.go                 # decide/engine/recorder/exec_state/judge（含黄金向量）/parity（opt-in）
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 与 cmd/tail 各自构造注入）
@@ -182,7 +196,7 @@ FlipSignal/
 ├── docs/                             # 策略文档（v4 方案/口径映射; 扫尾盘见 tail_sweep_*/tail_engine_mapping_*）
 ├── python/
 │   ├── v2/lib.py                     # 数据加载器（v4 回测脚本依赖，保留）
-│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15）
+│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15/16/17/18）
 ├── v4.config.yaml                    # 全量配置示例（= 代码默认值, 有漂移守卫测试; 调参请复制成 config.local.yaml）
 ├── go.mod / go.sum
 └── CLAUDE.md                         # 本文件
@@ -274,21 +288,25 @@ Watching ──首个触底观测(ask≤0.20, 四腿判定)──▶ Done
 
 ```
 Watching ──首个有效 tick 且 rem≤150──▶ 落 frame 行（只记录）
-        ──首个有效 tick 且 rem≤60 ──▶ 落 snap 行（判定 ⑤ + 执行）──▶ Done
-   ▲                                                                    │
-   └────────────────────── 窗口结束(rem==0) ◀───────────────────────────┘
+        ──首个有效 tick 且 rem≤60 ──▶ 落 snap 行（判定 ⑤ + 执行）──▶ Scanning
+                                          │（snap 未达标才进监听段）
+                                          └─首个 ⑤ 达标 tick─▶ 落 scan 行（只记录）─┐
+   ▲                                                                              │
+   └──────────────────── 窗口结束(rem==0) ──▶ Done ◀──────────────────────────────┘
 ```
 
-- 两个闩锁**互相独立**、各自一次性；无效 tick（延迟 >`tail.max_book_lat_ms` /
+- 三个闩锁**互相独立**、各自一次性；无效 tick（延迟 >`tail.max_book_lat_ms` /
   四档报价不全 / `rem ≤ 0`）不推进任何闩锁。首个有效 tick 若已在尾盘 → 两行同发。
+  **scan 与 snap 同窗互斥**（snap 达标 ⇒ 本窗不产监听行）⇒ scan 行 ≡ B∖A。
 - 锚在产出任何行之前已定局：取锚通道 +20s 结束（`rem≈280`），最早的行在
   `rem≤150`（`+150s`）——`anchor ≤ 0` ⇒ 本窗一行不产出（只在 `tailstats_*` 记
   `anchor_exact=false`）。
 - σ 未就绪（`hist.Count() < 3`）⇒ 整窗跳过 `skip=no_sigma`；`tailwin_*` 是 tail
   自己的 σ 预热源（独立于 `windows_*`，不交叉读写）。
-- Dashboard（`runtime.tail_dashboard_addr`，决策 #18）**只读**这条流水线：本窗两个
-  闩锁的进度、热门侧读数、锚/σ 就绪、以及**判决速览**（五格 + T=150 对照格的
-  n/WR/P&L 与日级 bootstrap 95% 区间）都是现算——不参与判定、不写任何文件。
+- Dashboard（`runtime.tail_dashboard_addr`，决策 #18）**只读**这条流水线：本窗三个
+  闩锁的进度、热门侧读数、锚/σ 就绪、以及**判决速览**（五格 + T=150 对照格 +
+  监听增量格的 n/WR/P&L 与日级 bootstrap 95% 区间）都是现算——不参与判定、不写任何文件。
+  配对判定（B−A）在离线脚本 `python/v4/18_tail_scan_register.py`。
 
 ---
 
@@ -607,12 +625,14 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
     `internal/tail` **单向依赖 `internal/flip`**（取 `Tick`/`Executor`/`PaperExecutor`/
     `HistState`/`WindowEntry`/`CanTrade`/`SideYes|No`/`WonFor`/`ExecStatus*`），反向不依赖
     ——两族独立演进，但共用同一批经对账的原语。四条关键决定：
-    - **两个独立的一次性闩锁（两帧折中）**：`rem ≤ frame_rem(150)` 首帧落**原始快照**
+    - **三个独立的一次性闩锁**（前两个 = 两帧折中）：`rem ≤ frame_rem(150)` 首帧落**原始快照**
       （只记录、不判定、不下单）+ `rem ≤ rem_start(60)` 首帧落**决策快照**（判定 ⑤
-      + 执行）。`ProcessTick` 返回 `[]Observation`（0~2 行，首个有效 tick 若已在尾盘
-      则两行同发）。代价：**T 不可再调**（离线只能复算 60/150）。两行共用同一锚——
-      首行落盘即冻结（`UpgradeAnchor` 此后拒收），否则帧行与快照行 `dev` 基准不同源。
-    - **前缀独立**：`tail_*`（≤2 行/窗）/ `tailwin_*`（每完成窗 1 行, σ 预热源）/
+      + 执行）+ 快照**未达标**时开**监听段**（`kind=scan`，首个 ⑤ 达标 tick 只记录——
+      与快照同窗互斥，见上「监听口径对账行」条）。`ProcessTick` 返回 `[]Observation`
+      （0~2 行，首个有效 tick 若已在尾盘则两行同发）。代价：**T 不可再调**（离线只能
+      复算 60/150）。三行共用同一锚——首行落盘即冻结（`UpgradeAnchor` 此后拒收），
+      否则帧行与快照行 `dev` 基准不同源。
+    - **前缀独立**：`tail_*`（≤3 行/窗）/ `tailwin_*`（每完成窗 1 行, σ 预热源）/
       `tailstats_*`（**严格每窗 1 行**, 健康度 + `skip` + 锚状态）——**不得**复用
       `windows_*`（双进程双写会毁 σ, 决策 #9 的教训）。flip 与 tail 可同目录并行。
     - **撤单点 = 闭市 `rem ≤ 0`**（用户决定）：`trading.CancelAtClose` 哨兵 =
@@ -628,8 +648,9 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       校验（阈值 > 0、价格腿 ∈ (0,1]、`frame_rem ≥ rem_start`）。
     - **验收红线**：`internal/tail/parity_test.go`（**opt-in**, `data/btc` 不存在即
       skip）流式重放 14 天 3753 窗驱动真实引擎，断言五格聚合 = python oracle
-      （① n=3109 WR 97.65% +72.10U … ⑤ n=1536 WR 99.61% +36.93U）+ 两个闩锁计数
-      （frame 3643 / snap 3634 窗）——实测 n 逐位相等、WR/P&L 在两位小数内相等。
+      （① n=3109 WR 97.65% +72.10U … ⑤ n=1536 WR 99.61% +36.93U）+ 三个闩锁计数
+      （frame 3643 / snap 3634 窗；监听增量 B∖A **485 行 WR 98.14% +7.00U**，oracle 来自
+      `16_tail_t150_scan.py` 的 `scan60∖snap60`）——实测 n 逐位相等、WR/P&L 在两位小数内相等。
       ⚠️ 两条对账口径：宇宙须过滤「快照 tick 上 spot+twap 同时在场」；σ 须**按事件
       索引**现算（python 语义）后注入，**不能喂 `flip.HistState`**（后者只记已 push
       的振幅，缺窗时条数不同）。
@@ -653,25 +674,28 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       同机并行须给不同端口。
     - **判决（含区间）在服务端算并直接给结论**（前端不写死 14/800/2000，口径常量随
       `/api/judge` 的 `meta` 下发）：`internal/tail/judge.go` 的 `Judge` 吃全量行 →
-      ①~⑤ 五格 + T=150 对照格，每格给 n / 胜率 / P&L / 亏损日 / **日级 bootstrap 95%
+      ①~⑤ 五格 + T=150 对照格 + **监听增量 B∖A 格**（`pickScans`：只吃已结算 scan 行、
+      不重判规则、不给它造仓位），每格给 n / 胜率 / P&L / 亏损日 / **日级 bootstrap 95%
       区间**（2000 次，seed 42）/ 判词 / 频率闸。`BootstrapCI` 在 Go 里**复刻 CPython
       的 MT19937 + `randrange`**（含 CPython 3.12+ `sum()` 的 Neumaier 补偿求和），
       与 `python/v4/13_tail_sweep.py:424 boot_days` **逐位一致**（黄金向量 + 实测期望值
       钉在 `judge_test.go`）——判决卡上的数字必须与复验脚本同一个数。
-      ⚠️ 一处**口径差异**（写进 mapping §5.4）：T=150 对照格的结果借自**同窗已结算的
+      ⚠️ 两处**口径差异**（写进 mapping §5.4）：① T=150 对照格的结果借自**同窗已结算的
       快照行**（帧行自己不挂结算），故它只覆盖「该窗快照成交过」的窗口，比 python 的
       全样本离线复算窄——它是**同一批窗口内 T=60 vs T=150 的配对比较**，不是全样本对照。
       胜负按**帧行自己的热门侧**重算（帧与快照的 hot side 可能不同），P&L 按
-      `cfg.Stake / frame.HotAsk` 现算（帧行没有仓位）。
+      `cfg.Stake / frame.HotAsk` 现算（帧行没有仓位）。② 监听增量格 = **只对 scan 行本身**
+      算区间（速览），**不是**配对 Δ——配对（同一批重采样日期上算 B−A）由离线脚本
+      `python/v4/18_tail_scan_register.py` 做。
     - **页面健康度读 `tailstats_*` 当日文件**（`Recorder.TodayStats()`，本族**唯一**的磁盘
       读口）：窗数 / `skip` 分布 / `anchor_exact=false` 计数 = 文档 §5.2 的**辅助闸门 3**。
       健康度行**不载入内存**（纯审计，省一次全量读盘），故 `/api/state` 每次请求现读当日
       文件；读失败只在日志留痕、不阻断状态页（窗数恒 0 即信号）。flip 的 `/api/state`
       不读盘（它的 winstats 只落盘）——这是本族多出来的那一段。
     - **零行为改动**：dashboard 侧复算现窗口读数用的纯函数（`SideOfHot` / `DevUSD` /
-      `SigmaUSD`）就是引擎自己调的那三个（抽出来单一实现），`LatchState()` 只读两个闩锁
-      与锚冻结标记。验收红线不变：btreplay 625 笔逐位一致 + tail parity 五格与两闩锁计数
-      逐位一致 + `go test ./internal/... -race` 全绿。
+      `SigmaUSD`）就是引擎自己调的那三个（抽出来单一实现），`Latches()` 只读三个闩锁
+      与锚冻结标记。验收红线不变：btreplay 625 笔逐位一致 + tail parity 五格与三闩锁计数
+      （含监听增量 485 行）逐位一致 + `go test ./internal/... -race` 全绿。
 
 ---
 
