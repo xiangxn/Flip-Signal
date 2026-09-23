@@ -28,8 +28,9 @@
   - σ（hist_bps）= 前 ≤18 个已完窗口 |tw_close−tw_open| 均值（≥3 窗可用）
 - **成交口径**：fill = 触发 tick 狗侧 ask（≤0.20，无滑点）；`shares = stake/fill`；
   赢 → `shares − stake`，输 → `−stake`（每股兑 1U）
-- **结算**：官方 outcome（0=Up 1=Down），gamma `umaResolutionStatus=="resolved"` 后由
-  ResolutionPoller 轮询触发
+- **结算**（2026-09-24 起三层回退，决策 #19）：官方 outcome（0=Up 1=Down）——
+  ① 边界推送自算（闭市 +25s，与官方逐位同源）→ ② 官方 crypto-price 接口（+45s）→
+  ③ gamma `umaResolutionStatus=="resolved"` 轮询；每行落 `settle_src`
 - **回测基准（14 天，2U/笔，2026-08-18~31）**：R1 m_45 纯现货 n=245，WR 29.0%，
   EV +1.078U/注，+264U/14 天；日正 12/14；双层（+dist_t）n=197，WR 30.5%，EV +1.234U/注
   ——R1 已退居回测对照（01 四规则报告前两条），不再落引擎
@@ -117,7 +118,7 @@
   WR 98.14%）、日级 bootstrap 95% 区间 **[−9.1, +22.5] 跨 0 ⇒ 不显著 ⇒ 不改引擎**，
   改为纸面同窗配对攒样本。为此引擎加**第三个独立一次性闩锁**（`Watching → Scanning →
   Done`，`Done` 只在闭市）：快照未达标时监听段继续跑，首个 ⑤ 达标的 tick 落一行
-  `kind=scan`——**不下单、不调 `gate()`、但照常注册结算**（否则「快照没成交」的窗口
+  `kind=scan`——**不下单、不调 `gate()`、但照常进 pending 结算**（否则「快照没成交」的窗口
   永远没有窗口结果）；快照已达标则本窗不产监听行 ⇒ **scan 行 ≡ B∖A**。红线：`DailyPnl`
   （熔断输入）/`Signals`/`Counts`/`MaxDrawdown`/`LiveSummary` **全部按 `KindSnap` 过滤**
   ——对账行永远不能开关日亏熔断（有回归测试钉住）。已知口径差：监听段从快照 tick 的
@@ -145,6 +146,7 @@ FlipSignal/
 ├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
 │   └── main.go                       # 同上接线, 但三闩锁（帧/快照/监听对账）/尾盘闸/GTC 挂到闭市（决策 #17）+ 窗口运行时载体（决策 #18）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
+├── cmd/twapprobe/                    # 边界对齐探针（一次性的实盘逐秒 TWAP 推送采集, 产 data/probe/; 决策 #19 的证据工具, 运行期不参与引擎）
 ├── internal/
 │   ├── config/                       # 配置层（viper 三层加载 + 敏感字段 AES 解密 + 启动校验）
 │   │   ├── config.go                 # AppConfig + defaults()（唯一默认值来源）+ Load()
@@ -175,8 +177,12 @@ FlipSignal/
 │   ├── feed/
 │   │   ├── anchor_recover.go         # 取锚通道（精确命中边界那一秒的推送, 500ms×40 重试；官方 open HTTP 段保留但休眠）
 │   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
+│   │   ├── official_pair.go          # 官方 open+close 取数闭包（PricePairFetcher, 结算第三层用; 决策 #19）
 │   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
 │   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest(精确)/CacheStat
+│   ├── settle/                       # 结算编排（零外部依赖, 不 import flip; 两族共用; 决策 #19）
+│   │   ├── settle.go                 # Outcome/Anchors（按边界秒存推送）+ Resolver 三层回退（push +25s → official +45s → gamma）
+│   │   └── settle_test.go            # 判定词表钉在 flip 常量上 + 三层时点/次数/幂等/剪枝
 │   ├── tail/                         # 扫尾盘 ⑤ 引擎核心层（零外部依赖; 只复用 flip 的原语, 反向不依赖）
 │   │   ├── config.go                 # Config + DefaultConfig()（7 个键, 全部不可调; 见决策 #17）
 │   │   ├── types.go                  # Observation/Rules/Record/WindowStats + 行类型/闸原因常量 + 状态机
@@ -192,11 +198,11 @@ FlipSignal/
 │       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
 │       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin（flip）/ 闭市（tail）撤单 + 查 size_matched 定稿回调（决策 #16/#17）
 │       ├── prefetch.go               # 每窗预热 tickSize/negRisk/feeRate（下单路径零额外网调）
-│       └── resolution_poller.go      # 官方结算轮询（gamma umaResolutionStatus）
-├── docs/                             # 策略文档（v4 方案/口径映射; 扫尾盘见 tail_sweep_*/tail_engine_mapping_*）
+│       └── resolution_poller.go      # gamma 结算轮询（umaResolutionStatus; 决策 #19 后降为结算第三层）
+├── docs/                             # 策略文档（v4 方案/口径映射; 扫尾盘见 tail_sweep_*/tail_engine_mapping_*; 结算见 settle_self_2026-09-24.md）
 ├── python/
 │   ├── v2/lib.py                     # 数据加载器（v4 回测脚本依赖，保留）
-│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15/16/17/18）
+│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15/16/17/18）+ 边界价探针（19/20, 决策 #19 的证据）
 ├── v4.config.yaml                    # 全量配置示例（= 代码默认值, 有漂移守卫测试; 调参请复制成 config.local.yaml）
 ├── go.mod / go.sum
 └── CLAUDE.md                         # 本文件
@@ -235,9 +241,15 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
                          │
                          ▼
    Recorder (touches_* 观测 + windows_* 窗口振幅 + winstats_* 健康度, 按日切分 + P&L)
-                         │
+                         │  PendingSignals()（待结算行, isSettlable 已过滤）
                          ▼
-             ResolutionPoller (gamma 结算轮询)
+      settle.Resolver 三层回退（决策 #19; 锚推送缓存是它的输入之一）
+        ① push     闭市 +25s   两条边界推送在手 ⇒ 自算定案  ← 实测覆盖 ~96.5%
+        ② official 闭市 +45s   官方 open+close（须已收敛）  ← 推送缺一条即走这里
+        ③ gamma    约 +75s     ResolutionPoller 兜底
+                         │  每行落 settle_src
+                         ▼
+              Recorder.Resolve(conditionID, outcome, at, src) → P&L 回填
 ```
 
 ### 市场循环流程
@@ -255,8 +267,8 @@ twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-3
 4. 首个触底 tick（ask≤0.20）→ 四腿判定 → 观测落盘（ok 与失败都记，即时落盘）
 5. ok 信号 → 风控闸（live 命中拦 POST 记 rejected；paper 命中记 gate_reason 照常结算）
    → Executor 执行（paper 即时定稿; live = GTC 挂单 → resting 交 FillTracker 每 2s
-   查询, **到 rem ≤ RemMin 撤掉未成交余量并定稿**）→ **定稿后** Register 结算轮询
-   （结算在闭市后数分钟, 口径不变）
+   查询, **到 rem ≤ RemMin 撤掉未成交余量并定稿**）→ **定稿后**该行进 pending,
+   由 settle.Resolver 按三层回退结算（决策 #19: push +25s → official +45s → gamma）
 6. 窗口结束（rem=0）→ 收尾取锚通道（cancel + join）→ |close−anchor| 追加进 σ 滚动窗
    并落盘 windows_*.jsonl（重启 σ 预热本地优先：windows_* 新鲜即毫秒级恢复，
    不足/过旧回退官方网络预热 FetchTwapRanges——停机期窗口只有官方能取）；
@@ -389,12 +401,13 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
 3. **首触不重试**：事件内首个触底 tick 即观测，判定失败即 Done（本窗不再检）——
    与回测刻意一致，非引擎缺陷。
 4. **观测全落盘**：失败观测同样落盘（reject_reason 分解），供信号频率校准与
-   09-15 原因分布对比；触发即落盘 + 结算仅 ok 行注册轮询。
+   09-15 原因分布对比；触发即落盘 + 结算仅 ok 且可结算的行进 pending（决策 #19）。
 5. **数据采集已删除**：cmd/collect 整体移除（API 压力考量，保留备用已无意义）；
    未来需增采按 `docs/dog020_mapping_2026-09-02.md §5` 复活（注意键名炸弹）。
 6. **即时落盘 + 重启恢复**：观测在触发 tick 立即落盘（行级 flush，崩溃不丢）；
-   结算回填 temp+rename 原子重写当日文件；重启扫描 JSONL 恢复内存态并自动重新
-   注册未结算信号的结算轮询。
+   结算回填 temp+rename 原子重写当日文件；重启扫描 JSONL 恢复内存态，
+   未结算行重建 pending 后由 `settle.Resolver` 的 Pending 扫描自动接回（决策 #19
+   ——原先的「重新注册 gamma 轮询」分支已删，重启不再是特殊路径）。
 7. **单 WS 订阅复用**：MarketMonitor 重启恢复模式沿用；TwapAdapter 内建新鲜度
    看门狗（推送停更超 2min 自动重建订阅）；BinanceAdapter 首拨失败由 main 侧
    指数退避重试、断线后 runReadLoop 自愈。
@@ -599,8 +612,9 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       （按 `order_id` 去 data-api/UI）。**成本口径 `cost = shares × 限价`**：挂单成交
       必是 maker 成交 = 限价本身，即时 taker 那部分只会**更便宜** ⇒ 成本至多略微高估
       （保守，且与回测 `shares = stake/fill` 同口径）。
-    - **结算注册后移**：resting 行 `IsFilled()==false`、不进结算轮询；改由定稿回调
-      在 `ApplyFillFinal` 之后注册（gamma 结算在闭市后数分钟，口径不受影响）。
+    - **结算注册后移**：resting 行 `IsFilled()==false`、不进 pending；改由定稿回调
+      在 `ApplyFillFinal` 之后进 pending（决策 #19 后由 `settle.Resolver` 的 Pending
+      扫描接管，闭市 +25s 即可定案——挂单定稿本来就远早于此，不影响）。
       重启时 main 扫盘把残留 resting 行按 `adopted` 重新登记。
     - **已知样本偏差**（不是免费午餐）：挂单越久，成交样本越偏向「价格继续下探」的
       那批——反弹回去的单子根本不会成交。回测 WR 24.6% 对应「触发瞬间拿到位置」，
@@ -696,6 +710,37 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       `SigmaUSD`）就是引擎自己调的那三个（抽出来单一实现），`Latches()` 只读三个闩锁
       与锚冻结标记。验收红线不变：btreplay 625 笔逐位一致 + tail parity 五格与三闩锁计数
       （含监听增量 485 行）逐位一致 + `go test ./internal/... -race` 全绿。
+19. **结算自算：推送优先的三层回退（flip / tail 共用）**（2026-09-24，见
+    `docs/settle_self_2026-09-24.md`）。用户提问「官方结算价对齐的是窗口第 0 秒还是前一秒
+    （59s）？若新窗 open == 前窗 close，就能用推送自算，只在丢推送时才拉官方」。
+    探针（`python/v4/19_boundary_price_probe.py`，837 个实盘窗 / 官方缓存覆盖 315 窗）：
+    官方 `open(N)` ≡ 边界那一秒的推送 `anchor(N)`（**315/315 逐位相等**）、官方
+    `close(N)` ≡ `anchor(N+1)`（**309/309**）、官方 `close(N)` ≡ 官方 `open(N+1)`
+    （**228/228**）；**错位对照** `close(N)` vs `anchor(N)` 差 p50 **51.83 美元 = 1.00σ**
+    ——对齐是**定义级相同**而非近似。官方 API 方向 vs 市场实际结算方向 113/113 一致
+    ⇒ 换层只改时延不改编号。
+    - **三层与时点**：闭市 **+25s** 推送自算（close 那条推送到达 p50 +2.0s / 最晚 +12.1s，
+      25s 留余量）→ 闭市 **+45s** 官方接口（**必须等收敛**，头几十秒是临时值，见决策 #14；
+      每 5s 一次 × 至多 6 次）→ **+75s** 交回 gamma 轮询（UMA 是市场结算本身，最后一层）。
+    - **为什么值**：新口径下**判定与官方逐位同源**，误差归零——而引擎原先的 close 是
+      **到达口径**流值，实测 315 窗里 3 窗（0.95%）方向被贴线漂移带反（三例官方 Δ 仅
+      −0.079/−1.09/−0.080 美元，而窗口振幅中位 51.83 美元）；顺带日亏熔断从「等 UMA
+      （闭市后数分钟）」提前到**闭市 +25s**。
+    - **缺失面**：854 个实盘窗里 `anchor_exact=false` 仅 **15 窗（1.76%）**，且全部
+      `ticks=298`（整窗 tick 齐全 ⇒ 上游那一秒没发，不是我们掉线）。一次结算要**两条**边界
+      推送 ⇒ 约 **3.5%** 的结算走官方层。
+    - **实现**：新增 `internal/settle`（**零外部依赖、不 import `internal/flip`**——判定词表
+      用常量相等断言钉住，不靠依赖），`internal/feed/official_pair.go` 提供 SDK 侧
+      `PricePairFetcher`（一次调用取 open+close）。`Record.SettleSrc`
+      （`push|official|gamma`，`omitempty`）逐行落盘供事后分桶对账。
+    - **触发点收敛**：原先三处预先 `Register` gamma（信号落盘 / 挂单定稿 / 重启恢复）**全部
+      删除**，只保留 `GiveUp` 一处——两个驱动抢同一行会有一边报「结算回填未命中」；且
+      `Pending()` 直接扫 `Recorder.PendingSignals()`（`isSettlable` 已过滤），重启恢复免费复用。
+    - **σ 的 close 口径未改**（仍是 `lastTick.TwapPrice` 到达口径，与本次改的结算 close
+      相差 p50 1.234 美元）——动它会改 σ ⇒ 改浅洞带，属策略参数问题，须单独走一轮回测。
+    - 验收：btreplay 625 笔逐位一致（n=625 WR 24.6% EV +0.633U +395.8U）+ tail parity
+      三闩锁计数一致（frame 3643 / snap 3634 / scan 485）+ `go test ./internal/... -race`
+      全绿 + `TestResolveSettleSrcPersisted`（两族各一，含重启与 `omitempty` 钉子）。
 
 ---
 

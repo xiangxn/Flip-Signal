@@ -67,6 +67,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 | `in_*` 各格 | `ok` | `ok=true` ⇔ ⑤ 通过（唯一会下单的格） |
 | `settle_won` | `won` | 结算后回填（官方 outcome） |
 | — | `pnl` / `shares` / `stake` / `cost` | 结算后回填 / 决策时计算（`cost` 仅 live） |
+| — | `settle_src` | **结算来源**（2026-09-24 起，§5.5）：`push` / `official` / `gamma`；空 = 旧行 |
 | — | `gate_reason` | 风控闸（`daily_loss` / `first_window`；paper 被闸行照记照结算，分析须显式过滤） |
 | — | `exec_status` / `order_id` / `avg_fill_price` / `exec_note` | live 执行回填（paper 行恒空） |
 
@@ -96,7 +97,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 | 何时停 | `rem == 0`（闭市）——状态机 `Watching → Scanning → Done`，`Done` 只在闭市 |
 | 判定 | `ok = Rule5() ∧ spot > 0 ∧ hist_bps > 0`；`shares = Stake/hot_ask`（**假想**股数，没真下单）；落行**只在 OK 时**⇒ `reject_reason` 恒空 |
 | 下单 | **不下单**：`ExecState.HandleScan` 不碰 Executor、**不调 `gate()`**（风控闸只对真订单生效）——与回测里的 B 变体同条件（回测无熔断） |
-| 结算 | **照常注册 `ResolutionPoller`**：`won`/`pnl` 回填。这不是可选项——「快照没成交」的窗口没有别的窗口结果来源，不注册就永远判不了 B |
+| 结算 | **落盘即进待结算队列**：`won`/`pnl` 回填。这不是可选项——「快照没成交」的窗口没有别的窗口结果来源，不结算就永远判不了 B（2026-09-24 起由 `settle.Resolver` 三层回退接管，见 §5.5） |
 | P&L 隔离（红线） | `DailyPnl`（熔断输入）/ `Signals` / `Counts` / `MaxDrawdown` / `LiveSummary` **全部按 `Kind == KindSnap` 过滤**：对账行**永远不能**开/关日亏熔断。有回归测试钉住（`recorder_test.go: TestRecorderScanRowIsolation`） |
 
 ⚠️ **一处已知口径差**（写进代码注释）：监听段从**快照 tick 的下一个** tick 起算，而
@@ -255,8 +256,9 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
 
 ⚠️ **四处已知口径差异**（别把页面读数当成 python 的等价物）：
 
-1. **T=150 对照格的结果是借来的**：帧行自己不挂结算（recorder 只对 snap+ok+成交的行
-   注册结算轮询），故按 `condition_id` 借**同窗快照行**的官方结果。这意味着该格只覆盖
+1. **T=150 对照格的结果是借来的**：帧行自己不结算（recorder 只把 snap/scan 且
+   ok 且成交的行放进待结算队列），故按 `condition_id` 借**同窗快照行**的官方结果。
+   这意味着该格只覆盖
    「该窗快照成交过」的窗口，比 python 的全样本离线复算窄——它是**同一批窗口内
    T=60 vs T=150 的配对比较**，不是全样本对照（`③ 纯 σ` 等其它格的宇宙不受影响）。
 2. **胜负按帧行自己的热门侧重算**（帧与快照的 hot side 可能不同——rem≤150 时 ask 高的
@@ -268,6 +270,34 @@ go test ./internal/tail/ -run TestParityBacktest  # 14 天全量对账（opt-in,
    §5.2 意义上的配对 Δ——配对（同一批重采样日期上算 B−A）在离线脚本
    `python/v4/18_tail_scan_register.py` 里做，因为那才是消掉日效应后的正确检验。
    页面这一格是**速览**：它的区间跨 0 ⇔ 增量不显著，与配对结论方向一致时才可互相印证。
+
+### 5.5 结算口径（2026-09-24 起：推送优先的三层回退，与 flip 同一套）
+
+两族**共用同一个结算编排**（`internal/settle`，由 `cmd/tail` 与 `cmd/flip` 各自构造注入；
+`internal/tail` 本身不 import 它）。原先的「落盘即注册 `ResolutionPoller`」已删除——
+待结算行由 `Recorder.PendingSignals()` 统一暴露，`settle.Resolver` 按三层回退取官方 outcome：
+
+| 层 | 触发时点 | 依据 | 落 `settle_src` |
+|---|---|---|---|
+| ① 推送自算 | 闭市 **+25s** | 边界 N 与 N+300 那两秒的 TWAP 推送——实测与官方 `openPrice`/`closePrice` 逐位相等 | `push` |
+| ② 官方接口 | 闭市 **+45s** | crypto-price API（须已收敛） | `official` |
+| ③ gamma 轮询 | 约 **+75s** | UMA 结算本身 | `gamma` |
+
+对本族的三条具体影响：
+
+1. **`kind=scan` 行照常可结算**（红线不变）：它落盘即进待结算队列，`won`/`pnl` 一样回填。
+   P&L 隔离红线**不受影响**——`DailyPnl`/`Signals`/`Counts`/`MaxDrawdown` 仍按
+   `Kind == KindSnap` 过滤，换结算驱动不改变「对账行不能开关熔断」。
+2. **只有 `IsFilled` 的行进队列**：帧行（无仓位）、`unfilled`/`rejected` 行都在
+   `isSettlable` 就被挡掉——与旧口径一致。
+3. **live 的 GTC 挂单行**（撤单点 = 闭市 `CancelAtClose`）在 FillTracker 定稿回调里才进
+   队列，比闭市稍晚；resolver 按 `event_start` 算时点（不是按入队时刻），故晚入队不影响
+   它落在哪一层。
+
+⚠️ **live 行的入队时刻（写进代码注释）**：本族挂单撤到闭市，定稿在闭市后第一轮轮询
+（≤2s）+ 撤单确认宽限（至多 15s）之内 ⇒ 正常落在 **闭市 +2s ~ +17s**，**早于** ① 层的
++25s 闸；只有撤单一直失败走到硬截止（闭市 +60s）才会晚于 ①，此时下一轮扫描立刻按
+`now − 闭市` 判层——**三层判据只看时钟，不看入队时刻**，晚入队不改变它属于哪一层。
 
 ## 6. 复现
 
