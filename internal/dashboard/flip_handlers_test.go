@@ -189,10 +189,18 @@ func TestStateTwap(t *testing.T) {
 
 // flipObs 构造一条 ok 触底观测（量级取实测; 本文件只关心分类, 数值不参与断言）。
 func flipObs(ts int64, side string, shares float64) *flip.Observation {
+	sgn := 1.0
+	if side == "no" {
+		sgn = -1.0
+	}
+	const anchor, spot, twap = 83760.41, 83856.25, 83720.00
 	return &flip.Observation{
 		Ts: ts, Side: side, Rem: 261, Fill: 0.19,
 		M20: 0.46, M30: 0.48, M45: 0.50, DistS: -0.97, DistT: -0.23,
-		OK: true, Shares: shares, Anchor: 83760.41, HistBps: 11.75, Spot: 83856.25,
+		OK: true, Shares: shares, Anchor: anchor, HistBps: 11.75, Spot: spot,
+		TwapPrice: twap, // 美元位移按 sgn 口径现算（与引擎同公式）
+		DevUSD:     sgn * (spot - anchor),
+		TwapDevUSD: sgn * (twap - anchor),
 	}
 }
 
@@ -313,5 +321,11 @@ func TestFlipNoExecClassification(t *testing.T) {
 	}
 	if r := byID["0xok1"]; r.GateReason != "" || r.ExecStatus != "" || r.Won != nil {
 		t.Fatalf("paper 正常行不得被标闸/标状态: %+v", r)
+	}
+
+	// 4) 美元位移两个键必须下发（2026-09-25 追加）: 前端 dev$/twap$ 两列的数据源。
+	// 断言非零即可（fixture 的 anchor/spot/twap 三者互不相等），不复制引擎公式。
+	if r := byID["0xok1"]; r.DevUSD == 0 || r.TwapDevUSD == 0 {
+		t.Fatalf("美元位移未透传: %+v", r)
 	}
 }

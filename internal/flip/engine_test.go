@@ -505,6 +505,64 @@ func TestDistSignAndTwap(t *testing.T) {
 			t.Fatalf("dist_t 应 0: %+v", o)
 		}
 	})
+
+	// 美元位移（2026-09-25）: 与 dist_s/dist_t 同号且同输入，但用美元而不是 σ。
+	// 测试口径 anchor=100000，故美元位移 = 价差本身。
+	t.Run("美元位移同号记录（dog=yes）", func(t *testing.T) {
+		e := newEng(cfgOK())
+		feed(t, e, 5, 260, 0.5, 0.5)
+		tick := stdTick(250, 0.19, 0.9)
+		tick.BinPrice = 99_986  // sgn=+1 → dev_usd = −14
+		tick.TwapPrice = 99_900 // → twap_dev_usd = −100
+		o := e.ProcessTick(tick)
+		if o == nil || !o.OK {
+			t.Fatalf("应 ok: %+v", o)
+		}
+		if !approx(o.DevUSD, -14) || !approx(o.TwapDevUSD, -100) {
+			t.Fatalf("dev_usd/twap_dev_usd = %v/%v, 期望 −14/−100", o.DevUSD, o.TwapDevUSD)
+		}
+	})
+
+	t.Run("美元位移取反号（dog=no）", func(t *testing.T) {
+		e := newEng(cfgOK())
+		feed(t, e, 5, 260, 0.6, 0.5)
+		tick := stdTick(250, 0.6, 0.12)
+		tick.BinPrice = 100_014 // 现货在锚上方 +14 → dog=no 记 −14
+		tick.TwapPrice = 100_021
+		o := e.ProcessTick(tick)
+		if o == nil || o.Side != SideNo {
+			t.Fatalf("应 dog=no: %+v", o)
+		}
+		if !approx(o.DevUSD, -14) || !approx(o.TwapDevUSD, -21) {
+			t.Fatalf("dev_usd/twap_dev_usd = %v/%v, 期望 −14/−21", o.DevUSD, o.TwapDevUSD)
+		}
+	})
+
+	t.Run("TWAP 缺失只影响 twap_dev（dev 仍记）", func(t *testing.T) {
+		e := newEng(cfgOK())
+		feed(t, e, 5, 260, 0.5, 0.5)
+		tick := stdTick(250, 0.19, 0.9)
+		tick.BinPrice = 99_986 // TwapPrice 默认 0
+		o := e.ProcessTick(tick)
+		if o == nil || !o.OK {
+			t.Fatalf("应 ok: %+v", o)
+		}
+		if !approx(o.DevUSD, -14) || o.TwapDevUSD != 0 {
+			t.Fatalf("dev/twap_dev = %v/%v, 期望 −14/0", o.DevUSD, o.TwapDevUSD)
+		}
+	})
+
+	t.Run("锚缺失时两个美元位移都不带出", func(t *testing.T) {
+		e := newEng(cfgOK())
+		e.BeginWindow(0, tHist) // 锚缺失（纯函数防线路径）
+		tick := stdTick(250, 0.12, 0.9)
+		tick.BinPrice = 99_986
+		tick.TwapPrice = 99_900
+		o := e.decide(tick, SideYes)
+		if o.DevUSD != 0 || o.TwapDevUSD != 0 {
+			t.Fatalf("锚缺失应不记美元位移: %+v", o)
+		}
+	})
 }
 
 // TestWindowEnd 窗口结束终 tick 与状态复位。

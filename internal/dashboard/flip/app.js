@@ -103,6 +103,14 @@
     return d ? d.toFixed(2) : '—';
   }
 
+  // 美元位移（dev/twap_dev，同 tail 的 dev$）: 带符号 2 位; |值| < 0.005 归零，
+  // 防 toFixed 产生 "-0.00"。0/缺失 = 输入缺失（或现货恰在锚上）→ 上游判 0 显示「—」
+  function fmtUsd(v) {
+    if (v == null) return '—';
+    if (Math.abs(v) < 0.005) return '0.00';
+    return (v > 0 ? '+' : '') + v.toFixed(2);
+  }
+
   // TWAP 差（twap − twap_open）: 带符号 2 位；0 不带符号；
   // |差| < 0.005 归零，防 toFixed 产生 "−0.00"
   function fmtTwapDiff(v) {
@@ -302,6 +310,8 @@
         '<td>' + r.fill.toFixed(3) + '</td>' +
         '<td>' + (r.m_45 ? r.m_45.toFixed(2) : '—') + '</td>' +
         '<td>' + fmtDist(r.dist_s) + '</td>' +
+        '<td>' + (r.dev_usd ? fmtUsd(r.dev_usd) : '—') + '</td>' +
+        '<td>' + (r.twap_dev_usd ? fmtUsd(r.twap_dev_usd) : '—') + '</td>' +
         '<td>' + (pos && r.shares ? r.shares.toFixed(1) : '—') + '</td>' +
         '<td>' + resultCell(r) + '</td>' +
         '<td class="' + (pos ? pnlCls : 'muted') + '">' + (pos ? fmtPnl(r.pnl) : '—') + '</td>';
@@ -331,6 +341,8 @@
         '<td>' + r.fill.toFixed(3) + '</td>' +
         '<td>' + (r.m_45 ? r.m_45.toFixed(2) : '—') + '</td>' +
         '<td>' + fmtDist(r.dist_s) + '</td>' +
+        '<td>' + (r.dev_usd ? fmtUsd(r.dev_usd) : '—') + '</td>' +
+        '<td>' + (r.twap_dev_usd ? fmtUsd(r.twap_dev_usd) : '—') + '</td>' +
         '<td>' + status + '</td>';
       tb.appendChild(tr);
     });

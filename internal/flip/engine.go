@@ -343,6 +343,17 @@ func (e *Engine) decide(t Tick, side string) *Observation {
 		}
 	}
 
+	// 同一对位移的**美元**形式（不除 σ：美元尺子与 σ regime 无关，见 types.go 注释）。
+	// 只依赖 anchor 与各自的价，故不受 histBps 缺失影响。
+	if e.anchor > 0 {
+		if t.BinPrice > 0 {
+			o.DevUSD = sgn * (t.BinPrice - e.anchor)
+		}
+		if t.TwapPrice > 0 {
+			o.TwapDevUSD = sgn * (t.TwapPrice - e.anchor)
+		}
+	}
+
 	// reject_reason 顺序固定：rem_low → no_hist → missing_spot → missing_anchor
 	// → no_crash → dist_out（文档化，复验按原因计数）。
 	switch {

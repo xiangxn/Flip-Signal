@@ -66,18 +66,23 @@ type stateResponse struct {
 // recordResponse 是 flip /api/observations 与 /api/signals 的元素。
 // 字段 = 观测记录（ts/date/condition_id/slug 对齐回测 CSV 键，09-15 复验映射用）。
 type recordResponse struct {
-	Ts           int64   `json:"ts"`
-	Date         string  `json:"date"`
-	ConditionID  string  `json:"condition_id"`
-	Slug         string  `json:"slug"`
-	Side         string  `json:"side"` // 狗侧: yes/no
-	Rem          int     `json:"rem"`
-	Fill         float64 `json:"fill"`
-	M20          float64 `json:"m_20"`
-	M30          float64 `json:"m_30"`
-	M45          float64 `json:"m_45"`
-	DistS        float64 `json:"dist_s,omitempty"`
-	DistT        float64 `json:"dist_t,omitempty"`
+	Ts          int64   `json:"ts"`
+	Date        string  `json:"date"`
+	ConditionID string  `json:"condition_id"`
+	Slug        string  `json:"slug"`
+	Side        string  `json:"side"` // 狗侧: yes/no
+	Rem         int     `json:"rem"`
+	Fill        float64 `json:"fill"`
+	M20         float64 `json:"m_20"`
+	M30         float64 `json:"m_30"`
+	M45         float64 `json:"m_45"`
+	DistS       float64 `json:"dist_s,omitempty"`
+	DistT       float64 `json:"dist_t,omitempty"`
+	// 同一对位移的美元形式（2026-09-25 追加）: dev_usd = sgn·(spot − anchor)、
+	// twap_dev_usd = sgn·(twap − anchor)，与 tail 的 dev 同口径。σ 尺子带 regime
+	// 漂移，美元是绝对尺子——用来判「信号出现时波动是否已把现货/TWAP 推离 anchor 很远」。
+	DevUSD       float64 `json:"dev_usd,omitempty"`
+	TwapDevUSD   float64 `json:"twap_dev_usd,omitempty"`
 	OK           bool    `json:"ok"`
 	RejectReason string  `json:"reject_reason,omitempty"`
 	Shares       float64 `json:"shares,omitempty"`
@@ -335,6 +340,8 @@ func mapRecord(rec *flip.Record) recordResponse {
 		M45:          rec.M45,
 		DistS:        rec.DistS,
 		DistT:        rec.DistT,
+		DevUSD:       rec.DevUSD,
+		TwapDevUSD:   rec.TwapDevUSD,
 		OK:           rec.OK,
 		RejectReason: rec.RejectReason,
 		Shares:       rec.Shares,

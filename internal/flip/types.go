@@ -183,6 +183,16 @@ type Observation struct {
 	// 一笔单从带内推到带外。纯诊断，不参与判定（口径见 docs/dog020_risk_latency_plan_2026-09-16.md §2.3）
 	SpotAgeMs int64   `json:"spot_age_ms,omitempty"`
 	TwapPrice float64 `json:"twap_price"` // 触底 tick TWAP-60 流值（dist_t 观察腿输入）
+
+	// 美元位移（2026-09-25 补，2026-09-24 实盘断崖复查的后续诊断）：与 dist_s/dist_t
+	// 同输入、同号口径（sgn: yes +1 / no −1），但单位是**美元**而不是 σ —— σ 尺子本身
+	// 带 regime 漂移（同一 1.8bps 位移，回测算 0.19σ、实盘算 0.26σ），美元才是绝对尺子，
+	// 用来回答「信号出现时波动是否已经把现货/TWAP 推离 anchor 很远」。
+	// 与 tail 的 dev 同口径（tail: dev = sgn·(spot − anchor)，美元）。
+	// 0/缺省 = 输入缺失（anchor、spot 或 twap ≤ 0）；0 也正好是「现货恰在锚上」，
+	// 两者同样是「无从判读」，故不再细分。
+	DevUSD     float64 `json:"dev_usd,omitempty"`      // sgn·(spot − anchor)
+	TwapDevUSD float64 `json:"twap_dev_usd,omitempty"` // sgn·(twap_price − anchor)
 }
 
 // Record 是一条触底观测的完整落盘记录（成功与失败都记）。
