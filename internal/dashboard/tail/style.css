@@ -277,15 +277,11 @@ tbody tr:last-child td { border-bottom: none; }
   .win-grid { grid-template-columns: 1fr 80px 1fr; }
   .win-mid { font-size: 16px; }
   table { font-size: 13px; }
-  /* 窄屏隐藏次要列（dev/sd/五格/份额/anchor/hist_bps），保持可读性 */
-  #snapsTable th:nth-child(5), #snapsTable td:nth-child(5),
-  #snapsTable th:nth-child(6), #snapsTable td:nth-child(6),
-  #snapsTable th:nth-child(7), #snapsTable td:nth-child(7),
-  #snapsTable th:nth-child(9), #snapsTable td:nth-child(9),
-  #framesTable th:nth-child(5), #framesTable td:nth-child(5),
-  #framesTable th:nth-child(6), #framesTable td:nth-child(6),
-  #framesTable th:nth-child(7), #framesTable td:nth-child(7),
-  #framesTable th:nth-child(8), #framesTable td:nth-child(8) { display: none; }
+  /* 窄屏不隐藏任何列：两表都保持全列, 靠 .table-wrap 的 overflow-x 横向滑动看全。
+     2026-09-24: 整合改造换过两表的 id 与列序, 而旧的 nth-child 隐藏规则未同步——
+     #framesTable 已不存在（死规则）, 剩下那组落在新 #snapsTable 上正好藏掉
+     dev$/sd$/**判定**（判定是本表全部内容）, 且藏完只剩 5 列、宽度不足卡片宽
+     ⇒ .table-wrap 无溢出可滚, 手机上既看不到判定列也滑不动。全删。 */
 }
 
 /* ── 逐日明细弹窗（点击「逐日盈利」卡片打开）── */

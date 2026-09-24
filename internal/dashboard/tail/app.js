@@ -266,11 +266,14 @@
     $('noBid').textContent = s.no_bid > 0 ? s.no_bid.toFixed(3) : '—';
     $('noAsk').textContent = s.no_ask > 0 ? s.no_ask.toFixed(3) : '—';
 
-    // 中间列: dev（位移, 美元; 正 = 朝热门侧方向）——0 表示输入缺失未计算
-    var devEl = $('winDev');
-    devEl.textContent = s.dev ? fmtUsd(s.dev) : '—';
-    devEl.classList.toggle('pos', s.dev > 0);
-    devEl.classList.toggle('neg', s.dev < 0);
+    // 中间列: twap − anchor（TWAP 位移, 美元）——与 win-meta 的 dev = 符号·(spot − anchor)
+    // 是**两个不同的量**（2026-09-24 修: 此前中间列误绑 dev, 与 meta 行数值恒等）。
+    // 锚未取到或 twap 无推送 ⇒ 「—」；正绿负红为原值方向, 不按侧别取符号（同 flip）
+    var twapDeltaEl = $('winTwapDelta');
+    var twapDelta = (s.twap_price > 0 && s.anchor > 0) ? s.twap_price - s.anchor : null;
+    twapDeltaEl.textContent = twapDelta == null ? '—' : fmtUsd(twapDelta);
+    twapDeltaEl.classList.toggle('pos', twapDelta != null && twapDelta > 0);
+    twapDeltaEl.classList.toggle('neg', twapDelta != null && twapDelta < 0);
 
     $('winRem').textContent = s.remaining_sec;
     // 热门侧有效价: ask 优先、bid 兜底（bid = 该侧卖单被撤空, 只能按买价挂单）

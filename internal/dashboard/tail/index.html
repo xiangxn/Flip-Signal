@@ -60,8 +60,10 @@
           <div class="side-bid" id="yesBid">—</div>
           <div class="side-ask">ask <span id="yesAsk">—</span></div>
         </div>
-        <!-- 中间列: 位移 dev（**美元**，正 = 朝热门侧方向），无边框，只有带符号数值 -->
-        <div class="win-mid" id="winDev" title="dev = 符号·(spot − anchor)，美元；正 = 朝热门侧方向">—</div>
+        <!-- 中间列: TWAP 差（twap − anchor，**美元**；原值方向，不按侧别取符号），无边框，只有带符号数值。
+             anchor = 边界那一秒的 TWAP 推送 = twap_open。⚠️ 与 win-meta 里的 dev（spot − anchor）
+             是两个不同的量, 不可共用同一个读数（2026-09-24 修: 此前两处都绑 dev, 数值恒等） -->
+        <div class="win-mid" id="winTwapDelta" title="twap − 锚（锚 = 边界那一秒的 TWAP 推送 = twap_open），美元；原值方向，不按侧别取符号">—</div>
         <div class="side down" id="noSide">
           <div class="side-name">DOWN (=NO) <span class="side-hot-tag" id="noHot"></span></div>
           <div class="side-bid" id="noBid">—</div>
@@ -71,7 +73,7 @@
       <div class="win-meta">
         <span>剩余 <b id="winRem">—</b>s</span>
         <span>热门侧 <b id="winHot">—</b></span>
-        <span>dev <b id="winDevUsd">—</b></span>
+        <span title="dev = 符号·(spot − anchor)，美元；正 = 朝热门侧方向（与中间列的 TWAP 差是两个量）">dev <b id="winDevUsd">—</b></span>
         <span>sd（1σ）<b id="winSd">—</b></span>
         <span>anchor <b id="winAnchor">—</b></span>
         <span>hist_bps <b id="winHist">—</b></span>
