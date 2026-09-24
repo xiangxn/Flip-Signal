@@ -33,8 +33,7 @@ case "$SYMBOL" in
         REMOTE_DIR="/root/lastrading/data/v4live"
         ;;
     *)
-        echo "错误: 无效参数 '$SYMBOL'，只支持 v4、v3、btc、v4live 或 eth"
-        exit 1
+        REMOTE_DIR="/root/lastrading/data/$SYMBOL"
         ;;
 esac
 
