@@ -10,8 +10,8 @@ import (
 // 采集, dashboard handler 无锁读——同 flip.LiveSnapshot 的模式）。
 //
 // 与 flip 的语义差异（本族是尾盘买热门侧, 没有「触底/浅洞」概念）:
-//   - 窗口读数换成**热门侧**（ask 高的一侧）的 side/hotAsk/dev/sd;
-//   - 进度用**两个一次性闩锁**（帧 rem≤FrameRem / 决策快照 rem≤RemStart）而非触底观测;
+//   - 窗口读数换成**热门侧**（有效价高的一侧）的 side/hotAsk/dev/sd;
+//   - 进度用**三段链的闩锁**（见 Latches）而非触底观测;
 //   - 锚可见性字段与 tailstats 同口径（AnchorExact/AnchorSrc/AnchorArrivedMs）。
 //
 // 窗口剩余秒不在这里: 与 flip 同款, 由 dashboard 用 EventStart + 窗口长现算
@@ -46,15 +46,17 @@ type LiveSnapshot struct {
 	TwapPrice float64 // Chainlink TWAP-60 流值
 
 	// 尾盘读数（现算, 与落盘行同源——见 decide.go 的派生量纯函数）
-	HotSide string  // 热门侧: yes | no（平局取 yes）
-	HotAsk  float64 // 热门侧 ask = 成交价口径
+	HotSide string  // 热门侧: yes | no（有效价高的一侧, 平局取 yes）
+	HotAsk  float64 // 热门侧**有效价**（ask 优先、bid 兜底）= 成交价口径
+	HotSrc  string  // 有效价来源: ask | bid（bid = 该侧卖单被撤空, 只能按买价挂单）
 	Dev     float64 // 位移（**美元**, 正 = 朝热门侧方向）
 	Sd      float64 // 该窗 1σ 折美元（0 = σ 不可用）
 
-	// 本窗三个闩锁（dashboard 显示「帧已落 / 快照已落 / 监听行已落 / 锚已冻结」）
-	FrameSent    bool
-	SnapSent     bool
-	ScanSent     bool // 监听口径对账行已产出（或无需产出——snap 已达标）
+	// 本窗三段链的进度（dashboard 显示「T150 已判 / T60 已判 / 监听中 / 已出信号 / 锚已冻结」）
+	T150Sent     bool // 第一段（rem≤t150_rem 判 ⑤）已做
+	T60Sent      bool // 第二段（rem≤t60_rem 判 ⑤）已做
+	Listening    bool // 已进入监听段（此后每秒判 ②）
+	SignalSent   bool // 本窗已出信号（= 已下单, 整窗只一单）
 	AnchorFrozen bool
 
 	// Stats 为本窗 tick 健康度（引擎计数器, 窗口间/未开始为 nil）

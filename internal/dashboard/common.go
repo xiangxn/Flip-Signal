@@ -7,7 +7,7 @@
 // 不同），互不影响——可以只开其一，也可以两个进程同时开。各自的 API:
 //
 //	flip:  /api/state /api/observations /api/signals /api/daily /api/config
-//	tail:  /api/state /api/snaps /api/frames /api/daily /api/judge /api/config
+//	tail:  /api/state /api/snaps /api/signals /api/daily /api/config
 //
 // 运行时快照类型（flip.LiveSnapshot / tail.LiveSnapshot）定义在各自的引擎包里
 // （引擎域数据）——本包只做 HTTP 展示，不自行定义状态类型。

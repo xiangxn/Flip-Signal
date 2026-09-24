@@ -221,7 +221,15 @@ func main() {
 			case <-ctx.Done():
 				return
 			case book := <-ch:
-				if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 {
+				// ⚠️ 只丢 nil, **不再丢「单侧为空」的整簿消息**（2026-09-24）。
+				// SDK 的 `book` 事件是**整簿快照**（market_monitor.go onOrderBook 原样
+				// 解析 bids/asks，空数组就是空）, 空 asks 是市场的真实状态——事件趋于
+				// 确定后热门侧的卖单被撤空, 实盘探针（cmd/bookprobe）在闭市前 10~30s
+				// 逐秒读到 `asks = []`。旧守卫把它当噪声丢掉, 内存里留下**撤单前那一份
+				// 旧簿**（常是 0.99）, 于是引擎与 Dashboard 继续报一个早已不存在的卖价。
+				// 现在照存: bestAsk/bestBid 返回 0 ⇒ 该 tick 被四档门控判无效（与回测
+				// 宇宙同口径）, Dashboard 显示「—」——「没人卖」如实呈现。
+				if book == nil {
 					continue
 				}
 				tokMu.RLock()

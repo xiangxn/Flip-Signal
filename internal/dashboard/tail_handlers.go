@@ -14,9 +14,10 @@ import (
 // tailStateResponse 是 tail /api/state 的响应体。
 //
 // 与 flip 的 stateResponse 的形制差异（两族是两条独立策略线, 字段本就不同）:
-//   - 触底/浅洞腿换成**热门侧读数**（hot_side/hot_ask/dev/sd）;
-//   - 「本窗触底观测」换成**两个一次性闩锁**（frame_sent/snap_sent/anchor_frozen）;
-//   - 多一段今日健康度（today_*: 判决的辅助闸门 3——窗数 / skip 分布 / 锚缺失）。
+//   - 触底/浅洞腿换成**热门侧读数**（hot_side/hot_ask/hot_src/dev/sd）;
+//   - 「本窗触底观测」换成**三段链的四个闩锁**（t150_sent/t60_sent/listening/
+//     signal_sent/anchor_frozen）;
+//   - 多一段今日健康度（today_*: 窗数 / skip 分布 / 锚缺失）。
 type tailStateResponse struct {
 	TS string `json:"ts"` // 服务器当前时间（RFC3339）
 
@@ -36,7 +37,7 @@ type tailStateResponse struct {
 	TwapAgeMs int64   `json:"twap_age_ms"`
 	SpotAgeMs int64   `json:"spot_age_ms"` // Binance spot 距本地接收毫秒（−1 = 尚无推送）
 	SpotPrice float64 `json:"spot_price"`
-	TwapPrice float64 `json:"twap_price"` // Chainlink TWAP-60 流值（⑤ 判定不用它, 只作诊断）
+	TwapPrice float64 `json:"twap_price"` // Chainlink TWAP-60 流值（判定不用它, 只作诊断）
 
 	// 锚与 σ（锚 = 边界那一秒的 TWAP 推送, 决策 #15）
 	Anchor          float64 `json:"anchor"`   // 0 = 本窗尚未取到（本窗一行不产出）
@@ -45,18 +46,20 @@ type tailStateResponse struct {
 	AnchorSrc       string  `json:"anchor_src,omitempty"`
 	AnchorArrivedMs int64   `json:"anchor_arrived_ms,omitempty"`
 
-	// 尾盘读数（现算, 与落盘行同源）: 热门侧 = ask 高的一侧（平局取 yes）
+	// 尾盘读数（现算, 与落盘行同源）: 热门侧 = **有效价**高的一侧（每侧 ask 优先、
+	// ask 空则退 bid；平局取 yes）
 	HotSide string  `json:"hot_side"`
 	HotAsk  float64 `json:"hot_ask"`
-	Dev     float64 `json:"dev"` // 位移（**美元**, 正 = 朝热门侧方向）
-	Sd      float64 `json:"sd"`  // 该窗 1σ 折美元（0 = σ 不可用）
+	HotSrc  string  `json:"hot_src,omitempty"` // ask | bid（bid = 该侧卖单被撤空, 只能按买价挂）
+	Dev     float64 `json:"dev"`               // 位移（**美元**, 正 = 朝热门侧方向）
+	Sd      float64 `json:"sd"`                // 该窗 1σ 折美元（0 = σ 不可用）
 
-	// 本窗三个闩锁（帧 rem≤150 / 决策快照 rem≤60 / 监听对账行）+ 锚冻结。
-	// scan_sent 的语义 = 「监听行已定」——snap 达标时它同时为真（两口径同 tick, 不再产
-	// 监听行）, 故三真 ≠ 本窗一定落过三条行, 前端文案按「已定」而非「已落」写。
-	FrameSent    bool `json:"frame_sent"`
-	SnapSent     bool `json:"snap_sent"`
-	ScanSent     bool `json:"scan_sent"`
+	// 本窗三段链的进度 + 锚冻结（均取自引擎 Latches, 判定路径不读它们）。
+	// 语义都是「已定」: t60_sent 蕴含 t150_sent; signal_sent 蕴含整窗已下单（此后 Done）。
+	T150Sent     bool `json:"t150_sent"`
+	T60Sent      bool `json:"t60_sent"`
+	Listening    bool `json:"listening"`
+	SignalSent   bool `json:"signal_sent"`
 	AnchorFrozen bool `json:"anchor_frozen"`
 
 	// 三源新鲜度阈值（前端按此标红，勿硬编码）
@@ -65,19 +68,20 @@ type tailStateResponse struct {
 	// 本窗 tick 健康度（引擎计数器; 窗口间为 nil）
 	WindowStats *tail.WindowStats `json:"window_stats,omitempty"`
 
-	// 统计汇总（已结算 + 待结算）——snap 行口径, 帧行不计（无仓位语义）
-	SnapCount    int     `json:"snap_count"` // 全部决策快照行（含否决与被闸）
-	SignalCount  int     `json:"signal_count"`
-	WonCount     int     `json:"won_count"`
-	LostCount    int     `json:"lost_count"`
-	PendingCount int     `json:"pending_count"`
-	WinRate      float64 `json:"win_rate"` // 已结算口径（待结算不计入分母）
-	CumPnl       float64 `json:"cumulative_pnl"`
-	DayPnlPos    int     `json:"day_pnl_pos"`
-	DayTotal     int     `json:"day_total"`
-	MaxDrawdown  float64 `json:"max_drawdown"`
+	// 统计汇总（恒等式 signal_count = won + lost + pending + noexec）
+	DecisionCount int     `json:"decision_count"` // 判定行数（t150/t60 未出信号的判定）
+	SignalCount   int     `json:"signal_count"`   // 全部信号（含未成交与被闸）
+	WonCount      int     `json:"won_count"`      // 已结算且有仓位（按官方 outcome）
+	LostCount     int     `json:"lost_count"`
+	PendingCount  int     `json:"pending_count"` // 有仓位、等结算回填
+	NoExecCount   int     `json:"noexec_count"`  // 未成交: 被闸/被拒/0 成交/挂单未定稿（不入胜率）
+	WinRate       float64 `json:"win_rate"`      // 已结算口径（未成交与待结算都不进分母）
+	CumPnl        float64 `json:"cumulative_pnl"`
+	DayPnlPos     int     `json:"day_pnl_pos"` // 逐日盈利天数（有仓位的已结算日）
+	DayTotal      int     `json:"day_total"`
+	MaxDrawdown   float64 `json:"max_drawdown"`
 
-	// 今日健康度（判决的辅助闸门 3; 读当日 tailstats_*.jsonl）
+	// 今日健康度（辅助闸门: 读当日 tailstats_*.jsonl）
 	TodayStatsDay string         `json:"today_stats_day,omitempty"` // 读的是哪个 UTC 日的文件
 	TodayWindows  int            `json:"today_windows"`             // 本日实际采集窗数（Skip 为空）
 	TodayRows     int            `json:"today_rows"`                // 本日健康度行数（≈288 即主循环跑满）
@@ -90,14 +94,15 @@ type tailStateResponse struct {
 	Risk *flip.RiskSummary `json:"risk,omitempty"`
 }
 
-// tailRecordResponse 是 tail /api/snaps 与 /api/frames 的元素（两族行共用一套字段
-// ——帧行只是判定段为空）。
+// tailRecordResponse 是 tail /api/snaps 与 /api/signals 的元素（两族行共用一套字段
+// ——判定行只是 ok=false、无执行字段）。
 type tailRecordResponse struct {
 	Ts          int64  `json:"ts"`
 	Date        string `json:"date"`
 	ConditionID string `json:"condition_id"`
 	Slug        string `json:"slug"`
-	Kind        string `json:"kind"` // snap | frame
+	Kind        string `json:"kind"`            // snap（frame/scan 为 legacy 行, 不再产出）
+	Stage       string `json:"stage,omitempty"` // t150 | t60 | listen; 空 = legacy 旧行
 	FrameT      int    `json:"frame_t"`
 	Rem         int    `json:"rem"`
 
@@ -115,10 +120,11 @@ type tailRecordResponse struct {
 
 	Side   string  `json:"side"` // 热门侧: yes | no
 	HotAsk float64 `json:"hot_ask"`
+	HotSrc string  `json:"hot_src,omitempty"` // ask | bid（bid = 按买价兜底下单）
 	Dev    float64 `json:"dev,omitempty"`
 	Sd     float64 `json:"sd,omitempty"`
 
-	// 四条原始腿（前端据此点亮五格徽章; 帧行恒 false 全灭）
+	// 四条原始腿（前端据此点亮徽章; 判定行的被拒腿一目了然）
 	RulePrice   bool `json:"rule_price"`
 	RuleDev63   bool `json:"rule_dev63"`
 	RuleSigma   bool `json:"rule_sigma"`
@@ -132,7 +138,10 @@ type tailRecordResponse struct {
 	Won        *bool   `json:"won,omitempty"`
 	PnL        float64 `json:"pnl,omitempty"`
 	ResolvedAt string  `json:"resolved_at,omitempty"`
-	GateReason string  `json:"gate_reason,omitempty"`
+	// HasPosition 是否有真实仓位（= 实际成交）——前端据此把未成交行的 P&L 显示成「—」
+	// （未成交行照显官方结果, 但盈亏恒 0, 见 recorder.recomputePnL）。
+	HasPosition bool   `json:"has_position"`
+	GateReason  string `json:"gate_reason,omitempty"`
 
 	ExecStatus string  `json:"exec_status,omitempty"`
 	OrderID    string  `json:"order_id,omitempty"`
@@ -141,22 +150,20 @@ type tailRecordResponse struct {
 	ExecNote   string  `json:"exec_note,omitempty"`
 }
 
-// tailDailyRow 是 tail /api/daily 的一行（= 共用骨架 + 帧/监听/注数细分）。
+// tailDailyRow 是 tail /api/daily 的一行（= 共用骨架 + 本族的段/未成交细分列）。
 //
-// Obs（骨架里 = 全部行数）在 tail 里 = Frames + Snaps + Scans; NotesPerDay 是判决
-// 频率闸的输入（文档 §5.2: ⑤ 应落 90~120 注/日）, 放在这里让「哪一天频率异常」
-// 一眼可见。
+//	Signals = Won + Lost + Pending + NoExec
 //
-// ⚠️ Scans（监听口径对账行）**不计入** Signals/Won/Lost/PnL 任何一格——它没有真实
-// 仓位, 混进 P&L 会让日表与熔断口径（DailyPnl 已排除 scan）对不上。它只出现在日表
-// 的「监听」列, 供「今天监听口径本会成交几笔」的粗看; 真正的配对判定在离线脚本
-// python/v4/18_tail_scan_register.py。
+// 三个段列（T150/T60/Listen）是**信号数按来源分桶**（T150+T60+Listen+legacy 无 stage 行
+// = Signals）; Decisions 是判定行数（t150/t60 段没出信号的那些行, OK=false）。
+// NoExec 是未成交信号数（无仓位: 被闸/被拒/0 成交/挂单未定稿）。
 type tailDailyRow struct {
 	dayAgg
-	Frames      int     `json:"frames"`        // 本日帧行数（rem≤150 的原始快照）
-	Snaps       int     `json:"snaps"`         // 本日决策快照行数（rem≤60）
-	Scans       int     `json:"scans"`         // 本日监听对账行数（只记录, 无仓位）
-	NotesPerDay float64 `json:"notes_per_day"` // 注/日（= Signals; 与 90~120 对照）
+	Decisions int `json:"decisions"` // 本日判定行数（未出信号的判定）
+	T150      int `json:"t150"`      // 本日第一段（rem≤t150_rem 判⑤）出的信号数
+	T60       int `json:"t60"`       // 本日第二段（rem≤t60_rem 判⑤）出的信号数
+	Listen    int `json:"listen"`    // 本日监听段（每秒判②）出的信号数
+	NoExec    int `json:"noexec"`    // 本日未成交信号数（无仓位, 不入胜率）
 }
 
 // tailDailyResp 是 tail /api/daily 的响应体。
@@ -165,25 +172,13 @@ type tailDailyResp struct {
 	Total tailDailyRow   `json:"total"`
 }
 
-// judgeResp 是 tail /api/judge 的响应体（判决卡的全部数据源）。
-type judgeResp struct {
-	Meta   tail.JudgeMeta `json:"meta"`
-	Grids  []tail.Grid    `json:"grids"`
-	Ruler5 tail.Grid      `json:"ruler5"` // ⑤ 本尊（前端判决卡直取, 免得按字符串找）
-}
-
 // ── Handlers ──
 
 // handleState 返回运行状态、统计汇总与今日健康度。
 func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 	live := s.snapshot.Snapshot()
-	snap, sig, won := s.recorder.Counts()
-	pending := len(s.recorder.PendingSignals())
-	lost := sig - won - pending
-	winRate := 0.0
-	if resolved := won + lost; resolved > 0 {
-		winRate = float64(won) / float64(resolved)
-	}
+	t := s.tally()
+	decisions := s.decisionCount()
 	daily := s.recorder.DailyPnl()
 	cumPnl, dayPos := 0.0, 0
 	for _, d := range daily {
@@ -193,7 +188,7 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 今日健康度（辅助闸门 3）: 读当日 tailstats 文件。读失败不阻断 /api/state
+	// 今日健康度（读当日 tailstats 文件）。读失败不阻断 /api/state
 	// ——状态页其余部分仍要能看（错误只反映在窗数恒 0）。
 	today := s.nowFn().UTC().Format("2006-01-02")
 	rows, err := s.recorder.TodayStats()
@@ -238,20 +233,23 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 		AnchorArrivedMs: live.AnchorArrivedMs,
 		HotSide:         live.HotSide,
 		HotAsk:          live.HotAsk,
+		HotSrc:          live.HotSrc,
 		Dev:             live.Dev,
 		Sd:              live.Sd,
-		FrameSent:       live.FrameSent,
-		SnapSent:        live.SnapSent,
-		ScanSent:        live.ScanSent,
+		T150Sent:        live.T150Sent,
+		T60Sent:         live.T60Sent,
+		Listening:       live.Listening,
+		SignalSent:      live.SignalSent,
 		AnchorFrozen:    live.AnchorFrozen,
 		Limits:          s.limits,
 		WindowStats:     live.Stats,
-		SnapCount:       snap,
-		SignalCount:     sig,
-		WonCount:        won,
-		LostCount:       lost,
-		PendingCount:    pending,
-		WinRate:         winRate,
+		DecisionCount:   decisions,
+		SignalCount:     t.Total,
+		WonCount:        t.Won,
+		LostCount:       t.Lost,
+		PendingCount:    t.Pending,
+		NoExecCount:     t.NoExec,
+		WinRate:         t.WinRate(),
 		CumPnl:          cumPnl,
 		DayPnlPos:       dayPos,
 		DayTotal:        len(daily),
@@ -266,66 +264,39 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleSnaps 返回决策快照行（成功+否决+被闸，时间倒序分页）。
+// handleSnaps 返回全部决策行（判定行 + 信号行, 时间倒序分页）。
 func (s *TailState) handleSnaps(w http.ResponseWriter, r *http.Request) {
 	all := filterKind(s.recorder.Observations(), tail.KindSnap)
 	writePage(w, r, all, tailRecTs, mapTailRecord, 50)
 }
 
-// handleScans 返回监听口径对账行（快照未达标后首个 ⑤ 达标 tick，时间倒序分页）。
+// handleSignals 返回**信号行**（ok=true: 判定通过、已进执行路径的那些, 时间倒序分页）。
 //
-// 与 snap 表分开的理由同 frames: 语义不同（本族唯一**没有仓位**的行）, 混排只会
-// 让「这一条到底下没下单」变得要逐行读 gate/exec 字段才能判。
-func (s *TailState) handleScans(w http.ResponseWriter, r *http.Request) {
-	all := filterKind(s.recorder.Observations(), tail.KindScan)
-	writePage(w, r, all, tailRecTs, mapTailRecord, 50)
+// 与 /api/snaps 分开的理由: 判定行（t150/t60 未达标）数量是信号的两三倍, 混在一张表
+// 里会把真正下过单的行淹没; 页面的「信号」表要的是「这一笔下没下、成没成、赢没赢」。
+func (s *TailState) handleSignals(w http.ResponseWriter, r *http.Request) {
+	writePage(w, r, s.recorder.Signals(), tailRecTs, mapTailRecord, 50)
 }
 
-// handleFrames 返回原始帧行（rem≤150 快照，时间倒序分页）。
-//
-// 与 snap 表分开的理由: 帧行是「那一刻市场长什么样」的原稿, 数量与快照行同阶
-// （每窗各至多一条）, 混在一张表里只会让两种语义的行互相淹没。
-func (s *TailState) handleFrames(w http.ResponseWriter, r *http.Request) {
-	all := filterKind(s.recorder.Observations(), tail.KindFrame)
-	writePage(w, r, all, tailRecTs, mapTailRecord, 50)
-}
-
-// handleDaily 返回逐日明细（UTC 日粒度，含注数频率——判决频率闸的逐日视角）。
+// handleDaily 返回逐日明细（UTC 日粒度，含段分布与未成交——判决频率闸的逐日视角）。
 func (s *TailState) handleDaily(w http.ResponseWriter, r *http.Request) {
 	days := s.collectDaily()
 	total := tailDailyRow{dayAgg: sumDaily(daysToAggs(days))}
 	for _, d := range days {
-		total.Frames += d.Frames
-		total.Snaps += d.Snaps
-		total.Scans += d.Scans
-	}
-	if len(days) > 0 {
-		total.NotesPerDay = float64(total.Signals) / float64(len(days)) // 合计行 = 日均注数
+		total.Decisions += d.Decisions
+		total.T150 += d.T150
+		total.T60 += d.T60
+		total.Listen += d.Listen
+		total.NoExec += d.NoExec
 	}
 	writeJSON(w, tailDailyResp{Days: days, Total: total})
-}
-
-// handleJudge 返回判决速览（五格 + T=150 对照格 + 日级 bootstrap 区间 + 判词）。
-//
-// ⚠️ 每次请求**现算**（全量行 → 6 格 × 2000 次重采样）。量级: 万行级别 + 12 万次
-// 抽取, 毫秒级; 不做缓存是因为缓存失效判据（新结算行到达）要么漏要么复杂, 而
-// 判决口径本身就是「按需重算」的纯函数（tail.Judge 只读副本）。
-func (s *TailState) handleJudge(w http.ResponseWriter, r *http.Request) {
-	grids := tail.Judge(s.recorder.Observations(), s.cfg)
-	resp := judgeResp{Meta: tail.Meta(), Grids: grids}
-	for _, g := range grids {
-		if g.Rule == "5" {
-			resp.Ruler5 = g
-		}
-	}
-	writeJSON(w, resp)
 }
 
 // handleConfig 返回当前策略配置（前端展示标定参数; 键名 = mapstructure tag）。
 func (s *TailState) handleConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]interface{}{
-		"rem_start":       s.cfg.RemStart,
-		"frame_rem":       s.cfg.FrameRem,
+		"t150_rem":        s.cfg.T150Rem,
+		"t60_rem":         s.cfg.T60Rem,
 		"price_min":       s.cfg.PriceMin,
 		"dev_min_usd":     s.cfg.DevMinUSD,
 		"sigma_min_usd":   s.cfg.SigmaMinUSD,
@@ -350,7 +321,7 @@ func filterKind(recs []*tail.Record, kind string) []*tail.Record {
 // tailRecTs 取记录的排序时间戳（writePage 用）。
 func tailRecTs(rec *tail.Record) int64 { return rec.Ts }
 
-// mapTailRecord 将 tail.Record 映射为 API 响应元素（snap 与 frame 共用一套字段）。
+// mapTailRecord 将 tail.Record 映射为 API 响应元素（判定行与信号行共用一套字段）。
 func mapTailRecord(rec *tail.Record) tailRecordResponse {
 	return tailRecordResponse{
 		Ts:           rec.Ts,
@@ -358,6 +329,7 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 		ConditionID:  rec.ConditionID,
 		Slug:         rec.Slug,
 		Kind:         rec.Kind,
+		Stage:        rec.Stage,
 		FrameT:       rec.FrameT,
 		Rem:          rec.Rem,
 		YesBid:       rec.YesBid,
@@ -373,6 +345,7 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 		TwapAgeMs:    rec.TwapAgeMs,
 		Side:         rec.Side,
 		HotAsk:       rec.HotAsk,
+		HotSrc:       rec.HotSrc,
 		Dev:          rec.Dev,
 		Sd:           rec.Sd,
 		RulePrice:    rec.Rules.Price,
@@ -386,6 +359,7 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 		Won:          rec.Won,
 		PnL:          rec.PnL,
 		ResolvedAt:   rec.ResolvedAt,
+		HasPosition:  rec.HasPosition(),
 		GateReason:   rec.GateReason,
 		ExecStatus:   rec.ExecStatus,
 		OrderID:      rec.OrderID,
@@ -395,17 +369,76 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 	}
 }
 
+// tailTally 是信号分类汇总（每行**只落一类**, 恒等式 Total = Won + Lost + Pending + NoExec）。
+//
+// 判据是 **HasPosition**（实际成交 ∧ 非 legacy 对账行）:
+//   - 无仓位（NoExec）= 下单失败/被风控拦/下单后未成交/挂单未定稿——a.md 第 4 条明确
+//     「未成交信号不进入胜率计算」, 且它们**照显官方结果**（won 结算后非 nil, 但 P&L 恒 0）;
+//   - 有仓位 = 在途（Pending, 等结算编排回填）或已结算（Won/Lost, 胜率分母只有这两类）。
+//
+// ⚠️ 不能用 `lost = signals − won − pending` 反算: 那会把从未有过仓位的行算成「输」
+// （同时虚增亏损笔数与压低胜率）——flip 侧 2026-09-24 修过同一个坑（决策 #20）。
+type tailTally struct {
+	Total   int
+	Won     int
+	Lost    int
+	Pending int // 有仓位、等结算编排回填
+	NoExec  int // 无仓位（被闸/被拒/未成交/挂单未定稿）
+}
+
+// WinRate 已结算胜率（分母只含赢+输, 未成交与待结算都不进）。
+func (t tailTally) WinRate() float64 {
+	if n := t.Won + t.Lost; n > 0 {
+		return float64(t.Won) / float64(n)
+	}
+	return 0
+}
+
+// tally 逐行分类全部信号（判据见 tailTally）。
+func (s *TailState) tally() tailTally {
+	var t tailTally
+	for _, rec := range s.recorder.Observations() {
+		if !rec.OK {
+			continue
+		}
+		t.Total++
+		switch {
+		case !rec.HasPosition():
+			t.NoExec++
+		case rec.Won == nil:
+			t.Pending++
+		case *rec.Won:
+			t.Won++
+		default:
+			t.Lost++
+		}
+	}
+	return t
+}
+
+// decisionCount 本日/累计判定行数（kind=snap ∧ ok=false; t150/t60 段没出信号的那些行）。
+func (s *TailState) decisionCount() int {
+	n := 0
+	for _, rec := range s.recorder.Observations() {
+		if rec.Kind == tail.KindSnap && !rec.OK {
+			n++
+		}
+	}
+	return n
+}
+
 // collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（任意序输入，输出时间正序）。
 //
-// Obs（骨架字段）= 帧行 + 快照行 + 监听行——它回答的是「这一天引擎写了多少行」;
-// Frames/Snaps/Scans 拆开看, NotesPerDay = 当日 ok 信号数（逐日就是「注/日」本身,
-// 与判决的频率闸 90~120 同量纲）。
-// ⚠️ scan 行在计数后**直接跳过**骨架的 ok/结算段: 它没有仓位, 归入 Signals/Won/Lost/PnL
-// 任何一格都会与 DailyPnl（熔断口径, 已排除 scan）打架。
+// Obs（骨架字段）= 本日全部行数（2026-09-24 起本族只产 kind=snap 一种行）;
+// Decisions = 判定行; 三个段列 = 信号按 stage 分桶; NoExec = 未成交信号。
+// ⚠️ legacy 行（frame/scan, 09-23/09-24 两天）: frame 归 Obs 但不属任何段;
+// scan 是旧口径的对账行, OK=true 而**无仓位**——它会进 Signals 与 NoExec（判据统一
+// 用 HasPosition, 不为它单开一列）。段列合计因此可能小于 Signals, 差额即 legacy 行。
 func (s *TailState) collectDaily() []tailDailyRow {
 	type acc struct {
 		agg                 dayAgg
-		frames, snap, scans int
+		decisions, t150     int
+		t60, listen, noexec int
 	}
 	byDay := map[string]*acc{}
 	for _, rec := range s.recorder.Observations() {
@@ -415,21 +448,24 @@ func (s *TailState) collectDaily() []tailDailyRow {
 			byDay[rec.Date] = a
 		}
 		a.agg.Obs++
-		switch rec.Kind {
-		case tail.KindFrame:
-			a.frames++
-			continue // 帧行没有判定/仓位段
-		case tail.KindScan:
-			a.scans++
-			continue // 监听行只计数, 不进 P&L 骨架（无仓位, 见 tailDailyRow 注）
-		case tail.KindSnap:
-			a.snap++
-		}
 		if !rec.OK {
+			if rec.Kind == tail.KindSnap {
+				a.decisions++
+			}
 			continue
 		}
 		a.agg.Signals++
+		switch rec.Stage {
+		case tail.StageT150:
+			a.t150++
+		case tail.StageT60:
+			a.t60++
+		case tail.StageListen:
+			a.listen++
+		}
 		switch {
+		case !rec.HasPosition():
+			a.noexec++
 		case rec.Won == nil:
 			a.agg.Pending++
 		case *rec.Won:
@@ -448,8 +484,8 @@ func (s *TailState) collectDaily() []tailDailyRow {
 			g.WinRate = float64(g.Won) / float64(n)
 		}
 		out = append(out, tailDailyRow{
-			dayAgg: g, Frames: a.frames, Snaps: a.snap, Scans: a.scans,
-			NotesPerDay: float64(g.Signals),
+			dayAgg: g, Decisions: a.decisions, T150: a.t150, T60: a.t60,
+			Listen: a.listen, NoExec: a.noexec,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Date < out[j].Date })

@@ -6,31 +6,36 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
-// Engine 是「扫尾盘」的快照状态机。
+// Engine 是「扫尾盘」的三段判定状态机。
 //
-// 每 300s 窗口重置一次（或每窗新建实例）: 有效 tick 上按三个**独立的一次性闩锁**
-// 取帧——rem ≤ Config.FrameRem 首帧（原始快照, 只记录）、rem ≤ Config.RemStart
-// 首帧（决策快照, 判定 ⑤ 并执行）, 以及决策快照**之后**第一个 ⑤ 达标的 tick
-// （监听口径对账行, **只记录**）。产出决策快照后转 Scanning, 本窗不再判定/下单。
+// 每 300s 窗口重置一次（或每窗新建实例）: 在**有效 tick** 上按时间腿递进判三次，
+// **任一段出信号即整窗只下一单**（此后不再判定）:
+//
+//	Watching  ──首个可判定 tick 且 rem ≤ t150_rem──▶ [判 ⑤]
+//	   ├─ 达标 → 落信号行（下单）→ Done
+//	   └─ 不达标 → Await60
+//	Await60   ──首个可判定 tick 且 rem ≤ t60_rem──▶ [判 ⑤]
+//	   ├─ 达标 → 落信号行（下单）→ Done
+//	   └─ 不达标 → Listening
+//	Listening ──此后**每秒**: 可判定 tick ∧ ② 达标──▶ 落信号行（下单）→ Done
+//	   └─ rem == 0 → Done
 //
 // 本包零第三方依赖、无 I/O, 判定输入全部经 Tick / BeginWindow 注入, 可独立测试：
-//   - **有效 tick** = BookLatMs ≤ MaxBookLatMs ∧ UP(≈yes)/DOWN(≈no) 双侧四档报价
-//     齐全 ∧ rem > 0（镜像回测快照搜索的 gate: pm 存在 + 延迟 + 四档 > 0 + rem > 0）。
-//     无效 tick 占 Ticks 计数但**不推进任何闩锁**——对应 python 在 `rem ≤ T` 判断
-//     之前的 `continue`, 即「首帧」指的是首个**有效** tick。
+//   - **可判定 tick**（本文件里一律简称「可判定」）= `BookLatMs ≤ MaxBookLatMs`
+//     ∧ 盘口有效价 > 0（`ask` 优先、`bid` 兜底, 见 decide.HotBook）
+//     ∧ **spot > 0** ∧ rem > 0。无效 tick 占 Ticks 计数但**不推进任何段**——
+//     对应 python 在 `rem ≤ T` 判断之前的 `continue`, 即「首个 tick」指首个**可判定** tick。
+//     ⚠️ 缺 spot 的 tick 走「跳过」而非「整窗丢弃」（2026-09-24 起）: 旧口径一缺
+//     spot 就把该窗判成 missing_spot 并 Done, 而历史 14 天里判定 tick 上 spot 从不
+//     缺失（§5）——取更稳的那条, 差异是 0 窗。
 //   - **锚未就绪**（anchor ≤ 0, 取锚通道尚未精确命中边界那一秒的推送）: 同样不推进
-//     闩锁。时序上几乎不会发生——取锚通道在边界 +20s 就结束, 而最早的闩锁在
+//     任何段。时序上几乎不会发生——取锚通道在边界 +20s 结束, 而最早的判定点在
 //     rem≤150（边界 +150s）,**锚在产出任何行之前早已定局**。始终未取到 = 本窗一行
 //     不产出（cmd/tail 在 tailstats 记 anchor_missing=true）, 与 flip 决策 #15
 //     「宁可丢窗也不拿近似锚判定」同一原则（观测行 anchor 恒 >0）。
-//   - **两个闩锁落在同一 tick**（首个有效 tick 已 rem ≤ RemStart, 例如进程在尾盘才
-//     接上）: 两行同发、内容同源、FrameT 不同——与 python 对每个 T 各取一次首帧等价
-//     （两个 T 的 snapshots() 本就会选中同一条 tick）。
-//   - **帧行绝不下单**: 只有 Kind=KindSnap 且 OK 的行进执行编排（策略本体是 T=60）。
-//   - **监听对账行也绝不下单**且判定规则与 snap 有一处**刻意的**不同: snap 是「整窗
-//     一次性」（判定失败/缺 spot 即 Done, 不往后找）, scan 是「逐 tick 独立」
-//     （缺 spot/twap 的 tick 只是跳过它, 与 python 监听口径 tail_ticks 逐条对齐）。
-//     两者不是同一个估计量, 这正是本行存在的理由——见 KindScan 的类型注释。
+//   - **迟到接入**（首个可判定 tick 已 rem ≤ t60_rem）: 跳过第一段（那一 tick 本就
+//     不存在, 不伪造 t150 行）, 直接在 T=60 判一次 ⑤。
+//   - **崩溃重启续跑**（见 Resume）: 已完成的段不重复判, 未完成的段照常跑。
 //   - rem ≤ 0 终 tick 处理完置 Done（不产出观测）。
 type Engine struct {
 	mu sync.Mutex
@@ -41,24 +46,31 @@ type Engine struct {
 	anchor  float64 // 本窗锚 = 边界那一秒的 TWAP 推送值（≤0 = 尚未取到）
 	histBps float64 // σ: 前 ≤18 个已完窗 |tw_close−tw_open| 均值换算 bps（≤0 = 不可用）
 
-	frameSent bool // rem≤FrameRem 首帧已产出
-	snapSent  bool // rem≤RemStart 首帧（决策快照）已产出
-	// scanSent 监听口径对账行已定局: 要么已产出, 要么因决策快照自身达标而不可能有
-	// 增量行（快照与监听两口径在同一个 tick 成交 = B ⊇ A 的相等情形）。
-	scanSent bool
-	emitted  bool // 本窗已产出过任何行 → 锚冻结（UpgradeAnchor 拒收）
+	t150Sent bool // 第一段（rem≤T150Rem 判 ⑤）已做过
+	t60Sent  bool // 第二段（rem≤T60Rem 判 ⑤）已做过
+	// listenEntered 已进入监听段（单调, 出信号/闭市都不回退）。与 `state ==
+	// stateListening` 的差别只在「本段出了信号」的那一刻: 那时 state 已转 Done,
+	// 但 dashboard 的闩锁仍应显示「已进入监听段」（Latches.Listening 的语义）。
+	listenEntered bool
+	// signal 本窗已出信号（= 已落信号行并下单）: 单调, 置真即 Done——三段链的
+	// 「整窗只下一单」就靠它, 也是 ProcessTick 唯一的幂等守卫。
+	signal  bool
+	emitted bool // 本窗已产出过任何行 → 锚冻结（UpgradeAnchor 拒收）
 
 	stats WindowStats // 本窗 tick 健康度（纯计数, 不参与判定; 每窗重置）
 }
 
-// Latches 是本窗三个一次性闩锁 + 锚冻结状态的只读快照（dashboard 展示本窗进度用）:
-// Frame = 帧已落 / Snap = 决策快照已落 / Scan = 监听对账已定局 / Frozen = 已产出过行
-// （锚自此冻结, 也是 UpgradeAnchor 此后拒收的判据）。判定路径不读它。
+// Latches 是本窗进度 + 锚冻结状态的只读快照（dashboard 展示本窗进度用）:
+// T150/T60 = 该段判定已做（无论结果）/ Listening = 已进入监听段（**单调**: 本段出了
+// 信号转了 Done 之后仍为真, 否则页面会显示「监听 · 无（本窗未达标）」而信号恰恰来自
+// 监听段）/ Signal = 已出信号（= 已下单）/ Frozen = 已产出过行（锚自此冻结, 也是
+// UpgradeAnchor 此后拒收的判据）。判定路径不读它。
 type Latches struct {
-	Frame  bool `json:"frame"`
-	Snap   bool `json:"snap"`
-	Scan   bool `json:"scan"`
-	Frozen bool `json:"frozen"`
+	T150      bool `json:"t150"`
+	T60       bool `json:"t60"`
+	Listening bool `json:"listening"`
+	Signal    bool `json:"signal"`
+	Frozen    bool `json:"frozen"`
 }
 
 // NewEngine 创建一个处于 Watching 态的空引擎（窗口上下文由 BeginWindow 注入）。
@@ -76,18 +88,48 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.state = stateWatching
 	e.anchor = anchor
 	e.histBps = histBps
-	e.frameSent = false
-	e.snapSent = false
-	e.scanSent = false
+	e.t150Sent = false
+	e.t60Sent = false
+	e.listenEntered = false
+	e.signal = false
 	e.emitted = false
 	e.stats = WindowStats{}
+}
+
+// Resume 按磁盘真相回填**已完成**的段（崩溃重启重入同一窗口时调用, 紧随 BeginWindow）。
+//
+//	t150Done/t60Done = 该窗磁盘上已有对应 stage 的判定行（Recorder.HasStage）。
+//	两个都完成 ⇒ 直接进监听段; 都没完成 ⇒ 从头跑。
+//
+// ⚠️ **`emitted` 保持 false**（不在这里置真）: 它的语义是「锚已冻结」, 而重启后锚值
+// 由同一条边界推送**确定性重取**（PushNearest 精确匹配那一秒, 决策 #15）——若因
+// 「磁盘上已有行」就置真, UpgradeAnchor 会被自己的冻结判据永久拒收, 锚再也进不来,
+// 本窗一行都产不出。
+//
+// 调用前置条件: 该窗**尚无 OK 行**（cmd/tail 用 Recorder.HasSignal 判, 有信号就整窗
+// 跳过）——所以本函数不必也不能设置 signal（signal 是「已下单」, 不是「已判定」）。
+func (e *Engine) Resume(t150Done, t60Done bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.t150Sent = t150Done
+	e.t60Sent = t60Done
+	switch {
+	case t60Done:
+		// 两段都做完了（t60Done 蕴含 t150Done 已完成, 否则不会到 T=60）
+		e.state = stateListening
+		e.listenEntered = true
+	case t150Done:
+		e.state = stateAwait60
+	default:
+		e.state = stateWatching
+	}
 }
 
 // UpgradeAnchor 注入本窗锚与 σ（取锚通道精确命中边界那一秒的推送后调用）, 返回是否被采纳。
 //
 // 相对「窗口级常量锚」的唯一让步: 锚在**产出任何行之前**可变。首行落盘即冻结——
-// 本窗的两行必须共用同一个锚, 否则帧行与快照行的 dev 基准不同源、无法互相解释
-// （且 dev 的分子锚、分母 σ 必须同源同换, 只换其一会让判定基准自相矛盾）。
+// 本窗各行必须共用同一个锚, 否则前后两行的 dev 基准不同源、无法互相解释（且 dev 的
+// 分子锚、分母 σ 必须同源同换, 只换其一会让判定基准自相矛盾）。
 //
 // 注入**不追溯**注入前的 tick（那些 tick 锚未就绪、根本没做判定）。anchor ≤ 0 一律拒收。
 func (e *Engine) UpgradeAnchor(anchor, histBps float64) bool {
@@ -120,23 +162,26 @@ func (e *Engine) State() engineState {
 	return e.state
 }
 
-// Config 返回引擎参数副本（cmd/tail 取 Stake/RemStart 等）。
+// Config 返回引擎参数副本（cmd/tail 取 Stake/T60Rem 等）。
 func (e *Engine) Config() Config {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	return e.cfg
 }
 
-// ProcessTick 处理一个 1s tick, 返回本 tick 产出的观测（0 行 / 1 行 / 2 行）。
+// ProcessTick 处理一个 1s tick, 返回本 tick 产出的行（至多一行, nil = 无产出）。
 //
-// 两行同发只出现在「首个有效 tick 已 rem ≤ RemStart」的情形（见 Engine 类型注释）。
-// 调用方按 Kind 分流: frame 与 scan **只落盘**, 只有 snap 进执行编排。
-func (e *Engine) ProcessTick(t flip.Tick) []Observation {
+// 三段递进的分支走向见 Engine 类型注释。返回的行**只有两种形态**:
+//   - 判定行（stage = t150/t60）: 成功与否都产出（OK=false 带 RejectReason）;
+//   - 信号行（stage = listen）: 只在 ② 达标时产出。
+//
+// 无论哪种, **只有 OK=true 的行会被执行编排下单**（cmd/tail 单点 dispatch）。
+func (e *Engine) ProcessTick(t flip.Tick) *Observation {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	if e.state == stateDone {
-		return nil // 窗口已结束, 本窗不再观测（无重试）
+		return nil // 窗口已结束 / 本窗已下单, 不再观测（无重试）
 	}
 	if t.Rem <= 0 {
 		e.state = stateDone // rem==0 终 tick: 窗口结束
@@ -145,50 +190,76 @@ func (e *Engine) ProcessTick(t flip.Tick) []Observation {
 
 	// 以下计数器只累加, 不改变任何分支走向（对账红线）。
 	e.stats.Ticks++
-	// tick 无效（延迟过高 / 整簿报价不全）: 不推进闩锁, 等下一个有效 tick 取首帧。
 	if t.BookLatMs > e.cfg.MaxBookLatMs {
 		e.stats.BookStale++
 		return nil
 	}
-	if !(t.UpBid > 0 && t.UpAsk > 0 && t.DownBid > 0 && t.DownAsk > 0) {
+	// 盘口有效价（ask 优先、bid 兜底）: 四档全空才算「无有效盘口」而无效。
+	side, px, src := HotBook(t.UpBid, t.UpAsk, t.DownBid, t.DownAsk)
+	if !(px > 0) {
 		e.stats.BookMissing++
 		return nil
 	}
 	e.stats.TicksValid++
-
-	// 锚未就绪: 占槽与计数照常, 但不推进闩锁（dev 无锚无法计算, 强判即失真）。
+	// 锚未就绪 / 缺 spot: 占槽与计数照常, 但不推进任何段（dev 无锚或缺价无法计算,
+	// 强判即失真）。缺 spot 的 tick 等下一个可判定 tick——不整窗丢弃（见类型注释）。
 	if !(e.anchor > 0) {
 		return nil
 	}
+	if !(t.BinPrice > 0) {
+		e.stats.SpotMissing++
+		return nil
+	}
 
-	var out []Observation
-	if !e.frameSent && t.Rem <= e.cfg.FrameRem {
-		e.frameSent = true
-		out = append(out, e.snapshot(t, KindFrame, e.cfg.FrameRem))
-	}
-	if !e.snapSent && t.Rem <= e.cfg.RemStart {
-		e.snapSent = true
-		o := e.snapshot(t, KindSnap, e.cfg.RemStart)
-		out = append(out, o)
-		// 决策快照自身达标 ⇒ 监听口径与本行同 tick（B ⊇ A 的相等情形, 无增量行）。
-		e.scanSent = o.OK
-		e.state = stateScanning // 决策已闭环; 转监听段（只可能再落一条对账行）
-	} else if e.state == stateScanning && !e.scanSent {
-		// 监听口径对账行: 决策快照之后的第一个 ⑤ 达标 tick, **只记录、绝不下单**。
-		// 与 snap 的一处刻意差异（见 KindScan 注释）: 本支逐 tick 独立求规则, 某个
-		// tick 缺 spot/twap **只是跳过它**（不像 snap 那样整窗丢弃）——缺 spot 时
-		// Dev=0 天然过不了规则, 缺 twap 不影响 ⑤。分支走向与 python 监听口径
-		// （16_tail_t150_scan.py:tail_ticks）逐条对齐。
-		if o := e.snapshot(t, KindScan, e.cfg.RemStart); o.OK {
-			e.scanSent = true
-			out = append(out, o)
+	var o Observation
+	advance := false
+	switch e.state {
+	case stateWatching:
+		if t.Rem > e.cfg.T150Rem {
+			return nil // 还没到第一段判定点（T=150）——早于它的 tick 只占槽, 不判定
 		}
+		if t.Rem > e.cfg.T60Rem {
+			e.t150Sent = true
+			e.state = stateAwait60
+			o = e.decision(t, side, px, src, StageT150, e.cfg.T150Rem)
+			advance = true
+			break
+		}
+		// 迟到接入（首个可判定 tick 已在 T=60 段）: 整段跳过, **不伪造 t150 行**
+		//（那一 tick 本来就不存在）, 直接在 T=60 判一次。t150Sent 保持 false——
+		// 本窗确实没有 T=150 判定行, 页面上如实显示「T150 · 未判」。
+		fallthrough
+	case stateAwait60:
+		if t.Rem > e.cfg.T60Rem {
+			return nil // 还没到 T=60 判定点（第一段刚判完, rem 尚在 60~150 之间）
+		}
+		e.t60Sent = true
+		e.state = stateListening
+		e.listenEntered = true
+		o = e.decision(t, side, px, src, StageT60, e.cfg.T60Rem)
+		advance = true
+	case stateListening:
+		// 监听段: 每秒判 ②, **只在达标时落行**（被拒的 tick 不落盘——每窗约 60 个
+		// tick, 全落会淹没信号表）。
+		cand := e.snapshot(t, side, px, src, StageListen, e.cfg.T60Rem)
+		if !cand.Rules.Rule2() {
+			return nil
+		}
+		cand.OK = true
+		cand.Shares = e.cfg.Stake / px
+		o = cand
+		advance = true
 	}
-	if len(out) > 0 {
-		e.emitted = true // 锚自此冻结（本窗各行共用同一锚）
-		e.stats.Frames += len(out)
+	if !advance {
+		return nil
 	}
-	return out
+	if o.OK {
+		e.signal = true
+		e.state = stateDone // 整窗只下一单: 出信号即止
+	}
+	e.emitted = true // 锚自此冻结（本窗各行共用同一锚）
+	e.stats.Rows++
+	return &o
 }
 
 // WindowStats 返回本窗健康度统计的拷贝（落盘用）。
@@ -198,64 +269,32 @@ func (e *Engine) WindowStats() WindowStats {
 	return e.stats
 }
 
-// Latches 返回本窗三个一次性闩锁与锚冻结状态（只读, dashboard 展示本窗进度用）。
+// Latches 返回本窗进度与锚冻结状态（只读, dashboard 展示本窗进度用）。
 // 判定路径不读它。
 func (e *Engine) Latches() Latches {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return Latches{Frame: e.frameSent, Snap: e.snapSent, Scan: e.scanSent, Frozen: e.emitted}
+	return Latches{
+		T150:      e.t150Sent,
+		T60:       e.t60Sent,
+		Listening: e.listenEntered,
+		Signal:    e.signal,
+		Frozen:    e.emitted,
+	}
 }
 
-// snapshot 采集一条快照行（原始字段 + 派生量; snap/scan 行另做判定）。
-// 调用方已持锁、已保证 anchor > 0 且本 tick 为有效 tick。
-func (e *Engine) snapshot(t flip.Tick, kind string, frameT int) Observation {
-	// 热门侧 = ask 高的一侧（平局取 yes）——口径见 decide.go SideOfHot。
-	side := SideOfHot(t.UpAsk, t.DownAsk)
-	hotAsk := HotAskOf(side, t.UpAsk, t.DownAsk)
-
-	o := Observation{
-		Kind: kind, FrameT: frameT,
-		Ts: t.Ts, Rem: t.Rem,
-		YesBid: t.UpBid, YesAsk: t.UpAsk, NoBid: t.DownBid, NoAsk: t.DownAsk,
-		Spot: t.BinPrice, Twap: t.TwapPrice,
-		Anchor: e.anchor, HistBps: e.histBps,
-		Side: side, HotAsk: hotAsk,
-		BookLatMs: t.BookLatMs, SpotAgeMs: t.SpotAgeMs, TwapAgeMs: t.TwapAgeMs,
-	}
-	// 派生量: 输入齐备才算（缺则留 0 = 未计算, 由 RejectReason 区分）。
-	// 帧行同样计算——T=150 的规则形态正是靠这些字段离线复算。
-	if t.BinPrice > 0 {
-		o.Dev = DevUSD(side, t.BinPrice, e.anchor)
-	}
-	o.Sd = SigmaUSD(e.histBps, e.anchor)
-	if kind == KindFrame {
-		return o // 帧行只记录, 不带规则与判定
-	}
-	o.Rules = EvalRules(e.cfg, hotAsk, o.Dev, o.Sd, e.histBps > 0)
-	if kind == KindScan {
-		// 监听口径对账行: **只有达标才产出**（引擎在 ProcessTick 里按 OK 决定收不收）,
-		// 故不带 RejectReason 分支——那条「逐 tick 跳过缺 spot/twap 的 tick」的语义
-		// 已经由 Dev=0 / 规则不用 twap 天然实现（见 KindScan 注释）。
-		// ⚠️ OK 判据**不含 twap**（⑤ 不用它, 与 python 监听口径逐条一致; snap 的
-		// missing_twap 腿是为了与回测宇宙对齐才有的）——被拒的 tick 不落行、不记原因。
-		o.OK = o.Rules.Rule5() && t.BinPrice > 0 && e.histBps > 0
-		if o.OK {
-			o.Shares = e.cfg.Stake / hotAsk // 假想股数（本行无真实仓位）
-		}
-		return o
-	}
-
-	// 判定顺序固定（文档化, 复验按原因计数）:
-	// missing_spot → missing_twap → no_hist → price_low → leg_out。
-	// 前两条镜像 python 的整窗丢弃（**不**顺延到下一个有 spot 的 tick）。
-	o.Rules = EvalRules(e.cfg, hotAsk, o.Dev, o.Sd, e.histBps > 0)
+// decision 采一条判定行并求 ⑤（t150/t60 段; 判定行**成功与否都落盘**）。
+// 调用方已持锁、已保证本 tick 为可判定 tick（盘口有效价 > 0 ∧ spot > 0 ∧ anchor > 0）。
+//
+// 判定顺序固定（文档化, 复验按原因计数）: missing_spot → no_hist → price_low → leg_out。
+// 前两条是纯函数防线: 缺 spot 的 tick 在 ProcessTick 就被挡下（不落行）, σ 未就绪由
+// cmd/tail 整窗跳过——这里保留分支是为了让判定函数自身封闭（不依赖调用方的前置条件）。
+func (e *Engine) decision(t flip.Tick, side string, px float64, src, stage string, frameT int) Observation {
+	o := e.snapshot(t, side, px, src, stage, frameT)
 	switch {
 	case !(t.BinPrice > 0):
 		o.RejectReason = RejectMissingSpot
-	case !(t.TwapPrice > 0):
-		o.RejectReason = RejectMissingTwap
 	case !(e.histBps > 0):
-		// 纯函数防线: 现网由 cmd/tail 前置闸整窗跳过（skip=no_sigma）, 到不了这里。
 		o.RejectReason = RejectNoHist
 	case !o.Rules.Price:
 		o.RejectReason = RejectPriceLow
@@ -263,9 +302,29 @@ func (e *Engine) snapshot(t flip.Tick, kind string, frameT int) Observation {
 		o.RejectReason = RejectLegOut
 	default:
 		o.OK = true
-		// 纸面目标股数 = Stake/hotAsk（精确除, 与回测 shares = stake/fill 恒等）;
+		// 纸面目标股数 = Stake/有效价（精确除, 与回测 shares = stake/fill 恒等）;
 		// live 的实际下单量由 trading.OrderSpecForObs 取 floor2。
-		o.Shares = e.cfg.Stake / hotAsk
+		o.Shares = e.cfg.Stake / px
 	}
+	return o
+}
+
+// snapshot 采集一条快照行（原始字段 + 派生量 + 四腿; 判定由 decision/监听段各自完成）。
+// 调用方已持锁、已保证 anchor > 0 且本 tick 为可判定 tick。
+func (e *Engine) snapshot(t flip.Tick, side string, px float64, src, stage string, frameT int) Observation {
+	o := Observation{
+		Kind: KindSnap, Stage: stage, FrameT: frameT,
+		Ts: t.Ts, Rem: t.Rem,
+		YesBid: t.UpBid, YesAsk: t.UpAsk, NoBid: t.DownBid, NoAsk: t.DownAsk,
+		Spot: t.BinPrice, Twap: t.TwapPrice,
+		Anchor: e.anchor, HistBps: e.histBps,
+		Side: side, HotAsk: px, HotSrc: src,
+		BookLatMs: t.BookLatMs, SpotAgeMs: t.SpotAgeMs, TwapAgeMs: t.TwapAgeMs,
+	}
+	// 派生量: spot 在场才算（缺则留 0 = 未计算——但那种 tick 走不到这里）。
+	// 判定行同样计算: 离线复算与 dashboard 现窗口读数都靠这些字段。
+	o.Dev = DevUSD(side, t.BinPrice, e.anchor)
+	o.Sd = SigmaUSD(e.histBps, e.anchor)
+	o.Rules = EvalRules(e.cfg, px, o.Dev, o.Sd, e.histBps > 0)
 	return o
 }

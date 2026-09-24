@@ -10,9 +10,10 @@ import (
 // Recorder 与 Snapshotter（tail.Snapshotter, 由 cmd/tail 的 runtimeState 实现）均为
 // 主循环已持有的组件，无独立生命周期。
 //
-// 与 FlipState 的形制差异: 本族的判决读数是**算出来的**（tail.Judge 纯函数）,
-// 不在记录器里——它要吃全量行 + 配置（五格 + T=150 对照格 + bootstrap 区间）。
-// 故 handler 每次请求现算（全量行数量级 ~万, 两族都是毫秒级）。
+// 与 FlipState 的形制一致: 页面上的每个数字都是**现算的只读视图**（tally 逐行分类、
+// 逐日聚合、今日健康度读当日 tailstats 文件），判定/执行路径一律不读它。
+// ⚠️ 2026-09-24 起本族不再有 Go 侧判决机器（tail.Judge/mt19937 已删, /api/judge
+// 下线）——纸面判决走离线脚本 python/v4/23_tail_integrated.py。
 type TailState struct {
 	recorder  *tail.Recorder
 	snapshot  tail.Snapshotter

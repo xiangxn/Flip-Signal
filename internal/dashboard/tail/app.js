@@ -1,22 +1,24 @@
 // 扫尾盘 ⑤ 纸面监控前端。
-// 轮询: /api/state 5s（窗口/盘口/统计）、/api/snaps+/api/frames 15s、
-//       /api/judge 60s（判决速览要全量行 × 6 格 × 2000 次 bootstrap，无需跟 5s 一起抖）。
-// 阈值一律由服务端下发（/api/state 的 limits、/api/judge 的 meta、/api/config），
-// 前端不得硬编码——调参后颜色语义与文案必须跟随实际生效值。
+// 轮询: /api/state 5s（窗口/盘口/统计）、/api/signals + /api/snaps 15s。
+// 阈值一律由服务端下发（/api/state 的 limits、/api/config），前端不得硬编码
+// ——调参后颜色语义与文案必须跟随实际生效值。
+//
+// ⚠️ 2026-09-24 起判决速览/五格对照/监听对账/原始帧四块全部下线（判决机器与两个
+// legacy 行类型一并删除, 见 docs/tail_integrated_2026-09-24.md §4）；纸面判决改由
+// 离线脚本 python/v4/23_tail_integrated.py 做。
 (function () {
   'use strict';
 
   var $ = function (id) { return document.getElementById(id); };
   var stateInterval = 5000;
   var listInterval = 15000;
-  var judgeInterval = 60000;
 
-  // 判定失败原因的中文映射（决策快照表用）
+  // 判定失败原因的中文映射（决策表用）
   var REJECT_CN = {
     missing_spot: '现货缺失',
-    missing_twap: 'TWAP 缺失',
+    missing_twap: 'TWAP 缺失', // legacy 旧行（新口径不再产出）
     no_hist: 'σ 窗口不足',
-    price_low: '价格腿不过（热门侧 < 0.80）',
+    price_low: '价格腿不过',
     leg_out: '两腿都不过'
   };
   // 整窗跳过原因（tailstats_*.jsonl 的 skip 字段 = cmd/tail 主循环里的字面量）
@@ -26,19 +28,25 @@
     dup_record: '重复记录',
     no_sigma: 'σ 未就绪'
   };
-  // 风控闸原因
+  // 风控闸原因（= internal/tail Gate* 常量字面量）
   var GATE_CN = {
     daily_loss: '日亏熔断',
     first_window: '首窗禁单'
   };
-  // 判词（与 internal/tail/judge.go 的 Verdict* 常量一一对应）
-  var VERDICT_CN = {
-    pending: '未到判决时点',
-    pass: '通过',
-    fail: '判负',
-    inconclusive: '不显著'
+  var GATE_SHORT = { first_window: '闸·首窗', daily_loss: '闸·熔断' };
+  // live 执行状态（= internal/flip ExecStatus* 常量）
+  var EXEC_CN = {
+    submitting: '下单中',
+    resting: '挂单中',
+    filled: '成交',
+    partial: '部分成交',
+    unfilled: '未成交',
+    rejected: '下单被拒'
   };
-  var GRID_CHARS = ['①', '②', '③', '④', '⑤'];
+  // 成交结果不明（= internal/flip ExecNoteUnknown）: 仓位悬而未决, 需人工核对
+  var NOTE_UNKNOWN = '未知结果';
+  // 判定段（= internal/tail Stage* 常量; 空 = legacy 旧行）
+  var STAGE_CN = { t150: 'T150 段', t60: 'T60 段', listen: '监听段' };
 
   var CFG = null; // /api/config（标定参数，一次拉取）
 
@@ -71,6 +79,10 @@
     $('liveDot').classList.toggle('live', ok);
   }
 
+  function tag(cls, text, title) {
+    return '<span class="tag ' + cls + '"' + (title ? ' title="' + esc(title) + '"' : '') + '>' + esc(text) + '</span>';
+  }
+
   // 押注侧标签: yes=UP 配色 / no=DOWN 配色（元素 class 用 yes/no 而非 up/down）
   function sideTag(side) {
     if (!side) return '<span class="muted">—</span>';
@@ -89,119 +101,46 @@
     return parts.join(' ');
   }
 
-  // 五格徽章: 由服务端下发的四条原始腿现算（①=价格腿, ②…⑤ 见 internal/tail/types.go）
-  function gridBadges(r) {
-    if (r.kind !== 'snap') return '<span class="muted">—</span>'; // 帧行不判定
-    var p = !!r.rule_price, d = !!r.rule_dev63, s = !!r.rule_sigma, u = !!r.rule_sigma_usd40;
-    var on = [p, p && d, p && s, p && (d || s), p && (d || u)];
-    var out = '';
-    for (var i = 0; i < 5; i++) {
-      out += '<span class="grid-badge' + (on[i] ? ' on' : '') + '">' + GRID_CHARS[i] + '</span>';
+  // ── 信号表的状态/结果/份额单元格 ──
+  // 口径（a.md 第 3/4 条）: 每一笔信号都注册结算并显示官方结果; **未成交**（被风控拦/
+  // 下单被拒/0 成交/挂单未定稿/成交未知）不进胜率、P&L 恒 0 —— 前端据此把份额与 P&L
+  // 显示成「—」, 但结果列照显赢/输。
+
+  // 该行是否有真实仓位（服务端已按 HasPosition 判过, 这里只读）
+  function hasPosition(r) { return !!r.has_position; }
+
+  // 状态列: 成交信息（含未成交/被闸）
+  function statusCell(r) {
+    if (r.gate_reason) {
+      return tag('warn', GATE_SHORT[r.gate_reason] || r.gate_reason,
+        '被风控闸拦下（未成交）: ' + (GATE_CN[r.gate_reason] || r.gate_reason) + (r.exec_note ? ' | ' + r.exec_note : ''));
     }
-    return out;
-  }
-
-  // ── 判决卡 ──
-
-  // 进度条: pct 截到 100%，达标（val ≥ max）时整条转绿
-  function setBar(barId, wrapId, val, max) {
-    var bar = $(barId), wrap = $(wrapId);
-    var done = max > 0 && val >= max;
-    bar.style.width = (max > 0 ? Math.min(100, val / max * 100) : 0).toFixed(1) + '%';
-    wrap.classList.toggle('done', done);
-  }
-
-  function renderJudge(j) {
-    var m = j.meta || {};
-    var g = j.ruler5 || {};
-    var grids = j.grids || [];
-
-    var vb = $('judgeVerdict');
-    vb.textContent = VERDICT_CN[g.verdict] || g.verdict || '—';
-    vb.className = 'verdict ' + (g.verdict || 'pending');
-
-    $('judgeDays').textContent = (g.days || 0) + ' / ' + m.min_days + ' 日';
-    $('judgeN').textContent = (g.n || 0) + ' / ' + m.min_n + ' 注';
-    setBar('judgeDaysBar', 'judgeDaysBarWrap', g.days || 0, m.min_days);
-    setBar('judgeNBar', 'judgeNBarWrap', g.n || 0, m.min_n);
-
-    $('judgeCi').textContent = '[' + fmtPnl(g.ci_lo) + ', ' + fmtPnl(g.ci_hi) + '] U';
-    $('judgeLosing').textContent = (g.losing_days || 0) + ' / ' + (g.days || 0) + ' 日';
-    $('judgeWr').textContent = g.n > 0 ? (g.wr * 100).toFixed(1) + '%' : '—';
-
-    // 频率闸（判决辅助闸门 1）: ⑤ 应落 90~120 注/日
-    var freq = $('judgeFreq');
-    if (g.days > 0) {
-      freq.textContent = g.notes_per_day.toFixed(1) + ' 注/日（带 ' + m.freq_lo + '~' + m.freq_hi + '）' +
-        (g.freq_ok ? '' : ' ⚠️ 越界');
-      freq.className = g.freq_ok ? '' : 'lost';
-    } else {
-      freq.textContent = '—';
+    if (r.exec_note && r.exec_note.indexOf(NOTE_UNKNOWN) === 0) {
+      return tag('warn', '成交未知', r.exec_note + '（无仓位, 按 order_id 去 data-api 核对）');
     }
-
-    $('judgeNote').innerHTML = '判决口径（先定后看，不许事后挑格）：UTC 日满 <b>' + m.min_days +
-      '</b> 日且 ⑤ 已结算注数 ≥ <b>' + m.min_n + '</b> 时，按<b>日</b>有放回重采样 <b>' + m.boot_b +
-      '</b> 次取 P&amp;L 的 95% 区间（seed=<b>' + m.boot_seed + '</b>，与 python/v4/13_tail_sweep.py 的 ' +
-      '<b>boot_days</b> 逐位一致）；下界 &gt; 0 通过、上界 &lt; 0 判负、跨 0 不显著（延到 <b>' + m.days2 +
-      '</b> 日，届时仍跨 0 即判负）。辅助闸门：频率 <b>' + m.freq_lo + '~' + m.freq_hi +
-      '</b> 注/日。';
-
-    renderGrids(grids);
-  }
-
-  function renderGrids(grids) {
-    var tb = document.querySelector('#gridTable tbody');
-    tb.innerHTML = '';
-    var by = {};
-    grids.forEach(function (g) {
-      by[g.rule] = g;
-      var tr = document.createElement('tr');
-      if (g.rule === 't150') tr.className = 'sep';
-      tr.innerHTML =
-        '<td>' + esc(g.label) + '</td>' +
-        '<td>' + g.n + '</td>' +
-        '<td>' + (g.n > 0 ? (g.wr * 100).toFixed(2) + '%' : '—') + '</td>' +
-        '<td class="' + (g.pnl > 0 ? 'pos' : (g.pnl < 0 ? 'neg' : '')) + '">' + fmtPnl(g.pnl) + '</td>' +
-        '<td>' + g.losing_days + ' / ' + g.days + '</td>' +
-        '<td>[' + fmtPnl(g.ci_lo) + ', ' + fmtPnl(g.ci_hi) + ']</td>' +
-        '<td>' + (g.days > 0 ? g.notes_per_day.toFixed(1) : '—') + '</td>' +
-        '<td><span class="verdict ' + g.verdict + '">' + (VERDICT_CN[g.verdict] || g.verdict) + '</span></td>';
-      tb.appendChild(tr);
-    });
-
-    // 增量：⑤ 相对 ②（纯美元）与 ④（联合）——文档 §5.2 称「本项目最该盯的问题」
-    var bits = [];
-    if (by['5'] && by['2']) bits.push(deltaHtml('⑤ − ②', by['5'], by['2']));
-    if (by['5'] && by['4']) bits.push(deltaHtml('⑤ − ④', by['5'], by['4']));
-    $('gridDelta').innerHTML = bits.length
-      ? '增量（同批快照口径）：' + bits.join(' &nbsp;·&nbsp; ')
-      : '增量：—';
-  }
-
-  function deltaHtml(name, a, b) {
-    var dWr = (a.n > 0 && b.n > 0) ? ((a.wr - b.wr) * 100).toFixed(2) + ' 个百分点' : '—';
-    return '<b>' + name + '</b> 注数 ' + (a.n - b.n) + ' · P&amp;L ' + fmtPnl(a.pnl - b.pnl) +
-      ' U · 胜率 ' + dWr;
-  }
-
-  // 「⑤ 本窗过不过」——判决卡上的实时读数，回答「现在为什么没有信号」
-  function renderLive() {
-    var el = $('judgeLive');
-    if (!CFG || !S) { el.textContent = '—'; return; }
-    if (!(S.hot_ask > 0)) { el.textContent = '无有效盘口'; return; }
-    var legs = [];
-    legs.push('ask ' + (S.hot_ask >= CFG.price_min ? '过' : '不过'));
-    if (S.dev >= CFG.dev_min_usd) {
-      legs.push('dev ' + fmtUsd(S.dev) + '$ 过');
-    } else if (S.sd >= CFG.sigma_min_usd && S.dev >= S.sd) {
-      legs.push('sd ' + fmtUsd(S.sd) + '$ 腿过');
-    } else {
-      legs.push('dev ' + fmtUsd(S.dev) + '$ 不过');
+    var cn = EXEC_CN[r.exec_status];
+    if (cn) {
+      var warn = (r.exec_status === 'unfilled' || r.exec_status === 'rejected') ? 'warn' : '';
+      var title = r.exec_note || '';
+      if (r.hot_src === 'bid') title += (title ? ' | ' : '') + '该侧 ask 为空, 按 bid 挂单（成交概率低）';
+      return tag(warn, cn, title);
     }
-    var pass = S.hot_ask >= CFG.price_min &&
-      (S.dev >= CFG.dev_min_usd || (S.sd >= CFG.sigma_min_usd && S.dev >= S.sd));
-    el.innerHTML = esc(S.hot_side || '—') + ' 侧 ' + legs.join(' · ') +
-      ' → ' + (pass ? '<span class="pos">过 ⑤</span>' : '<span class="muted">未过 ⑤</span>');
+    return '<span class="muted">纸面成交</span>';
+  }
+
+  // 结果列: 官方结果（未成交行照显; 未结算的未成交行显示「—」而不是「待结算」——
+  // 它永远不会变成持仓）
+  function resultCell(r) {
+    if (!r.ok) return '<span class="muted">—</span>';
+    if (r.won == null) {
+      return hasPosition(r) ? '<span class="muted">待结算</span>' : '<span class="muted">—</span>';
+    }
+    return r.won ? '<span class="won">赢</span>' : '<span class="lost">输</span>';
+  }
+
+  function pnlCell(r) {
+    if (!hasPosition(r) || r.won == null) return '<td class="muted">—</td>';
+    return '<td class="' + (r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '')) + '">' + fmtPnl(r.pnl) + '</td>';
   }
 
   // ── 运行状态 ──
@@ -228,7 +167,7 @@
       lb.style.display = 'none';
     }
 
-    // 日亏熔断（两模式都显示; paper 是"影子"——闸判据同源, 但只标记不拦 POST）
+    // 日亏熔断（两模式都显示; paper 是"影子"——闸判据同源, 但只标记不拦单）
     var rb = $('riskBar');
     if (s.risk) {
       var rk = s.risk;
@@ -244,13 +183,13 @@
       rb.style.display = 'none';
     }
 
-    // 统计（快照口径: 帧行不算，见 recorder.Counts 注释）
-    $('statSnap').textContent = s.snap_count;
+    // 统计（恒等式: 信号 = 胜 + 负 + 待结算 + 未成交; 胜率分母只含胜+负）
+    $('statDecision').textContent = s.decision_count;
     $('statSignal').textContent = s.signal_count;
-    $('statWon').textContent = s.won_count;
-    $('statLost').textContent = s.lost_count;
+    $('statWL').textContent = s.won_count + ' / ' + s.lost_count;
+    $('statNoExec').textContent = s.noexec_count;
     $('statPending').textContent = s.pending_count;
-    $('statWr').textContent = (s.win_rate * 100).toFixed(1) + '%';
+    $('statWr').textContent = (s.won_count + s.lost_count) > 0 ? (s.win_rate * 100).toFixed(1) + '%' : '—';
     var pnl = $('statPnl');
     pnl.textContent = fmtPnl(s.cumulative_pnl);
     pnl.classList.toggle('pos', s.cumulative_pnl > 0);
@@ -261,19 +200,21 @@
     dd.textContent = fmtPnl(s.max_drawdown);
     dd.classList.toggle('neg', s.max_drawdown < 0);
 
-    // 逐日（盈利日数 / 有数据的日数）
+    // 逐日（盈利日数 / 有结算的天数）
     $('statDay').textContent = s.day_total > 0 ? s.day_pnl_pos + '/' + s.day_total + ' 天' : '—';
 
-    // 今日采集健康度（判决辅助闸门 3）
-    $('judgeToday').textContent = s.today_stats_day
-      ? s.today_windows + ' 窗（行 ' + s.today_rows + '）· 无锚 ' + s.today_no_anchor + ' 窗'
-      : '（无今日健康度文件）';
-    var skips = s.today_skips || {};
-    var sk = Object.keys(skips).map(function (k) {
-      return (SKIP_CN[k] || k) + ' ' + skips[k];
-    });
-    $('judgeSkips').textContent = sk.length ? sk.join(' · ') : '无';
-    renderLive();
+    // 今日采集健康度（读当日 tailstats 文件）
+    var th = $('todayHealth');
+    if (s.today_stats_day) {
+      var skips = s.today_skips || {};
+      var sk = Object.keys(skips).map(function (k) {
+        return (SKIP_CN[k] || k) + ' ' + skips[k];
+      });
+      th.textContent = '今日采集 ' + s.today_windows + ' 窗（行 ' + s.today_rows + '）· 无锚 ' +
+        s.today_no_anchor + ' 窗 · skip ' + (sk.length ? sk.join(' · ') : '无');
+    } else {
+      th.textContent = '今日采集：无健康度文件（本日还没跑过窗口）';
+    }
 
     // 当前窗口
     $('engineState').textContent = s.engine_state;
@@ -287,21 +228,23 @@
       slugLink.removeAttribute('href');
     }
 
-    // 三个闩锁 + 锚（帧 rem≤150 / 快照 rem≤60 / 监听行，闸值取自配置）
-    var fr = CFG ? CFG.frame_rem : 150, rs = CFG ? CFG.rem_start : 60;
-    $('latchFrame').textContent = '帧（rem≤' + fr + '）· ' + (s.frame_sent ? '已落' : '未落');
-    $('latchFrame').className = 'latch' + (s.frame_sent ? ' on' : '');
-    $('latchSnap').textContent = '快照（rem≤' + rs + '）· ' + (s.snap_sent ? '已落' : '未落');
-    $('latchSnap').className = 'latch' + (s.snap_sent ? ' on' : '');
-    // 监听闩锁的「已定」= 本窗不会再产监听行——快照达标时它同时为真（两口径同 tick，
-    // 监听行冗余）; 未达标时它要等监听段第一个达标 tick 才转真; 一直没人达标则窗口
-    // 结束时仍是 false（引擎状态转 Done）——那种情形显示「无」而不是「未定」，免得
-    // 看着像还在等。文案用「已定」而非「已落」以免读者以为一定有第三行落盘。
-    var scanTxt = s.scan_sent
-      ? (s.snap_sent ? '已定（快照已达标本窗无监听行）' : '已定')
-      : (s.engine_state === 'Done' ? '无（本窗未达标）' : '未定');
-    $('latchScan').textContent = '监听 · ' + scanTxt;
-    $('latchScan').className = 'latch' + (s.scan_sent ? ' on' : '');
+    // 三段链的四个闩锁 + 锚（闸值取自 /api/config）
+    var t1 = CFG ? CFG.t150_rem : 150, t6 = CFG ? CFG.t60_rem : 60;
+    $('latchT150').textContent = 'T150（rem≤' + t1 + '）· ' + (s.t150_sent ? '已判' : '未判');
+    $('latchT150').className = 'latch' + (s.t150_sent ? ' on' : '');
+    $('latchT60').textContent = 'T60（rem≤' + t6 + '）· ' + (s.t60_sent ? '已判' : '未判');
+    $('latchT60').className = 'latch' + (s.t60_sent ? ' on' : '');
+    // 监听段进入与否是**单调**的（出信号后仍为真）: 四种组合分别对应
+    // 监听段出的信号 / 前段出的信号（本段没进）/ 正在监听 / 一直没达标。
+    var listenTxt;
+    if (s.listening) listenTxt = s.signal_sent ? '监听 · 已出信号' : '监听 · 进行中';
+    else if (s.signal_sent) listenTxt = '监听 · 未进入（信号在前段）';
+    else if (s.engine_state === 'Done') listenTxt = '监听 · 无（本窗未达标）';
+    else listenTxt = '监听 · 未开始';
+    $('latchListen').textContent = listenTxt;
+    $('latchListen').className = 'latch' + (s.listening ? ' on' : '');
+    $('latchSignal').textContent = '信号 · ' + (s.signal_sent ? '已出（整窗一单）' : '未出');
+    $('latchSignal').className = 'latch' + (s.signal_sent ? ' on' : '');
     var anchorTxt;
     if (s.anchor > 0) {
       anchorTxt = '锚 ' + s.anchor.toFixed(2) + (s.anchor_exact ? '（边界精确命中' : '（未精确命中') +
@@ -312,7 +255,7 @@
     $('latchAnchor').textContent = anchorTxt;
     $('latchAnchor').className = 'latch' + (s.anchor > 0 ? ' on' : '');
 
-    // 两侧报价 + 热门侧高亮（ask 高的一侧 = 押注侧）
+    // 两侧报价 + 热门侧高亮（**有效价**高的一侧 = 押注侧）
     var hot = s.hot_ask > 0 ? s.hot_side : '';
     $('yesSide').classList.toggle('hot', hot === 'yes');
     $('noSide').classList.toggle('hot', hot === 'no');
@@ -330,7 +273,10 @@
     devEl.classList.toggle('neg', s.dev < 0);
 
     $('winRem').textContent = s.remaining_sec;
-    $('winHot').innerHTML = s.hot_ask > 0 ? sideTag(s.hot_side) + ' ask ' + s.hot_ask.toFixed(3) : '—';
+    // 热门侧有效价: ask 优先、bid 兜底（bid = 该侧卖单被撤空, 只能按买价挂单）
+    $('winHot').innerHTML = s.hot_ask > 0
+      ? sideTag(s.hot_side) + ' ' + (s.hot_src === 'bid' ? 'bid' : 'ask') + ' ' + s.hot_ask.toFixed(3)
+      : '—';
     $('winDevUsd').textContent = s.dev ? fmtUsd(s.dev) + ' $' : '—';
     // sd 门槛标红: σ 腿放行要求 sd ≥ sigma_min_usd
     var sdEl = $('winSd');
@@ -379,93 +325,79 @@
       $('whValid').textContent = ws.ticks_valid;
       $('whStale').textContent = ws.book_stale;
       $('whMissing').textContent = ws.book_missing;
-      $('whFrames').textContent = '本窗行数 ' + ws.frames;
-      $('whFrames').className = 'lost' + (ws.ticks_valid === 0 ? ' warn' : '');
+      $('whRows').textContent = '本窗行数 ' + ws.frames;
+      $('whRows').className = 'lost' + (ws.ticks_valid === 0 ? ' warn' : '');
     }
 
-    $('foot').textContent = 'TS ' + s.ts + ' · 决策快照 ' + s.snap_count + ' 条 · 信号 ' + s.signal_count + ' 条';
+    $('foot').textContent = 'TS ' + s.ts + ' · 判定 ' + s.decision_count + ' 条 · 信号 ' +
+      s.signal_count + ' 条 · 未成交 ' + s.noexec_count + ' 条';
   }
 
   // ── 配置（标定参数; 一次拉取，用于文案与闩锁闸值）──
 
   function renderConfig() {
     if (!CFG) return;
-    $('cfgNote').innerHTML = '标定（<b>不可调</b>，仅纸面登记）：热门侧 ask ≥ <b>' + CFG.price_min +
-      '</b> · 位移腿 dev ≥ <b>' + CFG.dev_min_usd + ' $</b> 或 <b>' + CFG.sigma_min_usd +
-      ' $ ≤ sd ≤ dev</b> · 决策时点 rem ≤ <b>' + CFG.rem_start + 's</b>（帧 ' + CFG.frame_rem +
-      's）· 每注 <b>' + CFG.stake + ' U</b> · 盘口延迟闸 <b>' + CFG.max_book_lat_ms +
-      'ms</b>。实盘为 GTC 挂单等成交（挂到闭市），与回测「快照瞬间即成交」不是同一个估计量。';
-    renderLive();
+    $('cfgNote').innerHTML = '三段链（<b>不可调</b>，仅纸面登记）：rem ≤ <b>' + CFG.t150_rem +
+      's</b> 判 ⑤ → 不达标则 rem ≤ <b>' + CFG.t60_rem + 's</b> 再判 ⑤ → 仍不达标则此后每秒判 ②。' +
+      '规则：热门侧**有效价**（ask 优先、bid 兜底）≥ <b>' + CFG.price_min +
+      '</b> 且（位移 dev ≥ <b>' + CFG.dev_min_usd + ' $</b> 或 <b>' + CFG.sigma_min_usd +
+      ' $ ≤ sd ≤ dev</b>）；② 只要求价格腿 + dev 腿。每注 <b>' + CFG.stake +
+      ' U</b> · 盘口延迟闸 <b>' + CFG.max_book_lat_ms +
+      'ms</b>。实盘为 GTC 挂单等成交（挂到闭市撤余量），与回测「瞬时即成交」不是同一个估计量。';
   }
 
-  // ── 快照/帧列表（服务端分页）──
+  // ── 信号 / 决策列表（服务端分页）──
   // 50 条/页，第 1 页 = 最新。自动轮询只刷第 1 页；翻历史页后暂停该表轮询
   // （避免正在看的行被新数据顶走），回到第 1 页自动恢复。
   var PAGE_SIZE = 50;
   var LISTS = {
-    snaps: { url: '/api/snaps', cardId: 'snapsCard', pagerId: 'snapsPager', infoId: 'snapsPgInfo', page: 1, pages: 1, total: 0, auto: true },
-    scans: { url: '/api/scans', cardId: 'scansCard', pagerId: 'scansPager', infoId: 'scansPgInfo', page: 1, pages: 1, total: 0, auto: true },
-    frames: { url: '/api/frames', cardId: 'framesCard', pagerId: 'framesPager', infoId: 'framesPgInfo', page: 1, pages: 1, total: 0, auto: true }
+    signals: { url: '/api/signals', cardId: 'signalsCard', pagerId: 'signalsPager', infoId: 'signalsPgInfo', page: 1, pages: 1, total: 0, auto: true },
+    snaps: { url: '/api/snaps', cardId: 'snapsCard', pagerId: 'snapsPager', infoId: 'snapsPgInfo', page: 1, pages: 1, total: 0, auto: true }
   };
 
-  // 快照行: 时间 侧 rem ask dev$ sd$ 五格 判定 份额 结果 P&L
-  function renderSnaps(resp) { renderBetRows(resp, '#snapsTable tbody', 'snapsEmpty'); }
-  // 监听行与快照行**同列**（同样带判定、假想份额与结算结果）——区别只在语义:
-  // 它从不过风控闸（gate_reason 恒空）、也从没真实下过单。
-  function renderScans(resp) { renderBetRows(resp, '#scansTable tbody', 'scansEmpty'); }
-
-  function renderBetRows(resp, tbSel, emptyId) {
-    var tb = document.querySelector(tbSel);
+  // 信号表: 时间 侧 rem ask dev$ sd$ 份额 状态 结果 P&L
+  function renderSignals(resp) {
+    var tb = document.querySelector('#signalsTable tbody');
     tb.innerHTML = '';
-    $(emptyId).hidden = resp.items.length > 0;
+    $('signalsEmpty').hidden = resp.items.length > 0;
     resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
-      var status;
-      if (r.ok) {
-        status = '<span class="won">信号</span>' +
-          (r.gate_reason ? ' <span class="muted">被闸 ' + (GATE_CN[r.gate_reason] || esc(r.gate_reason)) + '</span>' : '');
-      } else {
-        status = '<span class="muted">' + (REJECT_CN[r.reject_reason] || esc(r.reject_reason || '—')) + '</span>';
-      }
-      var result = '—';
-      if (r.ok) {
-        result = (r.won == null) ? '<span class="muted">待结算</span>'
-          : (r.won ? '<span class="won">赢</span>' : '<span class="lost">输</span>');
-      }
-      var pnlCell = (r.ok && r.won != null)
-        ? '<td class="' + (r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '')) + '">' + fmtPnl(r.pnl) + '</td>'
-        : '<td class="muted">—</td>';
+      var shares = hasPosition(r) ? r.shares.toFixed(1) : '—';
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
         '<td>' + sideTag(r.side) + '</td>' +
         '<td>' + r.rem + '</td>' +
-        '<td>' + (r.hot_ask ? r.hot_ask.toFixed(3) : '—') + '</td>' +
+        '<td title="' + (r.hot_src === 'bid' ? 'ask 为空, 按 bid 兜底' : 'ask') + '">' +
+        (r.hot_ask ? r.hot_ask.toFixed(3) : '—') + (r.hot_src === 'bid' ? '*' : '') + '</td>' +
         '<td>' + (r.dev ? fmtUsd(r.dev) : '—') + '</td>' +
         '<td>' + (r.sd ? r.sd.toFixed(1) : '—') + '</td>' +
-        '<td>' + gridBadges(r) + '</td>' +
-        '<td>' + status + '</td>' +
-        '<td>' + (r.shares ? r.shares.toFixed(1) : '—') + '</td>' +
-        '<td>' + result + '</td>' + pnlCell;
+        '<td>' + shares + '</td>' +
+        '<td>' + statusCell(r) + '</td>' +
+        '<td>' + resultCell(r) + '</td>' +
+        pnlCell(r);
       tb.appendChild(tr);
     });
   }
 
-  // 帧行: 时间 侧 rem ask dev$ sd$ anchor hist_bps（只记录，不判定）
-  function renderFrames(resp) {
-    var tb = document.querySelector('#framesTable tbody');
+  // 决策表: 时间 侧 rem ask dev$ sd$ 判定 份额（rem 天然区分 T150 / T60 两段）
+  function renderSnaps(resp) {
+    var tb = document.querySelector('#snapsTable tbody');
     tb.innerHTML = '';
-    $('framesEmpty').hidden = resp.items.length > 0;
+    $('snapsEmpty').hidden = resp.items.length > 0;
     resp.items.forEach(function (r) {
       var tr = document.createElement('tr');
+      var verdict = r.ok
+        ? '<span class="won">信号</span>'
+        : '<span class="muted">' + (REJECT_CN[r.reject_reason] || esc(r.reject_reason || '—')) + '</span>';
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
         '<td>' + sideTag(r.side) + '</td>' +
-        '<td>' + r.rem + '</td>' +
-        '<td>' + (r.hot_ask ? r.hot_ask.toFixed(3) : '—') + '</td>' +
+        '<td title="' + (STAGE_CN[r.stage] || '旧口径') + '">' + r.rem + '</td>' +
+        '<td>' + (r.hot_ask ? r.hot_ask.toFixed(3) : '—') + (r.hot_src === 'bid' ? '*' : '') + '</td>' +
         '<td>' + (r.dev ? fmtUsd(r.dev) : '—') + '</td>' +
         '<td>' + (r.sd ? r.sd.toFixed(1) : '—') + '</td>' +
-        '<td>' + (r.anchor ? r.anchor.toFixed(2) : '—') + '</td>' +
-        '<td>' + (r.hist_bps ? r.hist_bps.toFixed(2) : '—') + '</td>';
+        '<td>' + verdict + '</td>' +
+        '<td>' + (r.ok ? r.shares.toFixed(1) : '—') + '</td>';
       tb.appendChild(tr);
     });
   }
@@ -482,9 +414,8 @@
         return;
       }
       L.pages = pages;
-      if (name === 'snaps') renderSnaps(resp);
-      else if (name === 'scans') renderScans(resp);
-      else renderFrames(resp);
+      if (name === 'signals') renderSignals(resp);
+      else renderSnaps(resp);
       updatePager(name);
     });
   }
@@ -527,10 +458,10 @@
 
   // ── 卡片标题栏点击折叠/展开 ──
   // 收起时整张贴 + 分页条 + 空态一起隐藏，卡片只剩标题栏一行；状态按表名存
-  // localStorage（key 带 tail. 前缀，与 flip 面板同浏览器互不干扰）。默认帧表收起
-  // （它是原稿，快照表才是结论）。localStorage 不可用（隐私模式）时静默降级。
+  // localStorage（key 带 tail. 前缀，与 flip 面板同浏览器互不干扰）。默认决策表收起
+  // （它是判定原稿，信号表才是结论）。localStorage 不可用（隐私模式）时静默降级。
   var COLLAPSE_KEY = 'tail.collapsedTables';
-  var COLLAPSE_DEFAULT = { snaps: false, scans: true, frames: true };
+  var COLLAPSE_DEFAULT = { signals: false, snaps: true };
 
   function loadCollapsed() {
     try {
@@ -587,13 +518,16 @@
     var wr = (r.won + r.lost) > 0 ? (r.win_rate * 100).toFixed(1) + '%' : '—';
     var pnlCls = r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '');
     var tag = isTotal ? '合计' : r.date;
+    var noexecCls = r.noexec > 0 ? 'neg' : 'muted';
     return '<tr>' +
       '<td class="' + (isTotal ? 'muted' : '') + '">' + tag + '</td>' +
-      '<td>' + r.frames + '</td>' +
-      '<td>' + r.snaps + '</td>' +
-      // 监听列: 只记录、无仓位的对账行（不进注数/P&L, 见 /api/daily 的 tailDailyRow 注）
-      '<td class="muted">' + r.scans + '</td>' +
+      '<td>' + r.decisions + '</td>' +
+      '<td>' + r.t150 + '</td>' +
+      '<td>' + r.t60 + '</td>' +
+      '<td>' + r.listen + '</td>' +
       '<td>' + r.signals + '</td>' +
+      // 未成交列: 无仓位（被闸/被拒/0 成交/挂单未定稿）, 不进胜率与 P&L
+      '<td class="' + noexecCls + '">' + r.noexec + '</td>' +
       '<td>' + r.pending + '</td>' +
       '<td>' + wr + '</td>' +
       '<td class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td></tr>';
@@ -609,9 +543,8 @@
     d.days.slice().reverse().forEach(function (r) { tb.insertAdjacentHTML('beforeend', dailyRowHtml(r, false)); });
     // 合计吸底：仅在有数据时填 tfoot（CSS 负责 sticky bottom）
     if (d.days.length > 0) tf.insertAdjacentHTML('beforeend', dailyRowHtml(d.total, true));
-    // 日均注数 = 判决频率闸的对照量（合计行的 notes_per_day）
-    var sub = '按 UTC 日切分 · 胜率/P&L 仅计已结算信号';
-    if (d.total.notes_per_day > 0) sub += ' · 日均 ' + d.total.notes_per_day.toFixed(1) + ' 注/日';
+    var sub = '按 UTC 日切分 · 胜率/P&L 仅计有仓位的已结算信号 · 未成交不进胜率';
+    if (d.days.length > 0) sub += ' · 日均 ' + (d.total.signals / d.days.length).toFixed(1) + ' 注/日';
     $('dailySub').textContent = sub;
   }
 
@@ -656,34 +589,23 @@
   function tick() {
     fetchJSON('/api/state', renderState);
   }
-  function tickJudge() {
-    // 判决要全量行 × 6 格 × 2000 次重采样，给足超时
-    fetchJSON('/api/judge', renderJudge, 15000);
-  }
   // 自动轮询只刷第 1 页（最新）; 用户翻历史页期间暂停对应表; 收起的表不拉（展开时补拉）
   function tickLists() {
+    if (LISTS.signals.auto && !isCollapsed('signals')) fetchList('signals');
     if (LISTS.snaps.auto && !isCollapsed('snaps')) fetchList('snaps');
-    if (LISTS.scans.auto && !isCollapsed('scans')) fetchList('scans');
-    if (LISTS.frames.auto && !isCollapsed('frames')) fetchList('frames');
   }
 
+  $('btnSignals').addEventListener('click', function () { fetchList('signals'); });
   $('btnSnaps').addEventListener('click', function () { fetchList('snaps'); });
-  $('btnScans').addEventListener('click', function () { fetchList('scans'); });
-  $('btnFrames').addEventListener('click', function () { fetchList('frames'); });
-  $('btnJudge').addEventListener('click', tickJudge);
+  bindPager('signals');
   bindPager('snaps');
-  bindPager('scans');
-  bindPager('frames');
+  bindCollapse('signals');
   bindCollapse('snaps');
-  bindCollapse('scans');
-  bindCollapse('frames');
 
   fetchJSON('/api/config', function (c) { CFG = c; renderConfig(); });
 
   setInterval(tick, stateInterval);
   setInterval(tickLists, listInterval);
-  setInterval(tickJudge, judgeInterval);
   tick();
   tickLists();
-  tickJudge();
 })();

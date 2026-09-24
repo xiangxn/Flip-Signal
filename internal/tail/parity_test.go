@@ -12,67 +12,67 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
-// parity_test.go —— Go 引擎 ↔ python 回测的逐窗对账（**opt-in**）。
+// parity_test.go —— Go 引擎 ↔ python oracle 的逐窗对账（**opt-in**）。
 //
-// 重放 data/btc/events_*.jsonl（14 天）驱动本包引擎，断言五格聚合等于
-// python/v4/13_tail_sweep.py + 15_tail_sweep_union_sigma.py 的 oracle，断言监听
-// 增量（B∖A）等于 16_tail_t150_scan.py 的 scan60∖snap60。
-// 与 cmd/btreplay 同一形制（那边对 flip 做同样的事），区别只在本文件是**测试**：
-// `go test` 触发、不新增交付二进制。
+// 重放 data/btc/events_*.jsonl（14 天）驱动本包引擎，断言**三段递进判定链**的
+// 各段行数 / 信号数 / 胜率 / P&L 等于 python/v4/23_tail_integrated.py 的 oracle
+// （该脚本第六节直接打印本文件照抄的那张表）。与 cmd/btreplay 同一形制（那边对
+// flip 做同样的事），区别只在本文件是**测试**：`go test` 触发、不新增交付二进制。
 //
 // ⚠️ 数据目录不存在即跳过（data/ 在 .gitignore 里，干净克隆不能因此失败）。
 //
-// 口径注入与回测 1:1（本文件不复制任何规则判定，只喂数据给引擎）:
+// 口径注入与 oracle 1:1（本文件**不复制任何规则判定**，只喂数据给引擎）:
 //   - anchor = twap_open_price（settlement_correction 合并后，python load_events 同款）
 //   - σ      = **按事件索引**前 ≤18 个事件 |close−open| 均值（≥3 个有值）——即
 //     python hist_ranges 的语义，**不是** flip.HistState 的「最近 18 个已 push 振幅」:
 //     两者在「窗口缺 open/close」时不等（缺的那窗在 python 里占索引位、不贡献值,
 //     在 HistState 里连位置都不占）。回测基准就是前者，故这里现算后喂给 BeginWindow。
+//   - **σ 未就绪（<3 个可用窗）整窗跳过**——与 cmd/tail 的前置闸同源（决策 #13:
+//     `hist.Count() < HistMin` ⇒ 整窗不产出观测）。历史 14 天里恰好 3 窗, 但它们是
+//     「引擎落一行 hist_bps=0 的观测」与「oracle 一行不产」的分水岭, 不跳过必然对不上。
 //   - 事件过滤 = 无 outcome 或无锚跳过（13_tail_sweep.py 的 snapshots 同款）
 //   - 判定     = tail.Engine.BeginWindow + ProcessTick 逐 tick 驱动
 //
-// 行 ↔ python 的对应关系:
+// 行 ↔ oracle 的对应关系（stage 字段直接可比, 不再需要按 kind 反推）:
 //
-//	frame 行（rem ≤ frame_rem 150） ⇔ snapshots(T=150) 的首个有效 tick
-//	snap  行（rem ≤ rem_start   60） ⇔ snapshots(T=60)   的首个有效 tick
-//	scan  行（snap 之后首个达标）   ⇔ scan60∖snap60（16_tail_t150_scan.py 的监听增量）
+//	t150 行（首个 rem ≤ 150 的可判定 tick）⇔ oracle chain() 的第一段
+//	t60  行（t150 被拒后首个 rem ≤ 60 的可判定 tick）⇔ 第二段
+//	listen 行（前两段都没信号后, 首个 ② 达标的 tick）⇔ 第三段（只在达标时落行）
 //
-// 两边**都要**再按「快照 tick 上 spot 与 twap 同时在场」过滤才是同一宇宙
-// （python 是整窗丢弃，Go 是落一行 missing_spot/missing_twap 后继续——记录更全，
-// 但聚合时必须对齐到 python 的宇宙）。
-//
-// oracle 数字由 13/15 的脚本在 2026-09-23 现算核对（见 docs/tail_engine_mapping_2026-09-23.md）。
-var parityOracle = []struct {
-	name string
-	fn   func(o *Observation) bool
-	n    int
-	wr   float64 // 胜率（%）
-	pl   float64 // 14 天 P&L（U, 每笔 2U）
+// ⚠️ 需要 audited、但不需断言的已知事实（oracle 第五节实测, 2026-09-24 数据）:
+// rem ≤ 150 的 542800 个 tick 里「**四档部分缺**」= 0（单侧空簿一次都没有）⇒ Go 的
+// 「有效价 ask→bid 兜底」门与 python 的「四档齐全」门在 14 天数据上**完全同源**,
+// 故本对账对空侧放宽零曝光——空侧是纯 live 行为改动（见 docs/tail_integrated_2026-09-24.md §2）。
+// 「整簿全空」（四档齐 0）361 个 tick 两套门都判无效, 也不影响。
+var parityStages = []struct {
+	stage string
+	rows  int     // 该段全部行（判定行 + 信号行）
+	sig   int     // 信号行（ok=true）
+	wr    float64 // 信号胜率（%）
+	pl    float64 // 14 天 P&L（U, 每笔 2U）
 }{
-	{"① 热门侧 ask≥0.80", func(o *Observation) bool { return o.Rules.Rule1() }, 3109, 97.65, 72.10},
-	{"② ①∧dev≥63美元", func(o *Observation) bool { return o.Rules.Rule2() }, 1458, 99.59, 32.69},
-	{"③ ①∧dev≥1σ", func(o *Observation) bool { return o.Rules.Rule3() }, 1469, 99.46, 22.27},
-	{"④ ①∧(dev≥63∨dev≥1σ)", func(o *Observation) bool { return o.Rules.Rule4() }, 1747, 99.37, 33.98},
-	{"⑤ ①∧(dev≥63∨(1σ≥40美元∧dev≥1σ))", func(o *Observation) bool { return o.Rules.Rule5() }, 1536, 99.61, 36.93},
+	{StageT150, 3638, 1220, 93.934426, 16.022637},
+	{StageT60, 2414, 568, 99.119718, 15.756180},
+	{StageListen, 347, 347, 97.982709, 3.895932},
 }
 
-// paritySnap 把一条 snap 观测与它所属事件的官方结果配对（Observation 本身不带
-// outcome——结算字段在 Record 段，本测试没有 recorder）。listen 行（KindScan）共用
-// 同一形制——判定与 P&L 公式都相同，区别只在「有没有真下单」。
-type paritySnap struct {
+// parityTotals = 三段合计（oracle 第六节末行）。
+const (
+	parityAllRows   = 6399
+	parityAllSig    = 2135
+	parityAllWR     = 95.971897
+	parityAllPL     = 35.674749
+	parityWindows   = 3640 // 参与的窗数（有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ）
+	parityNoSigma   = 3    // σ 未就绪整窗跳过（决策 #13 的前置闸）
+	parityTolerance = 5e-5 // oracle 打印 6 位小数 ⇒ 容差取其末位之半; 实测两边差 <1e-9
+)
+
+// parityRow 把一条观测与它所属事件的官方结果配对（Observation 本身不带 outcome
+// ——结算字段在 Record 段，本测试没有 recorder）。
+type parityRow struct {
 	obs     Observation
 	outcome int
 }
-
-// parityScanOracle = 监听增量 B∖A 的 python oracle（2026-09-23 现算核对）:
-// B（rem≤60 起首个达标 tick）n=2021 WR 99.26% +43.93U 减去 A（快照）n=1536
-// WR 99.61% +36.93U。⚠️ 该增量**不显著**（日级 bootstrap 95% 区间跨 0:
-// [−9.1, +22.5], 2000 次重采样）——它正是本行的存在理由: 只登记、不改引擎。
-var parityScanOracle = struct {
-	n  int
-	wr float64
-	pl float64
-}{485, 98.14, 7.0}
 
 // TestParityBacktest 是 14 天全量对账（唯一一条 Go↔py 红线测试）。
 func TestParityBacktest(t *testing.T) {
@@ -87,13 +87,10 @@ func TestParityBacktest(t *testing.T) {
 	t.Logf("事件 %d 窗", len(events))
 
 	cfg := DefaultConfig()
-	var (
-		frames, framesUni int // 帧行: 全部 / 通过 spot+twap 在场
-		snaps, snapsUni   int // snap 行: 全部 / 同上
-		scans             int // 监听增量行（B∖A, 只记录; 同样取 spot+twap 在场的宇宙）
-		universe          []paritySnap
-		scanUniverse      []paritySnap
-	)
+	rows := map[string]int{}             // 各段全部行数
+	universe := map[string][]parityRow{} // 各段信号行（ok=true）
+	windows, noSigma, bidFallback := 0, 0, 0
+
 	for i := range events {
 		ev := &events[i]
 		if ev.Outcome == nil || !(ev.TwapOpen > 0) {
@@ -101,111 +98,145 @@ func TestParityBacktest(t *testing.T) {
 		}
 		hb, ok := parityHistBps(events, i, ev.TwapOpen)
 		if !ok {
-			hb = 0 // 引擎 no_hist 兜底（= python hist_bps=None, σ 腿不可用）
+			noSigma++ // σ 未就绪 ⇒ 整窗跳过（与 cmd/tail 的前置闸同源）
+			continue
 		}
 		eng := NewEngine(cfg)
 		eng.BeginWindow(ev.TwapOpen, hb)
 
-		// ⚠️ 不在 snap 行处 break: 监听段（只记录）要继续跑到闭市, 否则这条增量
-		// 曲线永远没法与 python 的 scan60 对账（见 parityScanOracle）。
+		emitted := 0
 		for _, tk := range ev.Ticks {
-			for _, o := range eng.ProcessTick(tk) {
-				present := o.Spot > 0 && o.Twap > 0 // python 的宇宙: 缺一则整窗丢弃（13:99-101）
-				switch o.Kind {
-				case KindFrame:
-					frames++
-					if present {
-						framesUni++
-					}
-				case KindSnap:
-					snaps++
-					if present {
-						snapsUni++
-						universe = append(universe, paritySnap{obs: o, outcome: *ev.Outcome})
-					}
-				case KindScan:
-					// 宇宙同 snap: python 的 scan60 也要求该 tick spot+twap 在场
-					//（valid_ticks 逐 tick 过滤），缺 twap 的 tick 它根本看不到。
-					if present {
-						scans++
-						scanUniverse = append(scanUniverse, paritySnap{obs: o, outcome: *ev.Outcome})
-					}
+			o := eng.ProcessTick(tk)
+			if o == nil {
+				if tk.Rem <= 0 {
+					break // rem==0 终 tick: 窗口结束
 				}
-			}
-			if tk.Rem <= 0 {
-				break
-			}
-		}
-	}
-
-	// 闩锁计数 = python snapshots(T) 的 n: T=150 → 3643, T=60 → 3634。
-	// Go 侧「全部行数」只会更多（缺 spot/twap 的窗口照记一行）。
-	if framesUni != 3643 {
-		t.Errorf("T=150 宇宙窗数 = %d, 期望 3643（python snapshots(T=150) 的 n）", framesUni)
-	}
-	if snapsUni != 3634 {
-		t.Errorf("T=60 宇宙窗数 = %d, 期望 3634（python snapshots(T=60) 的 n）", snapsUni)
-	}
-	if frames < framesUni || snaps < snapsUni {
-		t.Errorf("全部行数 frame=%d snap=%d 不得少于宇宙窗数 %d/%d", frames, snaps, framesUni, snapsUni)
-	}
-	t.Logf("行数: frame %d（宇宙 %d）snap %d（宇宙 %d）scan %d", frames, framesUni, snaps, snapsUni, scans)
-
-	// 监听增量（B∖A）与 python 的 scan60∖snap60 对账: n 必须是精确整数,
-	// WR/P&L 两位小数内相等（同五格口径: 赢 shares−stake, 输 −stake）。
-	if scans != parityScanOracle.n {
-		t.Errorf("监听增量宇宙窗数 = %d, 期望 %d（python scan60∖snap60 的 n）", scans, parityScanOracle.n)
-	}
-	if scans > 0 {
-		k := 0
-		pl := 0.0
-		for i := range scanUniverse {
-			o := &scanUniverse[i].obs
-			if flip.WonFor(o.Side, scanUniverse[i].outcome) {
-				k++
-				pl += cfg.Stake/o.HotAsk - cfg.Stake
-			} else {
-				pl -= cfg.Stake
-			}
-		}
-		if wr := float64(k) / float64(scans) * 100; math.Abs(wr-parityScanOracle.wr) > 5e-3 {
-			t.Errorf("监听增量 WR = %.4f%%, 期望 %.2f%%", wr, parityScanOracle.wr)
-		}
-		if math.Abs(pl-parityScanOracle.pl) > 5e-3 {
-			t.Errorf("监听增量 P&L = %+.4fU, 期望 %+.2fU", pl, parityScanOracle.pl)
-		}
-	}
-
-	// 五格聚合（P&L 口径 = 13_tail_sweep.py 的 stat: 赢 shares−stake, 输 −stake）
-	for _, ora := range parityOracle {
-		var n, k int
-		pl := 0.0
-		for i := range universe {
-			o := &universe[i].obs
-			if !ora.fn(o) {
 				continue
 			}
-			n++
-			if flip.WonFor(o.Side, universe[i].outcome) {
-				k++
+			// 引擎的行形态守卫: 唯一 kind + 三个已知 stage（legacy kind 不再产出）。
+			if o.Kind != KindSnap {
+				t.Fatalf("窗 %d: 行 kind = %q, 期望 %q（引擎只产出这一种）", ev.StartTime, o.Kind, KindSnap)
+			}
+			if o.Stage != StageT150 && o.Stage != StageT60 && o.Stage != StageListen {
+				t.Fatalf("窗 %d: 未知 stage %q", ev.StartTime, o.Stage)
+			}
+			// 可判定 tick 的门控: spot 必在场、锚必 >0（无锚整窗不产出）。
+			if !(o.Spot > 0) || !(o.Anchor > 0) {
+				t.Fatalf("窗 %d: 行 spot=%.4f anchor=%.4f（都须 >0）", ev.StartTime, o.Spot, o.Anchor)
+			}
+			// 判定行内部一致性 + 拒绝原因只能是这两条（missing_spot/no_hist 是纯函数
+			// 防线, 现网到不了——若出现说明引擎的前置门控被绕过了）。
+			if o.OK {
+				if o.Stage == StageListen {
+					if !o.Rules.Rule2() {
+						t.Fatalf("窗 %d: listen 信号行不满足 ②: %+v", ev.StartTime, o.Rules)
+					}
+				} else if !o.Rules.Rule5() {
+					t.Fatalf("窗 %d: %s 信号行不满足 ⑤: %+v", ev.StartTime, o.Stage, o.Rules)
+				}
+				if o.RejectReason != "" {
+					t.Fatalf("窗 %d: 信号行不该带 reject_reason %q", ev.StartTime, o.RejectReason)
+				}
+			} else {
+				switch o.RejectReason {
+				case RejectPriceLow:
+					if o.Rules.Price {
+						t.Fatalf("窗 %d: price_low 但价格腿为真: %+v", ev.StartTime, o.Rules)
+					}
+				case RejectLegOut:
+					if !o.Rules.Price || o.Rules.Rule5() {
+						t.Fatalf("窗 %d: leg_out 但价格腿为假/⑤ 已达标: %+v", ev.StartTime, o.Rules)
+					}
+				default:
+					t.Fatalf("窗 %d: %s 判定行的拒绝原因 = %q（只应是 price_low/leg_out）",
+						ev.StartTime, o.Stage, o.RejectReason)
+				}
+			}
+			// 空侧兜底在 14 天数据上零命中（全部走 ask）——bid 一旦出现即 oracle 宇宙分家。
+			if o.HotSrc != BookSrcAsk {
+				bidFallback++
+				t.Errorf("窗 %d: 行取价来源 = %q（14 天里应为恒 %q, 见文件头）",
+					ev.StartTime, o.HotSrc, BookSrcAsk)
+			}
+			rows[o.Stage]++
+			emitted++
+			if o.OK {
+				universe[o.Stage] = append(universe[o.Stage], parityRow{obs: *o, outcome: *ev.Outcome})
+			}
+			if o.OK {
+				break // 整窗只下一单: 出信号即止
+			}
+		}
+		if emitted > 0 {
+			windows++
+		}
+	}
+
+	if windows != parityWindows {
+		t.Errorf("参与判定的窗数 = %d, 期望 %d（oracle 的 windows）", windows, parityWindows)
+	}
+	if noSigma != parityNoSigma {
+		t.Errorf("σ 未就绪跳过 = %d 窗, 期望 %d", noSigma, parityNoSigma)
+	}
+
+	// 各段行数 / 信号数（**精确整数**）+ 胜率 / P&L（容差 5e-5）——oracle 第六节。
+	var allRows, allSig int
+	allPL := 0.0
+	allWon := 0
+	for _, ps := range parityStages {
+		if got := rows[ps.stage]; got != ps.rows {
+			t.Errorf("%s 行数 = %d, 期望 %d", ps.stage, got, ps.rows)
+		}
+		uni := universe[ps.stage]
+		if len(uni) != ps.sig {
+			t.Errorf("%s 信号数 = %d, 期望 %d", ps.stage, len(uni), ps.sig)
+		}
+		allRows += rows[ps.stage]
+		allSig += len(uni)
+		if len(uni) == 0 {
+			continue
+		}
+		// P&L 口径 = oracle 的 pl(): 赢 shares−stake, 输 −stake, shares = stake/有效价。
+		won, pl := 0, 0.0
+		for k := range uni {
+			o := &uni[k].obs
+			if flip.WonFor(o.Side, uni[k].outcome) {
+				won++
 				pl += cfg.Stake/o.HotAsk - cfg.Stake
 			} else {
 				pl -= cfg.Stake
 			}
 		}
-		if n != ora.n {
-			t.Errorf("%s: n = %d, 期望 %d", ora.name, n, ora.n)
+		if wr := float64(won) / float64(len(uni)) * 100; math.Abs(wr-ps.wr) > parityTolerance {
+			t.Errorf("%s WR = %.6f%%, 期望 %.6f%%", ps.stage, wr, ps.wr)
 		}
-		// 容差 5e-3 = oracle 表两位小数舍入的半个末位（n 是精确整数比对, 不容忍）。
-		if n > 0 {
-			if wr := float64(k) / float64(n) * 100; math.Abs(wr-ora.wr) > 5e-3 {
-				t.Errorf("%s: WR = %.4f%%, 期望 %.2f%%", ora.name, wr, ora.wr)
-			}
+		if math.Abs(pl-ps.pl) > parityTolerance {
+			t.Errorf("%s P&L = %+.6fU, 期望 %+.6fU", ps.stage, pl, ps.pl)
 		}
-		if math.Abs(pl-ora.pl) > 5e-3 {
-			t.Errorf("%s: P&L = %+.4fU, 期望 %+.2fU", ora.name, pl, ora.pl)
+		allWon, allPL = allWon+won, allPL+pl
+		t.Logf("%s: 行 %d / 信号 %d / WR %.4f%% / P&L %+.4fU",
+			ps.stage, rows[ps.stage], len(uni), float64(won)/float64(len(uni))*100, pl)
+	}
+
+	if allRows != parityAllRows {
+		t.Errorf("三段合计行数 = %d, 期望 %d", allRows, parityAllRows)
+	}
+	if allSig != parityAllSig {
+		t.Errorf("三段合计信号数 = %d, 期望 %d", allSig, parityAllSig)
+	}
+	if allSig > 0 {
+		if wr := float64(allWon) / float64(allSig) * 100; math.Abs(wr-parityAllWR) > parityTolerance {
+			t.Errorf("三段合计 WR = %.6f%%, 期望 %.6f%%", wr, parityAllWR)
 		}
 	}
+	if math.Abs(allPL-parityAllPL) > parityTolerance {
+		t.Errorf("三段合计 P&L = %+.6fU, 期望 %+.6fU", allPL, parityAllPL)
+	}
+	if bidFallback > 0 {
+		t.Errorf("有 %d 行的有效价来自 bid —— 与 oracle 的「四档齐全」宇宙分家, 须先对齐口径", bidFallback)
+	}
+	t.Logf("合计: 行 %d / 信号 %d / 窗 %d / σ跳过 %d / WR %.4f%% / P&L %+.4fU",
+		allRows, allSig, windows, noSigma, float64(allWon)/float64(allSig)*100, allPL)
 }
 
 // ── 数据加载（复刻 cmd/btreplay.loadEvents + python v2.lib.load_events 的合并语义）──

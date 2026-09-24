@@ -46,8 +46,9 @@ const (
 	winKindStats = "tailstats" // StatsRow（tick 健康度审计）
 )
 
-// Recorder 追加写 tail_*.jsonl（每窗至多两行: frame + snap），外加窗口振幅日志
-// （σ 预热数据源）与窗口健康度日志。三族各持独立文件句柄，互不干扰。
+// Recorder 追加写 tail_*.jsonl（每窗 1~3 行: 三段链的判定行/信号行, 未出信号时
+// 至多两条判定行），外加窗口振幅日志（σ 预热数据源）与窗口健康度日志。
+// 三族各持独立文件句柄，互不干扰。
 //
 // 与 flip.Recorder 的差异（有意）:
 //   - 前缀与行 schema 不同（本文件顶部）——不复用 flip.Recorder，因为它的三个
@@ -112,7 +113,7 @@ type StatsRow struct {
 	// 无偏观测（不含取锚轮询的 500ms 相位）。仅取到锚时非 0。
 	AnchorArrivedMs int64 `json:"anchor_arrived_ms,omitempty"`
 
-	WindowStats // 内嵌: ticks/ticks_valid/book_stale/book_missing/frames 平铺
+	WindowStats // 内嵌: ticks/ticks_valid/book_stale/book_missing/spot_missing/frames 平铺
 }
 
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
@@ -233,20 +234,18 @@ func (r *Recorder) loadFileLocked(path string) (int, int, error) {
 			continue
 		}
 		r.recs = append(r.recs, &rec)
-		// 崩溃恢复: pending 只收「决策已下、仓位待结算」的行（snap/scan && ok && 未结算
-		// && paper 或 live filled/partial）。帧行 OK=false 天然不入。
-		// scan 行同样收: 它没有仓位, 但它是那一窗**唯一**能拿到官方 outcome 的行
-		//（snap 被拒的窗没有别的可结算行, 丢了这条该窗的对账样本永久缺失）。
-		if (rec.Kind == KindSnap || rec.Kind == KindScan) && rec.OK && rec.Won == nil && rec.ConditionID != "" {
-			if isSettlable(&rec) {
-				r.pending[rec.ConditionID] = &rec // 重启后重新注册结算轮询
-			} else if rec.Kind == KindSnap &&
-				(rec.ExecStatus == flip.ExecStatusSubmitting || rec.ExecStatus == flip.ExecStatusResting ||
-					strings.HasPrefix(rec.ExecNote, flip.ExecNoteUnknown)) {
-				log.Printf("⚠️ [Tail] %s: condition=%s exec=%s 执行中断待定稿——勿自动补单, 按 order_id 去 data-api 核对。slug=%s event_start=%d ts=%d side=%s hot_ask=%.3f stake=%.1f note=%q",
-					filepath.Base(path), rec.ConditionID, rec.ExecStatus,
-					rec.Slug, rec.EventStart, rec.Ts, rec.Side, rec.HotAsk, rec.Stake, rec.ExecNote)
-			}
+		// 崩溃恢复: pending 收**所有未结算的 ok 行**（isSettlable = 未被官方 outcome 定案、
+		// 且不是未定稿的 submitting/resting）——2026-09-24 起含被闸/0 成交行:
+		// 它们没有仓位（P&L 恒 0）, 但页面要显示官方结果, 故照常注册结算。
+		// 未定稿的行（submitting/resting/成交未知）不能自动补单, 只告警人工核对。
+		if isSettlable(&rec) {
+			r.pending[rec.ConditionID] = &rec // 重启后重新注册结算轮询
+		} else if rec.OK && rec.Won == nil && rec.ConditionID != "" && rec.Kind == KindSnap &&
+			(rec.ExecStatus == flip.ExecStatusSubmitting || rec.ExecStatus == flip.ExecStatusResting ||
+				strings.HasPrefix(rec.ExecNote, flip.ExecNoteUnknown)) {
+			log.Printf("⚠️ [Tail] %s: condition=%s exec=%s 执行中断待定稿——勿自动补单, 按 order_id 去 data-api 核对。slug=%s event_start=%d ts=%d side=%s hot_ask=%.3f stake=%.1f note=%q",
+				filepath.Base(path), rec.ConditionID, rec.ExecStatus,
+				rec.Slug, rec.EventStart, rec.Ts, rec.Side, rec.HotAsk, rec.Stake, rec.ExecNote)
 		}
 		rows++
 	}
@@ -269,8 +268,8 @@ func newRecord(condID, slug string, eventStart int64, obs *Observation, stake fl
 	}
 }
 
-// RecordObservation 落盘一条观测（frame 与 paper 的 snap 都走这里）并立即 flush。
-// 帧行的 stake 传 0（无仓位语义）；snap 的 ok 行入 pending（等待结算回填）。
+// RecordObservation 落盘一条观测（判定行与 paper 的信号行都走这里）并立即 flush。
+// ok 行入 pending（等待结算回填, 判据 = isSettlable）。
 // 返回生成的记录行。
 //
 // paper 侧的成交是**模拟**的: 行里不写任何 exec 字段（ExecStatus 空 → IsFilled
@@ -306,9 +305,16 @@ func (r *Recorder) SubmitLiveObservation(condID, slug string, eventStart int64, 
 	return rec, nil
 }
 
-// RecordLiveRejected 落盘 live 风控闸拒绝行（未发起下单, 无 submitting 中间态）。
-// OK=true（策略信号本身成立）但 ExecStatus=rejected → IsFilled=false 不注册结算。
-func (r *Recorder) RecordLiveRejected(condID, slug string, eventStart int64, obs *Observation, stake float64, gateReason, note string) (*Record, error) {
+// RecordRejected 落盘被风控闸拦下的信号行（**paper 与 live 共用**; 未发起下单,
+// 无 submitting 中间态）。
+//
+// OK=true（策略信号本身成立）但 ExecStatus=rejected ⇒ HasPosition 为假 ⇒ 未成交:
+// 不入胜率、P&L 恒 0（a.md「被风控拦」= 未成交）。**仍然入 pending**: 官方 outcome
+// 回来时照常回填 won（页面要显示这一笔的结果）, 只是 PnL 由 recomputePnL 归零。
+//
+// ⚠️ flip 侧仍是方案 A（paper 被闸行照常成交照常结算, 作反事实样本）——tail 已按
+// 用户决定改成统一形态, 见 docs/tail_integrated_2026-09-24.md §3.3。
+func (r *Recorder) RecordRejected(condID, slug string, eventStart int64, obs *Observation, stake float64, gateReason, note string) (*Record, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -319,26 +325,8 @@ func (r *Recorder) RecordLiveRejected(condID, slug string, eventStart int64, obs
 	if err := r.writeLocked(rec); err != nil {
 		return nil, err
 	}
-	return rec, nil
-}
-
-// RecordGatedObservation 落盘 paper 模式下被风控闸拦下的 ok 信号行（方案 A,
-// docs/dog020_risk_latency_plan_2026-09-16.md §3.5，本族沿用）。
-//
-// 行 schema 与正常 paper 信号**完全一致**（exec_status 仍空 → IsFilled 仍 true →
-// 调用方照常注册结算、Resolve 照常回填 won/pnl），只多 gate_reason 一个键——
-// 被闸行本身就是「当日不熔断会怎样」的反事实样本。⚠️ 分析脚本必须显式过滤。
-func (r *Recorder) RecordGatedObservation(condID, slug string, eventStart int64, obs *Observation, stake float64, gateReason string) (*Record, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	rec := newRecord(condID, slug, eventStart, obs, stake)
-	rec.GateReason = gateReason
-	if err := r.writeLocked(rec); err != nil {
-		return nil, err
-	}
 	if isSettlable(rec) {
-		r.pending[rec.ConditionID] = rec // 与 RecordObservation 同款: 被闸行照常结算
+		r.pending[rec.ConditionID] = rec
 	}
 	return rec, nil
 }
@@ -378,6 +366,7 @@ func (r *Recorder) CompleteExecution(conditionID string, res flip.ExecResult) (*
 		rec.Shares = res.Shares // 目标股数 → 实际成交股数
 		rec.Cost = res.Cost
 	}
+	recomputePnL(rec) // 已结算过的行（先结算后定稿的竞态）按真实成交补算 P&L
 	filled := rec.IsFilled()
 	if isSettlable(rec) {
 		r.pending[conditionID] = rec
@@ -424,6 +413,7 @@ func (r *Recorder) CompleteRestingFill(f flip.FillFinal) (*Record, error) {
 		rec.Cost = f.Cost
 		rec.FillPrice = f.Cost / f.Shares
 	}
+	recomputePnL(rec) // 已结算过的行（先结算后定稿的竞态）按真实成交补算 P&L
 	if isSettlable(rec) {
 		r.pending[f.ConditionID] = rec
 	}
@@ -439,6 +429,10 @@ func (r *Recorder) CompleteRestingFill(f flip.FillFinal) (*Record, error) {
 // ⚠️ tail 的结算口径与回测一致: 赢 = 押注侧即官方赢家（不是「价格」, 是 outcome）;
 // 每股兑 1 USDC ⇒ 赢 shares−cost / 输 −cost（cost 缺省回退 Stake, paper 行即如此）。
 //
+// 2026-09-24 起**所有 ok 行都注册结算**（含被闸/0 成交/下单被拒——a.md 第 3 条要求
+// 页面上能看见每一笔的官方结果）, 故这里必须区分「有没有仓位」: 无仓位的行照常写
+// Won（显示赢/输）, 但 PnL 由 recomputePnL 归零——不成交就没有盈亏。
+//
 // src 是结算来源（internal/settle 的 SrcPush|SrcOfficial|SrcGamma; 空 = 未记），
 // 落进 settle_src 供事后按层核对（与 flip 同编排, 见 internal/settle 包注释）。
 func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time, src string) bool {
@@ -450,16 +444,8 @@ func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time, src st
 		return false
 	}
 	won := flip.WonFor(rec.Side, outcome)
-	cost := rec.Cost
-	if cost <= 0 {
-		cost = rec.Stake // paper 行无 Cost（模拟成交不写）, 用投入兜底
-	}
-	pnl := -cost
-	if won {
-		pnl = rec.Shares - cost // 每股兑 1U（Shares = 实际成交股数）
-	}
 	rec.Won = &won
-	rec.PnL = pnl
+	recomputePnL(rec)
 	rec.ResolvedAt = at.UTC().Format(time.RFC3339)
 	rec.SettleSrc = src
 	delete(r.pending, conditionID)
@@ -470,23 +456,57 @@ func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time, src st
 	return true
 }
 
-// findSnapLocked 按 conditionID 找决策快照行（调用方已持锁）。
+// recomputePnL 按**当前**的成交字段重算一条已结算记录的 P&L。三个调用点共用
+// （Resolve / CompleteExecution / CompleteRestingFill）, 堵的是同一个竞态:
+// resting 行可能在 FillTracker 定稿**之前**就被结算编排（闭市 +10s）定案——
+// 若无条件只在 Resolve 里算一次, 定稿后成交了却永远留着 P&L=0。
+//
+// 口径:
+//   - 未结算（Won == nil）→ 不动（P&L 由 Resolve 写）;
+//   - 无仓位（HasPosition 假: 被闸/0 成交/下单被拒/legacy 对账行）→ **P&L 恒 0**
+//     （a.md: 未成交不计算 P&L）;
+//   - 有仓位 → 赢 shares−cost / 输 −cost; cost 缺省回退 Stake（paper 行不写 Cost）。
+func recomputePnL(rec *Record) {
+	if rec.Won == nil {
+		return
+	}
+	if !rec.HasPosition() {
+		rec.PnL = 0
+		return
+	}
+	cost := rec.Cost
+	if cost <= 0 {
+		cost = rec.Stake // paper 行无 Cost（模拟成交不写）, 用投入兜底
+	}
+	if *rec.Won {
+		rec.PnL = rec.Shares - cost // 每股兑 1U（Shares = 实际成交股数）
+		return
+	}
+	rec.PnL = -cost
+}
+
+// findSnapLocked 按 conditionID 找**本次执行对应的**那一行（调用方已持锁）。
 //
 // 两条口径:
-//   - **必须按 Kind 过滤**: 同一窗口的帧行先落盘, 按 conditionID 找第一行会把
-//     执行回填打到没有 stake 的帧行上;
-//   - **取最后一条**（向后扫）: 正常每窗至多一行 snap, 但真出现重复时, 后写的那条
-//     才是**本次执行**对应的行（submitting 行是紧接 POST 写的）——取第一条会把回填
-//     打到另一行上。重复本身是数据完整性告警, 顺手打一条 ⚠️（不静默吞掉）。
+//   - **必须按 Kind 过滤**: legacy 的帧行/对账行没有执行语义, 按 conditionID 找第一行
+//     会把执行回填打到它们身上;
+//   - **只认 OK 行、取最后一条**（向后扫）: 三段链下一个窗口**原本就有多条 snap 行**
+//     （t150 判定行、t60 判定行、信号行都是 KindSnap, 见 types.go 的 Stage）——但只有
+//     OK=true 的那一条会被执行, 且 submitting 行是紧接 POST 写的、必是最后一条。
+//     ⚠️ 不能只按「最后一条 snap」取: 监听段在信号之后不再产行是对的, 但若未来有谁
+//     在 OK 行之后再补一条普通判定行, 回填就会打到没有 exec 语义的那条上。
+//
+// 重复的 **OK** 行才是数据完整性告警（HasSignal 守卫 + 引擎「出信号即 Done」都不允许
+// 它出现）——真出现时打一条 ⚠️ 不静默吞掉。
 func (r *Recorder) findSnapLocked(conditionID string) *Record {
 	var found *Record
 	for i := len(r.recs) - 1; i >= 0; i-- {
 		rec := r.recs[i]
-		if rec.ConditionID != conditionID || rec.Kind != KindSnap {
+		if rec.ConditionID != conditionID || rec.Kind != KindSnap || !rec.OK {
 			continue
 		}
 		if found != nil {
-			log.Printf("⚠️ [Tail] %s 有多条 snap 行（重复决策? 检查是否有进程重入）——回填取最后一条", conditionID)
+			log.Printf("⚠️ [Tail] %s 有多条 OK 行（重复决策? 检查是否有进程重入）——回填取最后一条", conditionID)
 			break
 		}
 		found = rec
@@ -744,11 +764,14 @@ func (r *Recorder) Observations() []*Record {
 	return copyRecords(r.recs)
 }
 
-// Signals 返回**判定通过**的决策快照行副本（时间正序）——Dashboard 快照表与
-// Judge 的输入。⚠️ 含被闸行（gate_reason 非空）: 那是「当日不熔断会怎样」的反事实
-// 样本, 过滤是**消费端**的责任（Judge 与前端各自显式过滤, 与 flip 同口径）。
+// Signals 返回**判定通过**的行副本（时间正序）——Dashboard 信号表的输入。
 //
-// 帧行天然不入（RunFrame 恒置 OK=false）。
+// ⚠️ 含被闸行（gate_reason 非空）与 0 成交行: 它们是「信号成立但没成交」,
+// 页面必须显示（a.md 第 3/4 条: 所有信号都注册结算并显示状态, 未成交不进胜率）。
+// 分类是**消费端**的责任——判据统一用 Record.HasPosition（dashboard 的 tally）。
+//
+// legacy 的 frame（OK 恒 false）/ scan 行天然不入（后者虽 OK, 但从未下单、无仓位,
+// 不属任何信号——见 HasPosition）。
 func (r *Recorder) Signals() []*Record {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -761,28 +784,37 @@ func (r *Recorder) Signals() []*Record {
 	return copyRecords(out)
 }
 
-// Counts 返回 (snap, ok, won): snap = 决策快照行数（含否决与被闸）, ok = 其中判定
-// 通过的行数, won = 其中已结算且赢的行数。
+// HasSignal 判断某窗口是否已有 **OK 行**（= 已下过单或至少已经产出过信号行）。
+// cmd/tail 的防双单判据: 崩溃重启重入同一窗口时, 只要磁盘上已有 OK 行就整窗跳过。
 //
-// ⚠️ 与 flip.Recorder.Counts 的口径差: 那里第 1 个返回值是**全部观测行**（flip 每窗
-// 至多一行, 观测即行数）。本族每窗至多两行（帧 + 快照）, 帧行无仓位语义——若照抄
-// 「全部行」, Dashboard 的「快照数」会被帧行虚高约一倍。
-func (r *Recorder) Counts() (snap, ok, won int) {
+// ⚠️ 与「有没有仓位」无关（被闸/0 成交的行也算已产出信号——它们同样不该再下一单）,
+// 也**不按 stage 过滤**: 三段任一 OK 都是「本窗的信号」。
+// legacy 的 scan 行（只记录、从不下单）也算在内——那是旧口径的反事实样本,
+// 重入时保守跳过即可（历史只有 09-23/09-24 两天会遇到）。
+func (r *Recorder) HasSignal(conditionID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for _, rec := range r.recs {
-		if rec.Kind != KindSnap {
-			continue
-		}
-		snap++
-		if rec.OK {
-			ok++
-			if rec.Won != nil && *rec.Won {
-				won++
-			}
+		if rec.ConditionID == conditionID && rec.OK {
+			return true
 		}
 	}
-	return
+	return false
+}
+
+// HasStage 判断某窗口是否已产出过指定段的判定行（cmd/tail 重入时回填引擎用,
+// 见 Engine.Resume）。legacy 行没有 stage（空串）, 故对它们的查询恒 false——
+// 旧口径的「决策已做」由 HasSignal 兜住（旧 snap 若 OK 则有信号; 若被拒则新链
+// 从 T=60 段续跑, 同一窗仍至多一条 OK 行）。
+func (r *Recorder) HasStage(conditionID, stage string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, rec := range r.recs {
+		if rec.ConditionID == conditionID && rec.Kind == KindSnap && rec.Stage == stage {
+			return true
+		}
+	}
+	return false
 }
 
 // RecentWindows 返回最近 n 个已完成窗口振幅行（时间正序；不足则返回全部）。
@@ -809,14 +841,12 @@ func (r *Recorder) PendingSignals() []*Record {
 	return copyRecords(out)
 }
 
-// HasKind 判断某窗口是否已落过指定类型的行（cmd/tail 的防重入判据）。
+// HasKind 判断某窗口是否已落过指定类型的行。
 //
-// 两个用途（**别合并成一个 bool**）:
-//   - HasKind(cond, KindSnap): 该窗的决策已经做过（可能已下单）——重启后重入同一
-//     窗口必须跳过, 否则会双开一笔（与 flip 的 HasRecord 同义）;
-//   - HasKind(cond, KindFrame): 该窗的原始帧已经落过——重启后重入只需跳过写帧,
-//     **仍要**继续等尾盘快照（帧在 rem≤150、快照在 rem≤60, 中间有 90s 的崩溃窗口;
-//     按「有帧就整窗跳过」会白丢一整个尾盘样本）。
+// ⚠️ 2026-09-24 起本族的防重入判据改用 HasSignal（有 OK 行 = 已下过单, 整窗跳过）
+// 与 HasStage（按段续跑, 见 Engine.Resume）——「有行就跳过」在旧口径下是对的
+// （帧与快照是两个独立闩锁）, 在新口径下会把「只做了第一段判定」的窗口误判成整窗完成。
+// 本函数保留给 legacy 行查询与测试。
 func (r *Recorder) HasKind(conditionID, kind string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -852,14 +882,16 @@ func (r *Recorder) GatedToday(date, reason string) int {
 }
 
 // DailyPnl 按日汇总已结算 P&L（正序; 日亏熔断的输入）。
-// 只统计 **snap** 行的 ok 信号（帧行无仓位且 Won 恒 nil; **scan 行必须排除**——
-// 它没有真实仓位, 混进来会让一条不存在的反事实盈亏去开/关熔断闸）。
+//
+// 只统计**有仓位**的已结算信号（HasPosition = 实际成交 ∧ 非 legacy 对账行）:
+// 被闸/下单被拒/0 成交行的 P&L 恒 0（它们不算成交, a.md 第 3 条）, legacy scan 行
+// 更是从未下单——任何一条混进来都会让不存在的盈亏去开关熔断闸。
 func (r *Recorder) DailyPnl() []DayPnl {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	byDay := map[string]*DayPnl{}
 	for _, rec := range r.recs {
-		if rec.Kind != KindSnap || !rec.OK || rec.Won == nil {
+		if !rec.OK || rec.Won == nil || !rec.HasPosition() {
 			continue
 		}
 		d := byDay[rec.Date]
@@ -879,13 +911,14 @@ func (r *Recorder) DailyPnl() []DayPnl {
 }
 
 // MaxDrawdown 基于已结算信号的累计 P&L 最大回撤（USDC，负值表示回撤）。
-// 与 flip.Recorder.MaxDrawdown 同口径: 只吃 snap 行的 ok 且已结算（帧行 Won 恒 nil）。
+// 与 flip.Recorder.MaxDrawdown 同口径, 准入条件同 DailyPnl: **有仓位**的已结算信号
+// （未成交行不动回撤——它们没有盈亏, 见 recomputePnL）。
 func (r *Recorder) MaxDrawdown() float64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	cum, peak, dd := 0.0, 0.0, 0.0
 	for _, rec := range r.recs {
-		if rec.Kind != KindSnap || !rec.OK || rec.Won == nil {
+		if !rec.OK || rec.Won == nil || !rec.HasPosition() {
 			continue
 		}
 		cum += rec.PnL
@@ -979,23 +1012,29 @@ func trackableResting(rec *Record) bool {
 	return rec.OrderID != "" && rec.HotAsk > 0 && rec.Stake > 0
 }
 
-// isSettlable 判断记录是否应挂结算: snap 行（真实持仓）或 **scan 行（反事实仓位）**,
-// 且 ok、未结算、conditionID 非空; paper 行（ExecStatus 空, 模拟成交）或 live
-// filled/partial。unfilled/rejected/submitting/resting 行无确定持仓——不入 pending、
-// 不注册结算轮询。
+// isSettlable 判断记录是否应挂结算: **所有 ok 且未结算的行**——2026-09-24 起含
+// 被闸/下单被拒/0 成交行（a.md 第 3 条「所有信号都要注册结算, 并在 dashboard 中
+// 显示结算状态」）, 因为页面上每一笔信号都要显示官方结果。
 //
-// ⚠️ scan 行也要结算, 但它**不是仓位**: 它需要官方 outcome 才能把「监听口径本会在
-// 这一 tick 成交」算成 P&L。所有消费 pending/PnL 的聚合都必须自己按 Kind 过滤
-// （DailyPnl 已排除 scan; Signals/Counts/MaxDrawdown/LiveSummary 均按 KindSnap 取数）。
+// 唯一的排除项是**未定稿**的两种状态:
+//   - submitting: POST 已发出、结果未知（行还没拿到 order_id 与终态）;
+//   - resting:    GTC 挂单在簿、成交量未定（等 FillTracker 撤单时查 size_matched）。
+//
+// 两者都由定稿回调（CompleteExecution / CompleteRestingFill）推进后再注册——
+// 提前注册会在成交量未知时就定案, 而 P&L 口径依赖真实成交。
+//
+// ⚠️ 注册 ≠ 有仓位: 无仓位的行（HasPosition 假）P&L 恒 0（recomputePnL）,
+// 不进胜率、不动熔断与回撤——挂它们只为把官方 outcome 显示出来。
+// legacy 的 scan 行同样注册（旧口径的反事实样本, 需要 outcome 才能算它的纸面盈亏）。
 func isSettlable(rec *Record) bool {
 	if (rec.Kind != KindSnap && rec.Kind != KindScan) || !rec.OK || rec.Won != nil || rec.ConditionID == "" {
 		return false
 	}
 	switch rec.ExecStatus {
-	case "", flip.ExecStatusFilled, flip.ExecStatusPartial:
-		return true
+	case flip.ExecStatusSubmitting, flip.ExecStatusResting:
+		return false
 	}
-	return false
+	return true
 }
 
 // ── 词面映射与工具 ──

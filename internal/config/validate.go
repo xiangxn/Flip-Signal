@@ -55,16 +55,17 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 	if cfg.Tail.Stake <= 0 {
 		return nil, fmt.Errorf("tail.stake 必须 > 0（现值 %.3f）", cfg.Tail.Stake)
 	}
-	// 两帧的时间腿顺序: 帧闸必须**不晚于**快照闸。写反（frame_rem < rem_start）不会
-	// 报错, 只会让帧行在多数窗口里根本不产出（快照已把本窗置 Done, 而首个有效 tick
-	// 的 rem 通常还在两者之间）——静默丢一半样本, 故挡在启动前。
-	if cfg.Tail.RemStart <= 0 || cfg.Tail.FrameRem <= 0 {
-		return nil, fmt.Errorf("tail.rem_start / tail.frame_rem 必须 > 0（现值 %d / %d）",
-			cfg.Tail.RemStart, cfg.Tail.FrameRem)
+	// 两段时间腿的顺序: T=150 段必须**严格早于** T=60 段（两段都是判定点, 见
+	// docs/tail_integrated_2026-09-24.md §1）。写反（t150_rem < t60_rem）不会报错,
+	// 只会让第一段永远在「rem 已经小于 T=60」时才触发——两段退化成同一段、第一段
+	// 的样本静默消失; 相等同理（同一 tick 连判两次）。故挡在启动前。
+	if cfg.Tail.T60Rem <= 0 || cfg.Tail.T150Rem <= 0 {
+		return nil, fmt.Errorf("tail.t60_rem / tail.t150_rem 必须 > 0（现值 %d / %d）",
+			cfg.Tail.T60Rem, cfg.Tail.T150Rem)
 	}
-	if cfg.Tail.FrameRem < cfg.Tail.RemStart {
-		return nil, fmt.Errorf("tail.frame_rem(%d) 必须 ≥ tail.rem_start(%d)——反序会让帧行静默不产出",
-			cfg.Tail.FrameRem, cfg.Tail.RemStart)
+	if cfg.Tail.T150Rem <= cfg.Tail.T60Rem {
+		return nil, fmt.Errorf("tail.t150_rem(%d) 必须 > tail.t60_rem(%d)——反序/相等会让第一段判定静默消失",
+			cfg.Tail.T150Rem, cfg.Tail.T60Rem)
 	}
 	// 价格腿是「热门侧 ask」——超过 1 不可能有 tick 满足（策略静默归零）, ≤0 则全部
 	// 放行（把尾盘无条件买满）。两个方向都不该由配置写出来。

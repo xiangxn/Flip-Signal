@@ -62,6 +62,32 @@ func TestNewPMTick(t *testing.T) {
 	}
 }
 
+// TestNewPMTickEmptySide 空侧整簿（asks 为空）必须如实报 0, 不得退回旧值。
+//
+// 2026-09-24 实盘探针（cmd/bookprobe 走引擎同一条 SDK WS 通道）实测: 事件趋于确定后
+// 热门侧的卖单被整侧撤空——赢家侧 `n_asks = 0`（对手侧同时 `n_bids = 0`, 镜像同一
+// 事实）, 在闭市前 10~48s 持续到收盘。此时 bestAsk = 0 ⇒ 该 tick 被两族引擎的四档
+// 门控判无效（flip/tail 同判据）, Dashboard 的「—」也由此而来。
+// ⚠️ 曾经 cmd/{flip,tail} 的 WS 循环用 `len(Asks)==0 || len(Bids)==0` 把这类消息整个
+// 丢掉, 内存里留下**撤单前那一份旧簿**（常是 0.99）, 于是页面与判定都用了假卖价。
+func TestNewPMTickEmptySide(t *testing.T) {
+	// 赢家侧: 只有买盘（n_asks = 0——没人卖）; 对手侧: 只有卖盘（n_bids = 0——没人买）
+	winner := book([]float64{0.96, 0.97, 0.98}, nil, 30)
+	loser := book(nil, []float64{0.04, 0.03, 0.02}, 30)
+
+	pm := NewPMTick(winner, loser)
+	if pm.UpAsk != 0 || pm.UpBid != 0.98 {
+		t.Fatalf("空 asks: UpAsk = %v, 期望 0（n_asks = 0 是真实状态）", pm.UpAsk)
+	}
+	if pm.DownBid != 0 || pm.DownAsk != 0.02 {
+		t.Fatalf("空 bids: DownBid = %v, 期望 0", pm.DownBid)
+	}
+	// 四档门控 ⇒ 该 tick 无效（两族引擎同判据, 见 internal/{flip,tail}/engine.go）
+	if pm.UpAsk > 0 && pm.DownBid > 0 && pm.UpBid > 0 && pm.DownAsk > 0 {
+		t.Fatal("空侧 tick 不应通过四档门控")
+	}
+}
+
 // TestParseMarketTokens Up/Yes 与 Down/No 两种命名。
 func TestParseMarketTokens(t *testing.T) {
 	for _, oc := range []string{"Up", "Yes"} {

@@ -4,76 +4,27 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <meta name="theme-color" content="#0d1117">
-  <title>扫尾盘 ⑤ 监控</title>
+  <title>扫尾盘 监控</title>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
     <div class="brand">
       <span class="dot" id="liveDot"></span>
-      <h1>扫尾盘 ⑤</h1>
+      <h1>扫尾盘</h1>
       <span class="badge" id="modeBadge">—</span>
     </div>
     <div class="uptime" id="uptime">—</div>
   </header>
 
   <main>
-    <!-- 判决卡: docs/tail_sweep_2026-09-22.md §5.2 的三件事
-         （判据进度 + 频率闸 + 辅助闸门 3「今日采集健康度」） -->
-    <section class="card">
-      <div class="list-head">
-        <h2>判决速览（⑤ 本尊）</h2>
-        <span class="verdict pending" id="judgeVerdict">—</span>
-      </div>
-      <div class="prog">
-        <div class="prog-row">
-          <span class="prog-lbl">UTC 日数</span>
-          <span class="prog-val" id="judgeDays">—</span>
-          <div class="bar" id="judgeDaysBarWrap"><i id="judgeDaysBar"></i></div>
-        </div>
-        <div class="prog-row">
-          <span class="prog-lbl">已结算注数</span>
-          <span class="prog-val" id="judgeN">—</span>
-          <div class="bar" id="judgeNBarWrap"><i id="judgeNBar"></i></div>
-        </div>
-      </div>
-      <div class="note-meta">
-        <span>P&amp;L 95% 区间 <b id="judgeCi">—</b></span>
-        <span>频率闸 <b id="judgeFreq">—</b></span>
-        <span>亏损日 <b id="judgeLosing">—</b></span>
-        <span>胜率 <b id="judgeWr">—</b></span>
-      </div>
-      <div class="note-meta">
-        <span>今日采集 <b id="judgeToday">—</b></span>
-        <span>skip <b id="judgeSkips">—</b></span>
-        <span>本窗读数 <b id="judgeLive">—</b></span>
-      </div>
-      <div class="note" id="judgeNote">判决口径：加载中…</div>
-    </section>
-
-    <!-- 五格对照（同一批快照离线复算; 只有 ⑤ 落引擎下单） -->
-    <section class="card">
-      <div class="list-head">
-        <h2>五格对照</h2>
-        <button class="refresh" id="btnJudge">刷新</button>
-      </div>
-      <div class="table-wrap">
-        <table id="gridTable">
-          <thead><tr>
-            <th>格</th><th>n（注）</th><th>胜率</th><th>P&amp;L（U）</th><th>亏损日</th><th>95% 区间（U）</th><th>注/日</th><th>判词</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="note" id="gridDelta">增量：—</div>
-    </section>
-
-    <!-- 统计卡片 -->
+    <!-- 统计卡片（口径: 信号 = 判定通过的行; 未成交 = 无仓位: 被闸/被拒/0 成交/挂单未定稿,
+         不进胜率; 胜·负 = 有仓位的已结算行） -->
     <section class="stats" id="stats">
-      <div class="card stat"><div class="stat-val" id="statSnap">—</div><div class="stat-lbl">快照</div></div>
-      <div class="card stat"><div class="stat-val" id="statSignal">—</div><div class="stat-lbl">信号 ⑤</div></div>
-      <div class="card stat"><div class="stat-val" id="statWon">—</div><div class="stat-lbl">胜</div></div>
-      <div class="card stat"><div class="stat-val" id="statLost">—</div><div class="stat-lbl">负</div></div>
+      <div class="card stat"><div class="stat-val" id="statDecision">—</div><div class="stat-lbl">判定</div></div>
+      <div class="card stat"><div class="stat-val" id="statSignal">—</div><div class="stat-lbl">信号</div></div>
+      <div class="card stat"><div class="stat-val" id="statWL">—</div><div class="stat-lbl">胜/负</div></div>
+      <div class="card stat"><div class="stat-val" id="statNoExec">—</div><div class="stat-lbl">未成交</div></div>
       <div class="card stat"><div class="stat-val" id="statPending">—</div><div class="stat-lbl">待结算</div></div>
       <div class="card stat"><div class="stat-val" id="statWr">—</div><div class="stat-lbl">胜率</div></div>
       <div class="card stat"><div class="stat-val" id="statPnl">—</div><div class="stat-lbl">累计 P&amp;L</div></div>
@@ -95,11 +46,12 @@
       <div class="win-slug">
         <a id="winSlugLink" href="#" target="_blank" rel="noopener">等待下一个窗口…</a>
       </div>
-      <!-- 两个一次性闩锁（帧 rem≤150 / 决策快照 rem≤60）+ 锚是否已定局 -->
+      <!-- 三段链的四个闩锁 + 锚是否已定局（闸值取自 /api/config） -->
       <div class="latches">
-        <span class="latch" id="latchFrame">帧 · —</span>
-        <span class="latch" id="latchSnap">快照 · —</span>
-        <span class="latch" id="latchScan">监听 · —</span>
+        <span class="latch" id="latchT150">T150 · —</span>
+        <span class="latch" id="latchT60">T60 · —</span>
+        <span class="latch" id="latchListen">监听 · —</span>
+        <span class="latch" id="latchSignal">信号 · —</span>
         <span class="latch" id="latchAnchor">锚 · —</span>
       </div>
       <div class="win-grid">
@@ -134,27 +86,53 @@
         <span>ticks <b id="whTicks">—</b></span>
         <span>有效 <b id="whValid">—</b></span>
         <span>延迟无效 <b id="whStale">—</b></span>
-        <span>无快照 <b id="whMissing">—</b></span>
-        <span class="lost" id="whFrames">—</span>
+        <span>无盘口 <b id="whMissing">—</b></span>
+        <span class="lost" id="whRows">—</span>
       </div>
+      <!-- 今日采集健康度（读当日 tailstats_*.jsonl; 判决的辅助闸门） -->
+      <div class="note" id="todayHealth">今日采集：—</div>
       <div class="note" id="cfgNote">标定参数：加载中…</div>
     </section>
 
-    <!-- 决策快照（含否决与被闸; 点击卡片标题栏折叠/展开整张贴） -->
-    <section class="card" id="snapsCard">
+    <!-- 信号（判定通过、已进执行路径的行; 未成交行的 P&L 显示「—」但结果照显） -->
+    <section class="card" id="signalsCard">
       <div class="list-head">
-        <h2 class="list-toggle" tabindex="0" aria-expanded="true" title="点击折叠 / 展开"><span class="caret">▾</span>决策快照（rem ≤ 60）</h2>
-        <button class="refresh" id="btnSnaps">刷新</button>
+        <h2 class="list-toggle" tabindex="0" aria-expanded="true" title="点击折叠 / 展开"><span class="caret">▾</span>信号</h2>
+        <button class="refresh" id="btnSignals">刷新</button>
       </div>
       <div class="table-wrap">
-        <table id="snapsTable">
+        <table id="signalsTable">
           <thead><tr>
-            <th>时间</th><th>侧</th><th>rem</th><th>ask</th><th>dev$</th><th>sd$</th><th>五格</th><th>判定</th><th>份额</th><th>结果</th><th>P&amp;L</th>
+            <th>时间</th><th>侧</th><th>rem</th><th>ask</th><th>dev$</th><th>sd$</th><th>份额</th><th>状态</th><th>结果</th><th>P&amp;L</th>
           </tr></thead>
           <tbody></tbody>
         </table>
       </div>
       <!-- 分页条: 第 1 页为最新; 翻历史页时暂停该表自动轮询，回到第 1 页恢复 -->
+      <div class="pager" id="signalsPager" hidden>
+        <button class="pg" data-act="first" title="首页">«</button>
+        <button class="pg" data-act="prev" title="上一页">‹</button>
+        <span class="pg-info" id="signalsPgInfo"></span>
+        <button class="pg" data-act="next" title="下一页">›</button>
+        <button class="pg" data-act="last" title="末页">»</button>
+      </div>
+      <div class="empty" id="signalsEmpty" hidden>暂无信号</div>
+    </section>
+
+    <!-- 决策（三段链的判定行: rem 天然区分 T150 / T60 两段） -->
+    <section class="card collapsed" id="snapsCard">
+      <div class="list-head">
+        <h2 class="list-toggle" tabindex="0" aria-expanded="false" title="点击折叠 / 展开"><span class="caret">▾</span>决策快照（每段首个可判定 tick）</h2>
+        <button class="refresh" id="btnSnaps">刷新</button>
+      </div>
+      <div class="table-wrap">
+        <table id="snapsTable">
+          <thead><tr>
+            <th>时间</th><th>侧</th><th>rem</th><th>ask</th><th>dev$</th><th>sd$</th><th>判定</th><th>份额</th>
+          </tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
       <div class="pager" id="snapsPager" hidden>
         <button class="pg" data-act="first" title="首页">«</button>
         <button class="pg" data-act="prev" title="上一页">‹</button>
@@ -162,55 +140,7 @@
         <button class="pg" data-act="next" title="下一页">›</button>
         <button class="pg" data-act="last" title="末页">»</button>
       </div>
-      <div class="empty" id="snapsEmpty" hidden>暂无决策快照</div>
-    </section>
-
-    <!-- 监听口径对账行（快照未达标后首个 ⑤ 达标 tick; 只记录、无仓位） -->
-    <section class="card collapsed" id="scansCard">
-      <div class="list-head">
-        <h2 class="list-toggle" tabindex="0" aria-expanded="false" title="点击折叠 / 展开"><span class="caret">▾</span>监听对账（rem ≤ 60 起, 只记录）</h2>
-        <button class="refresh" id="btnScans">刷新</button>
-      </div>
-      <div class="table-wrap">
-        <table id="scansTable">
-          <thead><tr>
-            <th>时间</th><th>侧</th><th>rem</th><th>ask</th><th>dev$</th><th>sd$</th><th>五格</th><th>判定</th><th>份额</th><th>结果</th><th>P&amp;L</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="pager" id="scansPager" hidden>
-        <button class="pg" data-act="first" title="首页">«</button>
-        <button class="pg" data-act="prev" title="上一页">‹</button>
-        <span class="pg-info" id="scansPgInfo"></span>
-        <button class="pg" data-act="next" title="下一页">›</button>
-        <button class="pg" data-act="last" title="末页">»</button>
-      </div>
-      <div class="empty" id="scansEmpty" hidden>暂无监听行（只在快照未达标、监听段又达标时才产出）</div>
-    </section>
-
-    <!-- 原始帧（rem ≤ 150，只记录不判定; 离线据此复算任意 T 的规则） -->
-    <section class="card collapsed" id="framesCard">
-      <div class="list-head">
-        <h2 class="list-toggle" tabindex="0" aria-expanded="false" title="点击折叠 / 展开"><span class="caret">▾</span>原始帧（rem ≤ 150）</h2>
-        <button class="refresh" id="btnFrames">刷新</button>
-      </div>
-      <div class="table-wrap">
-        <table id="framesTable">
-          <thead><tr>
-            <th>时间</th><th>侧</th><th>rem</th><th>ask</th><th>dev$</th><th>sd$</th><th>anchor</th><th>hist_bps</th>
-          </tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-      <div class="pager" id="framesPager" hidden>
-        <button class="pg" data-act="first" title="首页">«</button>
-        <button class="pg" data-act="prev" title="上一页">‹</button>
-        <span class="pg-info" id="framesPgInfo"></span>
-        <button class="pg" data-act="next" title="下一页">›</button>
-        <button class="pg" data-act="last" title="末页">»</button>
-      </div>
-      <div class="empty" id="framesEmpty" hidden>暂无帧行</div>
+      <div class="empty" id="snapsEmpty" hidden>暂无决策行</div>
     </section>
   </main>
 
@@ -220,7 +150,7 @@
       <div class="modal-head">
         <div class="modal-title">
           <h2>逐日明细</h2>
-          <div class="modal-sub" id="dailySub">按 UTC 日切分 · 胜率/P&amp;L 仅计已结算信号</div>
+          <div class="modal-sub" id="dailySub">按 UTC 日切分 · 胜率/P&amp;L 仅计有仓位的已结算信号</div>
         </div>
         <button class="modal-close" id="dailyClose" aria-label="关闭">✕</button>
       </div>
@@ -228,9 +158,13 @@
       <div class="modal-body">
         <table id="dailyTable">
           <thead><tr>
-            <th>日期 (UTC)</th><th>帧</th><th>快照</th>
-            <th title="监听口径对账行：快照未达标后首个 ⑤ 达标的 tick。只记录、无仓位，不计入注数与 P&amp;L">监听</th>
-            <th>注数</th><th>待结算</th><th>胜率</th><th>P&amp;L</th>
+            <th>日期 (UTC)</th><th title="判定行数：T150/T60 两段没出信号的那些">判定</th>
+            <th title="第一段 rem≤t150_rem 判出的信号">T150</th>
+            <th title="第二段 rem≤t60_rem 判出的信号">T60</th>
+            <th title="第三段监听（每秒判）出的信号">监听</th>
+            <th>注数</th>
+            <th title="未成交：下单失败/被风控拦/下单后未成交。不计胜率与 P&L">未成交</th>
+            <th>待结算</th><th>胜率</th><th>P&amp;L</th>
           </tr></thead>
           <tfoot></tfoot>
           <tbody></tbody>

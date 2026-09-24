@@ -1,41 +1,46 @@
-// Command tail 是「扫尾盘」策略引擎入口（口径文档 docs/tail_sweep_2026-09-22.md）。
+// Command tail 是「扫尾盘」策略引擎入口（口径文档 docs/tail_sweep_2026-09-22.md，
+// 现行三段链见 docs/tail_integrated_2026-09-24.md）。
 //
 // 与 cmd/flip（狗@0.2）**方向相反、各自独立**：flip 买被砸到 ≤0.20 的冷门侧，本引擎
-// 在窗口最后 60s 买**热门侧**（ask 高的一侧）——价格腿 ≥0.80，且现货相对锚的位移
-// 满足「≥63 美元」或「1σ 折美元 ≥40 且位移 ≥ 1σ」。14 天回测 n=1536 WR 99.6%
-// +36.9U（每笔 2U, 0 亏损日），但文档 §4 判定门槛不可辨识 ⇒ 只纸面登记、不调参。
+// 买**热门侧**（有效价高的一侧）——价格腿 ≥0.80，且现货相对锚的位移满足「≥63 美元」
+// 或「1σ 折美元 ≥40 且位移 ≥ 1σ」（⑤）；监听段只要求前者（②）。
 //
 // 数据源与 flip 完全相同：PM CLOB 订单簿（UP/DOWN 四档）+ Chainlink TWAP-60（锚/σ）
 // + Binance BTCUSDT spot（位移腿）。锚走决策 #15 的精确取锚（边界那一秒的推送,
 // 500ms × 40 = 20s 预算）；σ 走 flip.HistState（前 ≤18 已完窗 |close−anchor| 均值）。
 //
-// ⚠️ 本窗**至多三行**（2026-09-23 用户口径「两帧折中」+ 监听对账，见 tail.KindScan）:
-//   - `rem ≤ frame_rem(150)` 的首个有效 tick → **帧行**（kind=frame）: 只落盘原始快照,
-//     不判定、绝不下单——离线可据此复算 T=150 及更早的规则形态;
-//   - `rem ≤ rem_start(60)` 的首个有效 tick → **决策快照**（kind=snap）: 五格判定 +
-//     执行/结算。**只有这一行可能下单**;
-//   - 决策快照**之后**第一个 ⑤ 达标的 tick → **监听对账行**（kind=scan）: 只记录、
-//     不过风控闸、绝不下单。它回答「若把一次快照改成 rem≤60 起持续监听, 会在哪里
-//     成交」——**仅在 snap 行未达标时**才可能有（snap 达标则两口径同 tick, 冗余）。
-//     仍注册结算轮询拿官方 outcome（否则无法离线算它的 P&L; snap 被拒的窗没有
-//     别的可结算行）。所有 P&L 聚合都按 Kind 过滤, 见 tail.Recorder.DailyPnl 注。
+// ⚠️ 每窗走**三段递进判定链**（2026-09-24 用户决定, a.md；行数 1~3）:
+//   - `rem ≤ t150_rem(150)` 的首个可判定 tick → **第一段判定行**（stage=t150）:
+//     判一次完整 ⑤, 达标即下单; 不达标 → 等第二段;
+//   - `rem ≤ t60_rem(60)` 的首个可判定 tick → **第二段判定行**（stage=t60）:
+//     再判一次 ⑤（同一套规则, 只是时点更晚、价格更高）; 仍不达标 → 进监听段;
+//   - 此后**每秒** → **监听信号行**（stage=listen）: 判 ②（价格腿 ∧ dev≥63 美元）,
+//     达标即下单。被拒的 tick **不落行**（每窗约 60 个, 全落会淹没信号表）。
+//
+// **任一段出信号即整窗只下一单**（引擎转 Done, 之后不再判定）。全部行 `kind=snap`,
+// 由 stage 区分; 旧口径的 frame/scan 两种 kind 已成为 legacy-only（引擎不再产出,
+// 只保证 data/ 里的旧行照旧载入与结算）。
 //
 // 记录三族（前缀刻意与 flip 的 touches_/windows_/winstats_ 不重合）:
 //
-//	tail_YYYY-MM-DD.jsonl      每窗 ≤3 行（frame + snap + scan），观测/成交/结算
+//	tail_YYYY-MM-DD.jsonl      每窗 1~3 行（三段判定/信号行），观测/成交/结算
 //	tailwin_YYYY-MM-DD.jsonl   每完成窗 1 行（σ 重启本地预热的数据源）
 //	tailstats_YYYY-MM-DD.jsonl **严格每窗 1 行**（tick 健康度 + skip 原因 + 锚状态）
 //
 // 成交（-mode paper|live，两模式共用同一判定与风控闸）: paper = 模拟全额成交
-// （shares = stake/hot_ask，精确除）; live = 真实 CLOB **GTC 限价挂单** @ 热门侧 ask,
+// （shares = stake/hot_ask，精确除）; live = 真实 CLOB **GTC 限价挂单** @ 热门侧有效价,
 // **挂到闭市 rem ≤ 0 才撤**未成交余量（2026-09-23 用户口径；flip 的撤单点是策略时间腿
-// rem≤180，本族没有那条时间腿——快照点已在 rem≈60，再提前撤会把手里的位置全撤空）。
+// rem≤180，本族没有那条时间腿——最早的下单点已在 rem≈150，再提前撤会把手里的位置全撤空）。
 // 挂单终态由 trading.FillTracker 撤单时查 size_matched 定稿（闭市 +60s 硬截止兜底）。
 //
+// 结算与统计（2026-09-24 起，a.md 第 3 条）: **所有信号都注册结算**（被风控闸拦下、
+// 下单被拒、0 成交的行也照常拿官方 outcome 并在页面上显示赢/输）, 但**未成交不计 P&L**
+// （P&L 恒 0、不进胜率、不动日亏熔断与回撤）——见 tail.Record.HasPosition。
+//
 // Dashboard（internal/dashboard 的 tail 族; 与 flip 面板**各自一个 listener**）:
-// 判决速览（日级 bootstrap 判据 + 频率闸 + 今日采集健康度）、五格对照、当前窗口的
-// 两个闩锁与热门侧读数、决策快照/帧行两表。开关 = `runtime.tail_dashboard_addr`
-// 配置键或 `-dashboard` flag; 判决口径在 Go 侧现算且与 python `boot_days` 逐位一致。
+// 统计卡（判定/信号/胜·负/未成交/待结算/胜率/累计 P&L）、当前窗口的三段进度与热门侧
+// 读数、决策快照表 + 信号表（含成交状态与结算结果）。开关 =
+// `runtime.tail_dashboard_addr` 配置键或 `-dashboard` flag。
 //
 // 用法:
 //
@@ -80,10 +85,10 @@ const windowSec = 300
 const prefetchLead = 20 * time.Second
 
 // lateLimit 是订阅迟到阈值：已落后窗口边界超过该时长则跳过本窗口。
-// 本族对迟到的容忍度远高于 flip——判定点在 rem≤60（边界后 240s），故迟到几十秒
-// 也不影响「尾盘快照」本身；但窗口**起点**的锚采样与 σ 对账仍需完整窗口，且迟到
-// 窗口的两帧闸值（150/60）在语义上不再对应干净的首帧。沿用 flip 的 15s 是保守选择
-// （宁可丢窗，也不拿残缺窗口凑样本）。
+// 本族对迟到的容忍度远高于 flip——最早的判定点在 rem≤150（边界后 150s），故迟到
+// 几十秒也不影响它; 但窗口**起点**的锚采样与 σ 对账仍需完整窗口（迟到窗口的锚
+// 通道预算已部分耗尽, 且三段链的时点不再对应干净的首个可判定 tick）。沿用 flip 的
+// 15s 是保守选择（宁可丢窗，也不拿残缺窗口凑样本）。
 const lateLimit = 15 * time.Second
 
 // twapMaxStale 是 TWAP 推送新鲜度阈值: 超过该时长未收到推送则重建订阅
@@ -97,9 +102,9 @@ const twapLookbackSeconds = 60
 // openPrice 收敛值逐位相同）。该条推送 p50 +2.0s 到达，20s 预算 = p50 的 10 倍余量，
 // 命中即终局；预算耗尽 = 本窗无锚（引擎 anchor ≤0 一行不产出，只落 tailstats）。
 //
-// 与 flip 的关键差别在**时序余量**: 本族最早的产出帧在 rem≤150（边界后 +150s），
-// 而取锚通道 +20s 就结束了——**锚在产出任何行之前早已定局**，不存在「帧用了旧锚、
-// 快照用了新锚」的不一致窗口（引擎侧另有 emitted 冻结做双保险）。
+// 与 flip 的关键差别在**时序余量**: 本族最早的判定行在 rem≤150（边界后 +150s），
+// 而取锚通道 +20s 就结束了——**锚在产出任何行之前早已定局**，不存在「前一段用了旧锚、
+// 后一段用了新锚」的不一致窗口（引擎侧另有 emitted 冻结做双保险）。
 const (
 	anchorExactAttempts = 40                     // 精确取锚尝试次数（× 间隔 = 20s 预算）
 	anchorExactInterval = 500 * time.Millisecond // 精确取锚尝试间隔
@@ -143,7 +148,7 @@ type runtimeState struct {
 	EventStart  int64                                   // 当前窗口起点（unix 秒）
 	Mode        string                                  // 成交模式: paper/live（构造后不变, live 缺凭证降级为 paper）
 	StartedAt   time.Time                               // 进程启动时刻（构造后不变）
-	Exec        *tail.ExecState                         // 快照执行编排（HandleFrame/HandleObservation + LiveSummary; 构造后不变）
+	Exec        *tail.ExecState                         // 行编排（HandleDecision 单入口 + LiveSummary; 构造后不变）
 	books       func() (*sdk.OrderBook, *sdk.OrderBook) // 当前窗口 UP/DOWN 盘口闭包
 
 	// 锚可见性（取锚 goroutine 写 → 主循环 join 后读, Dashboard 也在读）。
@@ -156,8 +161,8 @@ type runtimeState struct {
 
 // Snapshot 实现 dashboard.Snapshotter（Dashboard 每 5s 轮询取快照）。
 //
-// 窗口读数（热门侧/dev/sd）在**采样时刻现算**——与引擎落盘行走的是同一组纯函数
-// （tail.SideOfHot / DevUSD / SigmaUSD, 见 decide.go）: 页面上的 dev/sd 必须与
+// 窗口读数（热门侧/有效价/dev/sd）在**采样时刻现算**——与引擎落盘行走的是同一组纯函数
+// （tail.HotBook / DevUSD / SigmaUSD, 见 decide.go）: 页面上的 dev/sd 必须与
 // 落盘行的 dev/sd 同一口径, 否则「为什么这一窗没过 ⑤」会被两个数忽悠。
 // 差别只在输入新鲜度: 页面用**当前**盘口/现货, 落盘行用快照 tick 那一刻的值。
 //
@@ -207,10 +212,13 @@ func (rt *runtimeState) Snapshot() tail.LiveSnapshot {
 	}
 	rt.mu.RUnlock()
 
-	// 尾盘读数: 热门侧 = ask 高的一侧（平局取 yes）。dev/sd 需输入齐备才算——缺锚
-	// 或缺现货时留 0（前端显示「—」, 不是「恰好为 0」）。
-	snap.HotSide = tail.SideOfHot(pm.UpAsk, pm.DownAsk)
-	snap.HotAsk = tail.HotAskOf(snap.HotSide, pm.UpAsk, pm.DownAsk)
+	// 尾盘读数: 热门侧 = **有效价**高的一侧（每侧 ask 优先、ask 空则退 bid; 平局取
+	// yes）——与引擎同一实现（tail.HotBook）。dev/sd 需输入齐备才算——缺锚或缺现货时
+	// 留 0（前端显示「—」, 不是「恰好为 0」）。
+	hotSide, hotPx, hotSrc := tail.HotBook(pm.UpBid, pm.UpAsk, pm.DownBid, pm.DownAsk)
+	snap.HotSide = hotSide
+	snap.HotAsk = hotPx
+	snap.HotSrc = hotSrc
 	if spotPrice > 0 && anchor > 0 {
 		snap.Dev = tail.DevUSD(snap.HotSide, spotPrice, anchor)
 	}
@@ -224,13 +232,15 @@ func (rt *runtimeState) Snapshot() tail.LiveSnapshot {
 		snap.AnchorArrivedMs = ai.atMs - snap.EventStart*1000
 	}
 
-	// 本窗 tick 健康度与三个闩锁放锁外: 引擎自锁（诊断计数, 与本窗同一窗口上下文）。
+	// 本窗 tick 健康度与四个闩锁放锁外: 引擎自锁（诊断计数, 与本窗同一窗口上下文）。
 	// 窗口间（clearWindow 后 Engine=nil）为 nil——前端隐藏本窗统计块、闩锁全灭。
 	if eng != nil {
 		st := eng.WindowStats()
 		snap.Stats = &st
 		l := eng.Latches()
-		snap.FrameSent, snap.SnapSent, snap.ScanSent, snap.AnchorFrozen = l.Frame, l.Snap, l.Scan, l.Frozen
+		snap.T150Sent, snap.T60Sent, snap.Listening =
+			l.T150, l.T60, l.Listening
+		snap.SignalSent, snap.AnchorFrozen = l.Signal, l.Frozen
 	}
 
 	// live/风控摘要放锁外: Exec 构造后不变且方法内部自锁（Recorder 域, 与窗口快照无关）
@@ -360,7 +370,15 @@ func main() {
 			case <-ctx.Done():
 				return
 			case book := <-ch:
-				if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 {
+				// ⚠️ 只丢 nil, **不再丢「单侧为空」的整簿消息**（2026-09-24）。
+				// SDK 的 `book` 事件是**整簿快照**（market_monitor.go onOrderBook 原样
+				// 解析 bids/asks，空数组就是空）, 空 asks 是市场的真实状态——事件趋于
+				// 确定后热门侧的卖单被撤空, 实盘探针（cmd/bookprobe）在闭市前 10~30s
+				// 逐秒读到 `asks = []`。旧守卫把它当噪声丢掉, 内存里留下**撤单前那一份
+				// 旧簿**（常是 0.99）, 于是引擎与 Dashboard 继续报一个早已不存在的卖价。
+				// 现在照存: bestAsk/bestBid 返回 0 ⇒ 该 tick 被四档门控判无效（与回测
+				// 宇宙同口径）, Dashboard 显示「—」——「没人卖」如实呈现。
+				if book == nil {
 					continue
 				}
 				tokMu.RLock()
@@ -554,8 +572,9 @@ func main() {
 	}
 
 	// ── Dashboard（internal/dashboard 的 tail 族; 与 flip 面板各自一个 listener）──
-	// 判决速览在 Go 侧现算（tail.Judge 纯函数, 含日级 bootstrap —— 口径与
-	// python/v4/13_tail_sweep.py 的 boot_days 逐位一致）, 但**只读**: 不碰判定/执行路径。
+	// 2026-09-24 起**只读流水线**: 判决速览/五格对照/监听对账/原始帧全部下线（判决机器
+	// tail.Judge/mt19937 一并删除），纸面判决改由离线脚本 python/v4/23_tail_integrated.py
+	// 做。面板只呈现引擎真正落下的行, 现算的东西仅限本窗读数与 tally——不碰判定/执行路径。
 	if cfg.Runtime.TailDashboardAddr != "" {
 		// 三源新鲜度阈值下发（前端按阈值标红——勿在前端硬编码）
 		limits := dashboard.SourceLimits{
@@ -573,7 +592,7 @@ func main() {
 
 	log.Println("========================================")
 	if effMode == "live" {
-		log.Printf(" 扫尾盘⑤ — 🔒 实盘交易（GTC 限价挂单 @ 热门侧 ask, 挂到闭市撤余量, 日亏熔断 ≤%.1fU）",
+		log.Printf(" 扫尾盘⑤ — 🔒 实盘交易（GTC 限价挂单 @ 热门侧**有效价**, 挂到闭市撤余量, 日亏熔断 ≤%.1fU）",
 			cfg.Risk.MaxDailyLoss)
 	} else {
 		log.Printf(" 扫尾盘⑤ — 纸面交易（mode=%s, 日亏熔断 ≤%.1fU 影子: 只标记不拦单）",
@@ -581,8 +600,8 @@ func main() {
 	}
 	log.Printf(" 输出: %s（tail_/tailwin_/tailstats_ 三族） |  Slug: %s",
 		cfg.Runtime.OutputDir, cfg.Runtime.SlugPrefix)
-	log.Printf(" 参数: 两帧 rem≤%ds(帧)/rem≤%ds(决策) 热门侧 ask≥%.2f 位移≥%.0f美元 或 (1σ≥%.0f美元 且 位移≥1σ) stake=%.0fUSDC",
-		cfg.Tail.FrameRem, cfg.Tail.RemStart, cfg.Tail.PriceMin, cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD, cfg.Tail.Stake)
+	log.Printf(" 参数: 三段链 rem≤%ds(判⑤)/rem≤%ds(判⑤)/此后每秒判② 热门侧有效价≥%.2f 位移≥%.0f美元 或 (1σ≥%.0f美元 且 位移≥1σ) stake=%.0fUSDC",
+		cfg.Tail.T150Rem, cfg.Tail.T60Rem, cfg.Tail.PriceMin, cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD, cfg.Tail.Stake)
 	log.Printf(" 新鲜度闸: book_lat≤%dms + spot_age≤%dms + twap_age≤%dms（tail.max_book_lat_ms / feed.*）",
 		cfg.Tail.MaxBookLatMs, cfg.Feed.MaxSpotAgeMs, cfg.Feed.MaxTwapAgeMs)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 位移]")
@@ -707,23 +726,25 @@ func main() {
 			waitTo(nextStart.Add(windowSec*time.Second), ctx)
 			continue
 		}
-		// 防重入（一窗至多一组样本）: 已有**决策快照**即整窗跳过——该窗的判定（可能
-		// 已下单）已经做过, 重跑会写下第二条 snap（Recorder.pending 以 conditionID
+		// 防重入（一窗至多一单）: 已有 **OK 行**即整窗跳过——该窗已经下过单（或正准备
+		// 下单, 见 AsSignal）, 重跑会写下第二条信号行（Recorder.pending 以 conditionID
 		// 为键, 后记覆盖先记 → 先记的一笔永不结算）且可能同窗二次下单。
-		// ⚠️ 只认 KindSnap: 帧行存在**不足以**跳窗（帧在 rem≤150、快照在 rem≤60，
-		// 中间有 90s 的崩溃窗口）——那种情形要续跑, 帧的重写由 HandleFrame 自己跳过。
-		// ⚠️ 整窗跳过的代价含**监听对账行**: 崩溃于 snap 与 scan 之间时该窗的 scan
-		// 样本一起丢（它不可补——那个 tick 早已过去）。一窗样本的缺失 vs 双记一笔
-		// 真实仓位, 取舍显然（scan 是反事实, 不能为它冒重下单的风险）。
-		if recorder.HasKind(conditionID, tail.KindSnap) {
-			log.Printf("[Cycle] ⚠️ 窗口 %s 已有决策快照（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
+		// ⚠️ 判据是 **OK 行**（HasSignal, 三种 legacy 行都算）而不是「有快照」: 判定行
+		// （t150/t60 未达标）的存在**不足以**跳窗——其中间可能就是崩溃点, 那两行本身
+		// 已经完成了它们的使命（后续段由 Resume 续跑, 已判过的段不重判）。
+		if recorder.HasSignal(conditionID) {
+			log.Printf("[Cycle] ⚠️ 窗口 %s 已有 OK 行（%s 残留，快速重启重入），跳过整窗防双记", slug, conditionID)
 			logStats(conditionID, slug, nextStart.Unix(), 0, 0, tail.WindowStats{}, "dup_record", anchorInfo{})
 			runtime.clearWindow()
 			waitTo(nextStart.Add(windowSec*time.Second), ctx)
 			continue
 		}
-		if recorder.HasKind(conditionID, tail.KindFrame) {
-			log.Printf("[Cycle] ↩️ 窗口 %s 已有帧行但无决策快照（崩溃于两帧之间），续跑本窗（帧重写由 HandleFrame 跳过）", slug)
+		// 续跑本窗: 已判过的段按磁盘真相回填（引擎不再重复判那一 tick）, 只剩未完成的段。
+		resumeT150 := recorder.HasStage(conditionID, tail.StageT150)
+		resumeT60 := recorder.HasStage(conditionID, tail.StageT60)
+		if resumeT150 || resumeT60 {
+			log.Printf("[Cycle] ↩️ 窗口 %s 已有判定行（t150=%v t60=%v，崩溃于三段链中途），续跑本窗剩余段",
+				slug, resumeT150, resumeT60)
 		}
 		// σ 未就绪整窗跳过（同 cmd/flip 决策 #13）: hist.Bps 恒 0 时任何快照都被
 		// no_hist 拒（且观测行 hist_bps=0 会踩对账硬检查）。与锚缺失同一条原则——
@@ -757,11 +778,12 @@ func main() {
 		upBook, downBook = nil, nil
 		bookMu.Unlock()
 
-		// 步骤 5: 1s tick 采集 + 两帧判定
+		// 步骤 5: 1s tick 采集 + 三段判定链
 		// **不设过渡锚**（决策 #15）: 锚留 0，由取锚通道精确命中后经 UpgradeAnchor 注入;
-		// 锚未到手期间 tick 照常占槽与计数, 只是不推进闩锁（引擎 anchor≤0 路径）。
+		// 锚未到手期间 tick 照常占槽与计数, 只是不推进任何段（引擎 anchor≤0 路径）。
 		engine := tail.NewEngine(cfg.Tail)
 		engine.BeginWindow(0, 0)
+		engine.Resume(resumeT150, resumeT60) // 崩溃重入: 已判过的段不重判（见上）
 		endTime := nextStart.Add(windowSec * time.Second)
 		// 换装 Dashboard 的窗口现场（锚可见性一并清零, 由取锚通道稍后注入）
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
@@ -800,8 +822,8 @@ func main() {
 			}
 		}()
 
-		log.Printf("[Cycle] event=%s 窗口开始（锚待精确命中, 不设过渡锚; σ %d 窗就绪; 帧闸 rem≤%d）",
-			conditionID, hist.Count(), cfg.Tail.FrameRem)
+		log.Printf("[Cycle] event=%s 窗口开始（锚待精确命中, 不设过渡锚; σ %d 窗就绪; 三段链 rem≤%d/≤%d/每秒②）",
+			conditionID, hist.Count(), cfg.Tail.T150Rem, cfg.Tail.T60Rem)
 
 		ticker := time.NewTicker(time.Second)
 		lastTick := flip.Tick{}
@@ -822,27 +844,11 @@ func main() {
 				lastSampleAt = time.Now()
 				lastTick = runtime.tick(tickTime, rem, cfg.Feed.MaxSpotAgeMs)
 
-				// 引擎驱动: 0~3 行（帧 + 决策快照 + 监听对账行）。三条路径互不合并:
-				//   - 帧行只落盘（不带判定、不带仓位, 走执行路径会在价格没到 0.80 时就下单）;
-				//   - 监听行只落盘（不过风控闸、不碰执行器——它是反事实样本不是仓位）;
-				//   - 只有决策快照进执行路径。
-				for _, o := range engine.ProcessTick(lastTick) {
-					switch o.Kind {
-					case tail.KindFrame:
-						if r := exec.HandleFrame(&o, conditionID, slug, nextStart.Unix()); r != nil {
-							log.Printf("[Tail] 📸 帧已落盘 %s rem=%d hot=%s ask=%.3f（原始快照, 不判定）",
-								conditionID, o.Rem, o.Side, o.HotAsk)
-						}
-						continue
-					case tail.KindScan:
-						// 监听口径对账行: 只记录。**仍要结算**——它是该窗唯一能拿到
-						// outcome 的行（snap 被拒的窗没有别的可结算行）, 结算后
-						// 才能在离线脚本里与快照口径逐窗配对算 P&L（isSettlable 已收）。
-						// 注册点不在这里: 落盘即进 pending, 交 settle.Resolver 编排。
-						exec.HandleScan(&o, conditionID, slug, nextStart.Unix())
-						continue
-					}
-					rec := exec.HandleObservation(&o, conditionID, slug, nextStart.Unix())
+				// 引擎驱动: 本 tick 的**至多一行**（三段链任一段出信号即整窗只下一单）。
+				// 判定行（t150/t60 未达标）只落盘; 信号行（OK）才进风控闸与执行路径——
+				// 判定由 HandleDecision 内部的 OK 分支区分（单点 dispatch, 无 kind 分支）。
+				if o := engine.ProcessTick(lastTick); o != nil {
+					rec := exec.HandleDecision(o, conditionID, slug, nextStart.Unix())
 					if rec == nil || !rec.OK {
 						continue
 					}
@@ -867,7 +873,7 @@ func main() {
 						log.Printf("[Cycle] ✅ 下一窗预取成功 %s（rem=%d）", nextSlug, rem)
 					}
 				}
-				// 每 30s 打印一次窗口进度（帧闸在 rem≤150, 之后才谈判定）
+				// 每 30s 打印一次窗口进度（三段链: rem≤t150_rem 判⑤ → rem≤t60_rem 判⑤ → 每秒判②）
 				if rem%30 == 0 {
 					log.Printf("[Event] %s rem=%ds up=%.3f/%.3f down=%.3f/%.3f spot=%.2f state=%s",
 						conditionID, rem, lastTick.UpBid, lastTick.UpAsk,
@@ -1004,7 +1010,7 @@ func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.
 	if len(addr) > 12 {
 		addr = addr[:6] + "…" + addr[len(addr)-4:]
 	}
-	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 热门侧 ask, 挂到闭市才撤余量; 首窗禁单）", addr)
+	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 热门侧有效价, 挂到闭市才撤余量; 首窗禁单）", addr)
 	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client})
 }
 
@@ -1027,14 +1033,15 @@ func warnLiveStartup(r *tail.Recorder) {
 	}
 	// 混合目录提示: 当日已有 paper 行（ExecStatus 空）混入会污染信号频率口径与日亏
 	// 现算线——live 建议独立 runtime.output_dir（如 data/tail-live）。
-	// ⚠️ 判据必须限定 **KindSnap**: 监听对账行（KindScan）恒为 paper 形态且**从不下单**,
-	// 它是本族标准输出的一部分（live 下也照记）, 拿它当「目录里混了 paper 行」的
-	// 证据会让本告警在 live 每次启动都误报。
+	// ⚠️ 判据必须限定 **KindSnap ∧ OK**: 2026-09-24 起本族只产 KindSnap 一种行
+	//（监听段改为真下单, 不再产只记录的对账行）, 而 OK=false 的判定行恒无 exec 字段
+	// 且**从不下单**——它是标准输出的一部分（live 下也照记）, 拿它当「目录里混了
+	// paper 行」的证据会让本告警在 live 每次启动都误报。
 	// ⚠️ 两族（flip/tail）也建议分目录: 同一个目录会各写各的前缀, 不会串读,
 	// 但「当日 P&L」这类按目录现算的口径会把两族混在一起。
 	today := time.Now().UTC().Format("2006-01-02")
 	for _, rec := range r.Observations() {
-		if rec.Date == today && rec.Kind == tail.KindSnap && rec.ExecStatus == "" {
+		if rec.Date == today && rec.Kind == tail.KindSnap && rec.OK && rec.ExecStatus == "" {
 			log.Printf("[Trading] ⚠️ 输出目录今日已含 paper 行（tail_%s.jsonl）—— live 建议独立 runtime.output_dir 目录, 否则当日 paper/live 混行会污染信号口径与日亏现算线", today)
 			return
 		}

@@ -62,7 +62,7 @@ func TestTailRoutes(t *testing.T) {
 
 	// JSON API: 每口都应 200 且是 JSON（内容由各自的 handler 测试负责）
 	for _, path := range []string{
-		"/api/state", "/api/snaps", "/api/frames", "/api/daily", "/api/judge", "/api/config",
+		"/api/state", "/api/snaps", "/api/signals", "/api/daily", "/api/config",
 	} {
 		w := serve(t, mux, path)
 		if w.Code != http.StatusOK {

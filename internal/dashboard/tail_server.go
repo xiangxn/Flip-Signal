@@ -19,20 +19,22 @@ var tailStatic, _ = fs.Sub(tailFiles, "tail")
 //
 //	/                 单页前端（手机浏览器兼容）
 //	/static/*         静态资源
-//	/api/state        运行状态（含本窗热门侧读数与三个闩锁）
-//	/api/snaps        决策快照行（成功+否决，时间倒序分页 ?page=&limit=）
-//	/api/scans        监听口径对账行（只记录、无仓位; 时间倒序分页）
-//	/api/frames       原始帧行（rem≤150 快照，时间倒序分页）
-//	/api/daily        逐日明细（UTC 日，含注数频率——与判决的频率闸对照）
-//	/api/judge        判决速览（五格 + T=150 / 监听增量对照格 + bootstrap 95% 区间 + 判词）
+//	/api/state        运行状态（含本窗热门侧读数与三段链的四个闩锁）
+//	/api/snaps        决策行（判定 + 信号, 时间倒序分页 ?page=&limit=）
+//	/api/signals      信号行（ok=true, 时间倒序分页）
+//	/api/daily        逐日明细（UTC 日, 含段分布与未成交）
 //	/api/config       策略配置
+//
+// ⚠️ 2026-09-24 起 /api/judge、/api/scans、/api/frames 下线（判决机器与两个 legacy
+// 行类型一并删除，见 docs/tail_integrated_2026-09-24.md §4）。纸面判决改由离线脚本
+// python/v4/23_tail_integrated.py 做。
 func (s *TailState) ListenAndServe(addr string) {
 	mux := s.routes()
 
 	server := &http.Server{
 		Addr:         addr,
 		Handler:      withLogging(mux),
-		ReadTimeout:  10 * time.Second, // 判决端点要全量行 + 6 格 × 2000 次 bootstrap
+		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 20 * time.Second,
 		IdleTimeout:  30 * time.Second,
 	}
@@ -56,10 +58,8 @@ func (s *TailState) routes() *http.ServeMux {
 	// JSON API
 	mux.HandleFunc("/api/state", s.handleState)
 	mux.HandleFunc("/api/snaps", s.handleSnaps)
-	mux.HandleFunc("/api/scans", s.handleScans)
-	mux.HandleFunc("/api/frames", s.handleFrames)
+	mux.HandleFunc("/api/signals", s.handleSignals)
 	mux.HandleFunc("/api/daily", s.handleDaily)
-	mux.HandleFunc("/api/judge", s.handleJudge)
 	mux.HandleFunc("/api/config", s.handleConfig)
 	return mux
 }

@@ -158,7 +158,7 @@ func (t *TwapAdapter) consume(ctx context.Context) {
 					t.windowSec, t.symbol, ep.Price, ep.Timestamp)
 			}
 			if firstDrop {
-				log.Printf("[Twap] ⚠️ TWAP 推送缺 payload.timestamp，该条不入缓存（精确取锚失效）——"+
+				log.Printf("[Twap] ⚠️ TWAP 推送缺 payload.timestamp，该条不入缓存（精确取锚失效）——" +
 					"本条仍刷新 Latest（看门狗/dashboard 用）")
 			}
 		}

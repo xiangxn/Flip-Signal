@@ -281,14 +281,19 @@ func TestValidate(t *testing.T) {
 		},
 		// ── tail（扫尾盘）──
 		{
-			name:    "tail 帧闸早于快照闸",
-			mutate:  func(c *AppConfig) { c.Tail.FrameRem = 30 }, // < rem_start 60
-			wantErr: "tail.frame_rem",
+			name:    "tail 两段时间腿颠倒",
+			mutate:  func(c *AppConfig) { c.Tail.T150Rem = 30 }, // < t60_rem 60
+			wantErr: "tail.t150_rem",
+		},
+		{
+			name:    "tail 两段时间腿相等",
+			mutate:  func(c *AppConfig) { c.Tail.T60Rem = c.Tail.T150Rem },
+			wantErr: "tail.t150_rem",
 		},
 		{
 			name:    "tail 时间腿非正",
-			mutate:  func(c *AppConfig) { c.Tail.RemStart = 0 },
-			wantErr: "tail.rem_start",
+			mutate:  func(c *AppConfig) { c.Tail.T60Rem = 0 },
+			wantErr: "tail.t60_rem",
 		},
 		{
 			// >1 的 ask 门槛不可能有 tick 满足 → 信号永远为空。
