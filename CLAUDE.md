@@ -155,6 +155,9 @@ FlipSignal/
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
 ├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
 │   └── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市（决策 #17）+ 窗口运行时载体（决策 #18）
+├── cmd/collect/                      # 数据格式 v2 高频采集器（**任意标的**; 2026-09-25 从 eth 分支同步, 决策 #23）
+│   └── main.go                       # 6 flag: -config/-asset/-slug/-symbol/-output/-custom-feature；资产由 feed.Asset 派生
+├── cmd/compact/                      # 采集数据的合并修正（把 settlement_correction 行并回事件行; 与标的无关）
 ├── cmd/btreplay/                     # 逐笔重放 data/btc 驱动 flip.Engine（Go↔py 口径对账红线）
 ├── cmd/twapprobe/                    # 边界对齐探针（一次性的实盘逐秒 TWAP 推送采集, 产 data/probe/; 决策 #19 的证据工具, 运行期不参与引擎）
 ├── cmd/bookprobe/                    # 空侧盘口探针（一次性: 引擎同一条 SDK WS 逐秒记 raw/eng 双视角, 产 data/probe/book_*.jsonl; 决策 #21 的证据工具, 运行期不参与引擎）
@@ -186,11 +189,19 @@ FlipSignal/
 │   │   ├── flip/                     # flip 前端三件套 index.html, app.js, style.css（手机优先）
 │   │   └── tail/                     # tail 前端三件套（统计九卡 + 信号表 + 决策表 + 逐日弹窗）
 │   ├── feed/
+│   │   ├── asset.go                  # 资产参数（btc → slug/Binance 交易对/Chainlink 符号/目录; 消除硬编码, 决策 #23）
 │   │   ├── anchor_recover.go         # 取锚通道（精确命中边界那一秒的推送, 500ms×40 重试；官方 open HTTP 段保留但休眠）
-│   │   ├── binance_adapter.go        # Binance BTCUSDT WS（spot 浅洞输入, 本地接收龄）
+│   │   ├── binance_adapter.go        # Binance spot WS（交易对由资产派生; 本地接收龄）
 │   │   ├── official_pair.go          # 官方 open+close 取数闭包（PricePairFetcher, 结算第三层用; 决策 #19）
 │   │   ├── pmtick.go                 # PM 盘口采样（best bid/ask 陷阱）+ token 解析（原 cmd/flip 下沉）
 │   │   └── twap_adapter.go           # Chainlink TWAP-60（anchor/σ）+ FetchTwapRanges 预热 + 推送缓存/PushNearest(精确)/CacheStat
+│   ├── collect/                      # 采集核心层（数据格式 v2 结构 + 成交分桶 + 修正队列; 决策 #23）
+│   │   ├── types.go                  # Event/HFTick/BinTick/PMTick/TwapTick/TradeAgg + 来源常量（push|official|stream）
+│   │   ├── settle.go                 # SettlementWorker: 只服务推送缺失窗, 官方 open+close 轮询纠正
+│   │   ├── trade_bucketer.go         # PM last_trade_price 按 token×秒聚合（OFI/max单/vwap）
+│   │   ├── dedupe.go                 # transaction_hash 窗口内去重（防 WS 重连重放）
+│   │   ├── compact.go                # 修正行合并进事件行（cmd/compact 的逻辑）
+│   │   └── book_utils.go / market_utils.go / *_test.go
 │   ├── settle/                       # 结算编排（零外部依赖, 不 import flip; 两族共用; 决策 #19）
 │   │   ├── settle.go                 # Outcome/Anchors（按边界秒存推送）+ Resolver 三层回退（push +10s → official +45s → gamma）
 │   │   └── settle_test.go            # 判定词表钉在 flip 常量上 + 三层时点/次数/幂等/剪枝
@@ -208,19 +219,22 @@ FlipSignal/
 │       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin（flip）/ 闭市（tail）撤单 + 查 size_matched 定稿回调（决策 #16/#17）
 │       ├── prefetch.go               # 每窗预热 tickSize/negRisk/feeRate（下单路径零额外网调）
 │       └── resolution_poller.go      # gamma 结算轮询（umaResolutionStatus; 决策 #19 后降为结算第三层）
-├── docs/                             # 策略文档（v4 方案/口径映射; 扫尾盘见 tail_integrated_2026-09-24.md（现行权威）/ tail_sweep_*/tail_engine_mapping_*; 结算见 settle_self_2026-09-24.md; 空侧盘口见 book_empty_ask_2026-09-24.md）
+├── docs/                             # 策略文档（v4 方案/口径映射; 扫尾盘见 tail_integrated_2026-09-24.md（现行权威）/ tail_sweep_*/tail_engine_mapping_*; 结算见 settle_self_2026-09-24.md; 空侧盘口见 book_empty_ask_2026-09-24.md; 采集见 collect_eth_sync_2026-09-25.md）
 ├── python/
 │   ├── v2/lib.py                     # 数据加载器（v4 回测脚本依赖，保留）
-│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15/16/17/18/23, 23 = 现行 oracle）+ 边界价探针（19/20, 决策 #19）+ 活体盘口探针/空侧审计（21/22, 决策 #21）
+│   └── v4/                           # 回测权威脚本 + 纸面对账/复验/健康度脚本（01/02/06/07）+ 扫尾盘（13/14/15/16/17/18/23, 23 = 现行 oracle）+ 边界价探针（19/20, 决策 #19）+ 活体盘口探针/空侧审计（21/22, 决策 #21）+ 采集数据校验（24, 任意标的）
 ├── v4.config.yaml                    # 全量配置示例（= 代码默认值, 有漂移守卫测试; 调参请复制成 config.local.yaml）
 ├── go.mod / go.sum
 └── CLAUDE.md                         # 本文件
 ```
 
-**已删除（v4 清理，v3 分支保留可复活）**：cmd/collect、cmd/compact、internal/collect
-（数据采集管线整体移除——引擎所需盘口采样/token 解析见 internal/feed/pmtick.go）；
-internal/feed/orderbook_adapter.go；
+**已删除（v4 清理，v3 分支保留可复活）**：internal/feed/orderbook_adapter.go；
 twap_adapter 的 PollOfficialOpen/ClosePrice；python/v3、docs 三份 2026-08-31 flip 文档。
+internal/collect/writer.go（JSONLWriter 无调用者，2026-09-25 同步时删）。
+
+⚠️ **cmd/collect + cmd/compact + internal/collect 2026-09-25 已从 eth 分支回归**
+（数据格式 v2 采集管线，见决策 #23）——上面这条曾写着「采集管线整体移除」，
+现只对引擎侧成立：引擎所需盘口采样/token 解析仍在 internal/feed/pmtick.go。
 
 ---
 
@@ -399,6 +413,7 @@ go test ./internal/... -race           # 同上 + 竞态（含扫尾盘 parity �
 go test ./internal/tail/ -run TestParityBacktest -v   # 扫尾盘 Go↔py 逐窗对账（opt-in; data/btc 缺失即 skip）
 go build ./...                         # 全量编译检查
 go run ./cmd/flip -config v4.config.yaml -dashboard :8090   # 运行引擎 + Dashboard
+go run ./cmd/collect -config v4.config.yaml -asset eth      # 采集 ETH → data/eth（见决策 #23）
 
 # python 分析/回测脚本一律用项目内 venv（系统 python3 无 numpy/pandas）
 python/venv/bin/python python/v4/01_backtest_r1.py
@@ -406,6 +421,7 @@ python/venv/bin/python python/v4/06_oos_review.py    # 09-15 复验裁判（纯�
 python/venv/bin/python python/v4/07_source_health_check.py            # 数据源健康度审计（纯标准库）
 python/venv/bin/python python/v4/07_source_health_check.py --bt-scan  # + book 阈值扫描/零成交代理
 python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾盘主回测（14/15 见 mapping 文档 §6）
+python/venv/bin/python python/v4/24_asset_data_check.py --asset eth   # 采集数据正确性校验（任意标的, 决策 #23）
 ```
 
 ---
@@ -919,6 +935,91 @@ python/venv/bin/python python/v4/13_tail_sweep.py                     # 扫尾�
       而 `stake=2U` 在 ≥0.80 只有 2.0~2.5 股（决策 #21 ②）**仍未解决**，tail 上 live 前必须先定。
     - 验收：btreplay 625 笔逐位一致（n=625 WR 24.6% EV +0.633U +395.8U）+ tail parity 新表
       逐位一致（6399/2135/3640/3 + `hot_src` 恒 ask）+ `go test ./internal/... -race` 全绿。
+
+23. **采集管线回归 + 多标的参数化（`internal/feed.Asset`）**（2026-09-25，用户要求
+    「看 eth 分支的 collect/compact 同步过来并适配 ETH」，随后追加「把 btc/eth 的硬编码
+    处理了，统一成参数，后面还要采 sol/bnb」）。完整报告见
+    `docs/collect_eth_sync_2026-09-25.md`。
+    - **同步 eth 版而非 v3 版**：`eth` 版行字段名 `yes_*`/`no_*` 与现存 `data/btc` 3753 窗
+      及全部 `python/v4` 脚本逐字一致；另移植 v3 独有的三处修复（Binance 启动重试、
+      `Submit` 的 `done` 守卫、关闭路径直写 `WriteUniqueEvent`）。删 `internal/collect/writer.go`
+      （`JSONLWriter` 零调用者，eth 分支里也是死代码）。
+    - **三处与 eth 原实现的有意差异**（口径对齐 v4 引擎，均有证据）：
+      ① **边界价改精确推送**——`PushNearest` 精确等值匹配取代「`Latest()` 流采样 + 官方
+      30s 轮询」，依据决策 #19（官方 open ≡ 边界推送 315/315、close ≡ anchor(N+1) 309/309）
+      与决策 #14（官方头几十秒是未收敛临时值）；正常窗**一次官方请求都不打**，只在推送
+      缺失时排队修正。② **空侧盘口不丢消息**（决策 #21）——守卫只留 `book == nil`，
+      赢家侧尾盘整侧撤空 ask 时照存 ⇒ 该侧价为 0 ⇒ 该 tick 四档缺一（与回测宇宙同口径）。
+      ③ **删 `MinRange` / `MaxStreamAgeMs`**——它们是为「流采样 close vs 官方边界值」的
+      量化误差标定的；close 与官方同一个数后该误差归零，修正的唯一触发条件变成「没拿到
+      推送」（`SettlementConfig` 只剩 PollInterval/MaxWait/MaxConcurrent）。
+    - **硬编码消除**：新增 `internal/feed/asset.go`（`AssetFor(name)` / `AssetFromSlug(slug)` /
+      `DataDir()` / `ApplyBinance(cfg)`），一处资产名派生四条命名（slug / Binance 交易对 /
+      Chainlink 符号 / 数据目录）。接线：`cmd/collect` 增 `-asset`/`-slug`/`-symbol`/`-output`
+      四 flag（优先级 `-slug` > `-asset` > `runtime.slug_prefix`）；`cmd/flip`/`cmd/tail` 各
+      4 处（TWAP 符号 / Binance 交易对 / `PricePairFetcher` / `FetchTwapRanges`）；
+      `binance.symbol` 默认值改 **`""` = 留空即派生**（显式填优先，应对 `1000XXXUSDT`
+      这类引号货币不是 USDT 的标的）——`v4.config.yaml` 与漂移守卫同步。
+      ⚠️ `sdk.CryptoPriceSymbol` 只是 `string` 类型（SDK 的 SOL/BTC/ETH/XRP 是便利常量），
+      派生不需要映射表。
+    - ⚠️ **口径陷阱（同步时踩到并修掉）**：两个包的 `"stream"` **同名不同义**——
+      `feed.AnchorSourceStream` = **精确边界推送**（决策 #15 起 `anchor_src` 取
+      `official|stream` 的历史命名），`collect.SourceStream` = **到达口径采样**。采集侧
+      原先直接 `anchorSrc = rec.Source` 落盘 ⇒ 取锚**成功**的窗被标成到达口径 ⇒
+      `needsCorrection` 判真 ⇒ 每窗白排队一次官方修正并用官方值覆盖已逐位精确的值
+      （数值相同、来源标签被改坏；首窗实测复现）。修法为纯函数
+      `cmd/collect/main.go:anchorSource(feedSrc)` 显式翻译词表。
+    - **数据校验 `python/v4/24_asset_data_check.py`**（纯标准库，**任意标的**）：八段全部
+      拿外部真值或内部恒等式对——A 结构与元数据 / B tick 覆盖与 rem 恒等式 / C 盘口互补
+      （`yes_bid+no_ask=1`）/ D **Binance REST K 线**逐分钟对成交笔数·成交量·价格区间 +
+      `binance_open` vs 5m K 线开盘价 / E TWAP 龄 / F 成交桶 / G **官方 `crypto-price`**
+      vs 行内边界价（决定性：口径为 push 的行必须**逐位相等**）/ H gamma 结算方向。
+      网络两个坑已在脚本内处理：gamma 与 `polymarket.com` 对裸 urllib 的默认 UA 直接
+      **403**（要浏览器 UA）；`crypto-price` 会 **429**（逐窗 0.35s 间隔 + 退避重试）。
+    - **自检**（对旧 `data/btc` 3753 窗跑一遍，既验脚本也量化新旧口径差）：D 段成交笔数比
+      中位 **0.9995**、成交量比中位 **0.9999**、`binance_open` 6/6 与 5m K 线开盘价逐位
+      相等 ⇒ 采集侧对 Binance 的聚合逐位可信；G 段旧口径行（`close_source=stream`）
+      开盘价逐位相等 2/5、**收盘价 0/5**、最大差 1.38 美元 ⇒ 正是被换掉的那个口径。
+      H 段方向 6/6 与 gamma 一致。
+    - ✅ **决定性验收（G 段：官方边界价 vs 行内值逐位比较）**——ETH 首窗推送口径
+      **开盘价 1/1、收盘价 1/1 逐位相等（最大差 0.000000 美元）**；对照 BTC 旧口径行
+      （`close_source=stream`）**开盘 2/5、收盘 0/5、最大差 1.38 美元**。即决策 #19 的
+      「官方 `openPrice(N)` ≡ 边界推送、`closePrice(N)` ≡ `anchor(N+1)`」**在 ETH 上同样
+      成立** ⇒ 采集/引擎/结算三处同一口径，ETH 数据可直接喂 v4 引擎、无需换算。
+      D 段同时确认 Binance ETHUSDT 聚合逐位可信（笔数比 1.0000 / 量比 1.0000 /
+      `binance_open` 与 5m K 线开盘价 1/1 逐位相等）。⚠️ **H 段（gamma 方向）未验**：
+      `umaResolutionStatus` 分钟级延迟，首窗校验时尚未 `resolved`。
+    - **首窗 ETH 实测**（`data/eth/events_2026-09-25.jsonl` 首窗，12:50Z）：
+      `close_source` / `anchor_source` 双 **`push`**（验收 §4 的词表修复生效）、301 tick
+      无断档、TWAP 零价 0、成交桶 176 行。两处非缺陷但需记账的观察：
+      - ⚠️ **整侧缺腿：首窗 36/301 = 11.96%（rem ∈ [0,34]）、次窗 81/300 = 27%
+        （rem ∈ [0,79]）**——两窗都 outcome=0（YES 赢），缺的都是卖腿 `yes_ask+no_bid`，
+        即赢家侧卖单被撤空，形态与决策 #21 一致。**但比例远高于 BTC，且未独立取证**：
+        - BTC 的「0.00%」**确定是旧守卫的构造性产物**（空侧消息被整条丢弃 ⇒ 这类 tick
+          在旧数据里根本无法以缺腿形态出现），不是市场属性——这条成立。
+        - 而 ETH 的 12%~27% **是不是市场真相，尚未证实**：本机网络/订阅侧同样能产生
+          「某 token 的簿停更在某一份空 ask 快照上」的读数。决策 #21 当初对 BTC 是
+          用**两条独立通道**（SDK WS + 公共 REST）取证的，ETH 这次只走了采集器一条路。
+        - ⇒ **待服务器部署后按决策 #21 的双通道方法复核**（用户 2026-09-25 判断
+          「有可能是我的网络问题，可以等部署服务器跑数据再验证」）。**在那之前，
+          不要把 12%~27% 当作 ETH 尾盘撤空率的估计量用**。
+        - 🔍 **用户假设的当场反证（同一晚）**：对 13:00Z 窗尾盘走**公共 CLOB REST**
+          （与采集器 WS 订阅完全无关的独立通道）取数——`Up bid 0.00(0档)/ask 0.01(52档)
+          | Down bid 0.99(52档)/ask 0.00(0档)`，整个尾盘如此，档数 52→47→46 在变
+          （实时非缓存）。**现象因此被证实是真的**，不是本机订阅残留。
+          ⚠️ **两副面孔记下来**：该窗 Down 赢 ⇒ 缺的是**买腿**（`yes_bid=0 ∧ no_ask=0`）；
+          而 §5.5 表里两窗 Up 赢 ⇒ 缺**卖腿**（`yes_ask=0 ∧ no_bid=0`）。同一条规则
+          ——**被清空的永远是对应「押最终输家」的那条腿**（输家的 bid 无人接、
+          赢家的 ask 无人卖）。**比率仍待复核**（REST 只验了一窗尾盘；12%~27% 可能被
+          本机 WS 滞后放大 ⇒ 持有空快照的时间长于市场实际）。
+        - 要真正的 BTC 基线同样须用新代码重采（未做）。
+      - **互补越界的合理阈值**：用新逻辑重扫 BTC 3753 窗（1,091,652 有效 tick）得合计
+        **0.126%**、逐窗 **p99 1.0% / max 1.667%**——原先那条逐窗 0.5% 的 FAIL 线
+        BTC 自己就超。改成两级（合计 > 1% / 单窗 > 5% 判失败），实测分布写进脚本注释。
+        成因是**两本簿采样错位**：一行的 `yes_*` 与 `no_*` 来自两条独立 `book` 消息，
+        而 `MakePMTick` 的 `book_ts` 只取两簿**较大者**，行内分辨不出两个瞬间
+        （ETH 首窗那 2 个越界 tick 正落在 rem 94/96 的价格急跌处）。下游同时读两侧的
+        判定（如 flip 四档门控）须知此瞬态错位存在。
 
 ---
 
