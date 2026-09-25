@@ -15,11 +15,11 @@ import (
 	"github.com/necklace/flip-signal/internal/flip"
 )
 
-// ── 三个记录家族的前缀与行 schema 标识 ──
+// ── 四个记录家族的前缀与行 schema 标识 ──
 //
-// ⚠️ 三个前缀都**刻意与 flip 的不同**，且互不为前缀（有下划线分隔）:
+// ⚠️ 四个前缀都**刻意与 flip 的不同**，且互不为前缀（有下划线分隔）:
 //   - flip 是 touches_ / windows_ / winstats_;
-//   - tail 是 tail_ / tailwin_ / tailstats_。
+//   - tail 是 tail_ / tailwin_ / tailstats_ / tailhold_。
 //
 // 两族共同落在一个 output_dir 时，各自的 Glob 只认自己的前缀——`tail_*.jsonl`
 // 匹配不到 `tailwin_*`/`tailstats_*`（下划线断开了），也匹配不到 flip 的任何文件。
@@ -39,16 +39,21 @@ const windowPrefix = "tailwin_"
 // 跳过的窗口——「这窗为什么没有行」的可观测性数据源）。
 const statsPrefix = "tailstats_"
 
-// 行 schema 标识（WindowEntry/StatsRow 的 kind 字段）: 两类窗口级行互斥, 防串读。
+// 持仓监察日志: tailhold_YYYY-MM-DD.jsonl，**信号成交后逐 tick 一行**（只记录、
+// 不参与任何判定，见 hold.go 的文件头）。第四个前缀，与上面三个互不为前缀。
+const holdPrefix = "tailhold_"
+
+// 行 schema 标识（WindowEntry/StatsRow/HoldRow 的 kind 字段）: 各类行互斥, 防串读。
 // 取值即文件前缀，让 grep 与人读同一眼能对上。
 const (
 	winKindAmp   = "tailwin"   // flip.WindowEntry（σ 预热数据源）
 	winKindStats = "tailstats" // StatsRow（tick 健康度审计）
+	holdKind     = "tailhold"  // HoldRow（持仓监察；每 tick 一行）
 )
 
 // Recorder 追加写 tail_*.jsonl（每窗 1~3 行: 三段链的判定行/信号行, 未出信号时
-// 至多两条判定行），外加窗口振幅日志（σ 预热数据源）与窗口健康度日志。
-// 三族各持独立文件句柄，互不干扰。
+// 至多两条判定行），外加窗口振幅日志（σ 预热数据源）、窗口健康度日志与持仓监察日志。
+// 四族各持独立文件句柄，互不干扰。
 //
 // 与 flip.Recorder 的差异（有意）:
 //   - 前缀与行 schema 不同（本文件顶部）——不复用 flip.Recorder，因为它的三个
@@ -74,6 +79,10 @@ type Recorder struct {
 	statsDay  string // 健康度日志只追加、不载入内存（纯审计, 省一次全量读盘）
 	statsFile *os.File
 	statsBuf  *bufio.Writer
+
+	holdDay  string // 持仓监察日志同上: 只追加、不载入内存（纯审计）
+	holdFile *os.File
+	holdBuf  *bufio.Writer
 }
 
 // DayPnl 单日已结算 P&L（日亏熔断的输入）。
@@ -663,6 +672,33 @@ func (r *Recorder) LogWindowStats(e StatsRow) error {
 	return r.statsBuf.Flush()
 }
 
+// LogHoldTick 追加一条持仓监察行（tailhold_YYYY-MM-DD.jsonl）。
+//
+// ⚠️ 与 LogWindowStats 一样是**纯审计口**: 行不进内存、不参与统计、不影响任何
+// 判定与风控（hold.go 文件头的硬边界 1）。落盘失败只应记日志、绝不上抛到主循环
+// 的判定路径——调用方（cmd/tail）自己吞掉错误。
+func (r *Recorder) LogHoldTick(e HoldRow) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	e.Kind = holdKind
+	e.Date = utcDate(e.Ts)
+	if err := r.openHoldDayLocked(e.Date); err != nil {
+		return err
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("Tail: marshal 持仓监察行: %w", err)
+	}
+	if _, err := r.holdBuf.Write(line); err != nil {
+		return err
+	}
+	if err := r.holdBuf.WriteByte('\n'); err != nil {
+		return err
+	}
+	return r.holdBuf.Flush()
+}
+
 // openWinDayLocked 打开（必要时轮转）指定 UTC 日的窗口日志文件（调用方已持锁）。
 func (r *Recorder) openWinDayLocked(date string) error {
 	if r.winDay == date && r.winFile != nil {
@@ -711,6 +747,38 @@ func (r *Recorder) openStatsDayLocked(date string) error {
 	return nil
 }
 
+// openHoldDayLocked 打开（必要时轮转）指定 UTC 日的持仓监察日志（调用方已持锁）。
+func (r *Recorder) openHoldDayLocked(date string) error {
+	if r.holdDay == date && r.holdFile != nil {
+		return nil
+	}
+	if err := r.closeHoldDayLocked(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(holdFilePath(r.dir, date), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		return fmt.Errorf("Tail: 打开持仓监察日志 %s: %w", date, err)
+	}
+	r.holdDay, r.holdFile, r.holdBuf = date, f, bufio.NewWriter(f)
+	return nil
+}
+
+// closeHoldDayLocked flush 并关闭持仓监察日志文件（调用方已持锁）。
+func (r *Recorder) closeHoldDayLocked() error {
+	if r.holdFile == nil {
+		return nil
+	}
+	if err := r.holdBuf.Flush(); err != nil {
+		r.holdFile.Close()
+		return err
+	}
+	if err := r.holdFile.Close(); err != nil {
+		return err
+	}
+	r.holdDay, r.holdFile, r.holdBuf = "", nil, nil
+	return nil
+}
+
 // closeStatsDayLocked flush 并关闭健康度日志文件（调用方已持锁）。
 func (r *Recorder) closeStatsDayLocked() error {
 	if r.statsFile == nil {
@@ -732,6 +800,9 @@ func (r *Recorder) Close() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if err := r.closeStatsDayLocked(); err != nil {
+		return err
+	}
+	if err := r.closeHoldDayLocked(); err != nil {
 		return err
 	}
 	if err := r.closeWinDayLocked(); err != nil {
@@ -1062,4 +1133,9 @@ func windowFilePath(dir, date string) string {
 // statsFilePath 生成窗口健康度日志日文件名（集中一处，rotate 共用；无载入路径）。
 func statsFilePath(dir, date string) string {
 	return filepath.Join(dir, statsPrefix+date+".jsonl")
+}
+
+// holdFilePath 生成持仓监察日志日文件名（同上；同样无载入路径）。
+func holdFilePath(dir, date string) string {
+	return filepath.Join(dir, holdPrefix+date+".jsonl")
 }

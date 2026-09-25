@@ -21,11 +21,14 @@
 // 由 stage 区分; 旧口径的 frame/scan 两种 kind 已成为 legacy-only（引擎不再产出,
 // 只保证 data/ 里的旧行照旧载入与结算）。
 //
-// 记录三族（前缀刻意与 flip 的 touches_/windows_/winstats_ 不重合）:
+// 记录四族（前缀刻意与 flip 的 touches_/windows_/winstats_ 不重合）:
 //
 //	tail_YYYY-MM-DD.jsonl      每窗 1~3 行（三段判定/信号行），观测/成交/结算
 //	tailwin_YYYY-MM-DD.jsonl   每完成窗 1 行（σ 重启本地预热的数据源）
 //	tailstats_YYYY-MM-DD.jsonl **严格每窗 1 行**（tick 健康度 + skip 原因 + 锚状态）
+//	tailhold_YYYY-MM-DD.jsonl  持仓监察: 信号**成交后**逐 tick 1 行（只记录, 不参与
+//	                           任何判定——回答「止损真要出场时有没有对手方」,
+//	                           见 internal/tail/hold.go 与 docs/tail_stoploss_2026-09-25.md）
 //
 // 成交（-mode paper|live，两模式共用同一判定与风控闸）: paper = 模拟全额成交
 // （shares = stake/hot_ask，精确除）; live = 真实 CLOB **GTC 限价挂单** @ 热门侧有效价,
@@ -837,6 +840,10 @@ func main() {
 		// 迟到判据恰恰要靠真实时刻（见窗口结束后的 σ 段）。
 		var lastSampleAt time.Time
 
+		// 持仓监察（只记录, 见 internal/tail/hold.go）: 本窗出信号且**有仓位**
+		// 之后开始逐 tick 记持仓侧盘口, 直到闭市。nil = 本窗尚未（或不会）建仓。
+		var holdID *tail.HoldIdent
+
 	collectLoop:
 		for {
 			select {
@@ -861,6 +868,34 @@ func main() {
 					// GTC 的 resting 行仓位未定——先交 FillTracker 定稿, 定稿后才进 pending。
 					if rec.ExecStatus == flip.ExecStatusResting {
 						fillTracker.RegisterOrder(fillOrderOf(rec), endTime, false)
+					}
+					// 持仓监察起点: 用 HasPosition（= 非 legacy scan ∧ 已成交）而非
+					// IsFilled——被闸/被拒/挂单未定稿的行没有仓位可监察。
+					if rec.HasPosition() {
+						holdID = &tail.HoldIdent{
+							ConditionID: conditionID, Slug: slug, Stage: rec.Stage,
+							Side: rec.Side, EntryFill: rec.HotAsk, EntryRem: rec.Rem,
+							Anchor: rec.Anchor, HistBps: rec.HistBps,
+						}
+						log.Printf("[Tail] 🔍 持仓监察开启 event=%s side=%s stage=%s "+
+							"fill=%.2f anchor=%.2f", conditionID, rec.Side, rec.Stage,
+							rec.HotAsk, rec.Anchor)
+					}
+				}
+				// 持仓监察（**只记录**: 不参与判定、不下单、不进 P&L, 见 hold.go）。
+				// 与上面那段的关键差别是门控——它**不要求持仓侧 bid > 0**（bid == 0
+				// 正是要观测的东西）、不要求四档齐全。落盘失败只记日志、不上抛。
+				if holdID != nil {
+					if h := tail.HoldWatchRow(*holdID, cfg.Tail.MaxBookLatMs, lastTick); h != nil {
+						upB, downB := runtime.books()
+						if holdID.Side == flip.SideYes {
+							h.HoldBid5, h.HoldAsk5 = bookTop5(upB)
+						} else {
+							h.HoldBid5, h.HoldAsk5 = bookTop5(downB)
+						}
+						if err := recorder.LogHoldTick(*h); err != nil {
+							log.Printf("[Tail] ⚠️ 持仓监察落盘失败 event=%s: %v", conditionID, err)
+						}
 					}
 				}
 				if rem == 0 {
@@ -987,6 +1022,36 @@ func fillOrderOf(rec *tail.Record) trading.FillOrder {
 		Limit:       rec.HotAsk,
 		Stake:       rec.Stake,
 	}
+}
+
+// bookTop5 返回一本 SDK 订单簿买/卖侧**前 5 档累计股数**（0 = 该侧无档位）。
+//
+// 只服务持仓监察（hold.go）: 止损那一秒「有没有对手方」不但要看 bid 价格在不在,
+// 还要看**够不够吃下这一笔**（stake/HotAsk ≈ 2~2.5 股）——决策 #21 实测 CLOB 的
+// `minimum_order_size = 5 股`, 所以「bid 存在但只有 3 股」与「没有 bid」对实盘
+// 是一回事, 价格字段分辨不出来, 必须落深度。
+//
+// ⚠️ 档位顺序: SDK 的 bids **升序**（最优价在末尾）、asks **升序**（最优价在开头）。
+// 「前 5 档」= 最有竞争力的 5 档 ⇒ bids 取末尾 5 个、asks 取开头 5 个。
+func bookTop5(book *sdk.OrderBook) (bid5, ask5 float64) {
+	if book == nil {
+		return 0, 0
+	}
+	lo := len(book.Bids) - 5
+	if lo < 0 {
+		lo = 0
+	}
+	for _, b := range book.Bids[lo:] {
+		bid5 += b.Size
+	}
+	n := len(book.Asks)
+	if n > 5 {
+		n = 5
+	}
+	for _, a := range book.Asks[:n] {
+		ask5 += a.Size
+	}
+	return bid5, ask5
 }
 
 // resolveLiveMode 决定成交模式与执行器（默认纸面; -mode live 且凭证齐 → 真实下单）。
