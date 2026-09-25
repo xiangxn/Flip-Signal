@@ -33,8 +33,11 @@ type Config struct {
 	//
 	// 三段任一出信号即整窗只下一单（之后不再判定）。
 	T60Rem int `mapstructure:"t60_rem"`
-	// PriceMin 价格腿（0.80）: 热门侧**有效价**必须 ≥ 此值。⚠️ 它是**全部五格的前置**
+	// PriceMin 价格腿（0.80）: 热门侧**有效价**必须过此值。⚠️ 它是**全部五格的前置**
 	// 条件（python 先按 hot 过滤再判 dev/σ 腿），也是监听段 ② 的前置——见 decide.go。
+	//
+	// 比较符**随段而变**（2026-09-26 起）: T=150 段严格大于（`hot > 0.80`）, T=60 与
+	// 监听段仍是 ≥——本键只给阈值, 不给比较符（见 decide.PriceLeg）。
 	PriceMin float64 `mapstructure:"price_min"`
 	// DevMinUSD 美元腿（63）: dev = sgn·(spot − anchor) ≥ 此值即放行（DEV_MIN）。
 	DevMinUSD float64 `mapstructure:"dev_min_usd"`
@@ -53,11 +56,13 @@ type Config struct {
 // DefaultConfig 返回文档 §1.4 定稿的默认参数（全部不可调, 见 Config 注释）。
 //
 // 三段链的 14 天真金（2026-08-18~31, 2U/注, oracle =
-// python/v4/23_tail_integrated.py, 见 docs/tail_integrated_2026-09-24.md §5）:
-// T=150 ⑤ n=1220 WR 93.93% +16.02U / T=60 ⑤ n=568 WR 99.12% +15.76U /
-// 监听 ② n=347 WR 97.98% +3.90U ⇒ 合计 n=2135 WR 95.97% **+35.67U**。
+// python/v4/23_tail_integrated.py, 见 docs/tail_integrated_2026-09-24.md §5/§6）:
+// T=150 ⑤ n=1208 WR 94.04% +15.02U / T=60 ⑤ n=577 WR 99.13% +16.15U /
+// 监听 ② n=348 WR 97.99% +3.92U ⇒ 合计 n=2133 WR 96.06% **+35.09U**。
 // 对照旧口径「只在 T=60 判 ⑤」= n=1536 WR 99.61% +36.93U ——总 P&L 基本持平、
 // 注数 +39%、EV/注摊薄, 这是 2026-09-24 用户决定的显式取舍（a.md 第 1 条）。
+// 上面四格是 **T=150 段价格腿改严格大于后**的数（2026-09-26, 决策 #26; 改前
+// 1220/568/347 = 2135 / 95.97% / +35.67U, 配对 Δ −0.58U 区间含 0）。
 // ⚠️ 数字口径以 oracle 为准: 它按决策 #13 跳过 σ 未就绪的 3 个窗（引擎同源）,
 // 不跳过时 T=60 段会多 1 笔（n=569 / +15.86U, 即文档 §5 表里的预估值）。
 //
@@ -67,7 +72,7 @@ func DefaultConfig() Config {
 	return Config{
 		T150Rem:      150,  // 第一段判定点: rem ≤ 150s（真下单, 不再是「只记录的帧」）
 		T60Rem:       60,   // 第二段判定点: rem ≤ 60s（策略本体 T=60）
-		PriceMin:     0.80, // 价格腿 P_FLOOR（五格与监听段 ② 共同前置）
+		PriceMin:     0.80, // 价格腿 P_FLOOR（五格与监听段 ② 共同前置; T=150 段严格大于）
 		DevMinUSD:    63,   // 美元腿 DEV_MIN（USD）
 		SigmaMinUSD:  40,   // σ 腿下限 F（USD, 不可辨识——别调）
 		Stake:        2,    // 每笔 2 USDC

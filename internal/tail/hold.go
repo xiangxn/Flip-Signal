@@ -22,7 +22,7 @@ import "github.com/necklace/flip-signal/internal/flip"
 //  1. **只记录**：不参与判定、不下单、不进 P&L / 熔断 / 胜率，也不写任何已有的
 //     记录族——独立前缀 tailhold_，与 tail_/tailwin_/tailstats_ 互不沾染（决策 #9）。
 //  2. **不碰引擎状态**：本文件是纯函数 + 一个数据结构，没有 Engine 方法、不读锁、
-//     不改 e.state / e.stats / 三个闩锁 ⇒ parity 红线（6399/2135/3640/3）零影响。
+//     不改 e.state / e.stats / 三个闩锁 ⇒ parity 红线（6412/2133/3640/3）零影响。
 //  3. **门控与判定路径刻意不同**（见 HoldWatchRow）。
 
 const (

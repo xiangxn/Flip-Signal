@@ -342,8 +342,9 @@
     if (!CFG) return;
     $('cfgNote').innerHTML = '三段链（<b>不可调</b>，仅纸面登记）：rem ≤ <b>' + CFG.t150_rem +
       's</b> 判 ⑤ → 不达标则 rem ≤ <b>' + CFG.t60_rem + 's</b> 再判 ⑤ → 仍不达标则此后每秒判 ②。' +
-      '规则：热门侧**有效价**（ask 优先、bid 兜底）≥ <b>' + CFG.price_min +
-      '</b> 且（位移 dev ≥ <b>' + CFG.dev_min_usd + ' $</b> 或 <b>' + CFG.sigma_min_usd +
+      '规则：热门侧**有效价**（ask 优先、bid 兜底）过 <b>' + CFG.price_min +
+      '</b>（<b>T=150 段要求严格大于</b>，T=60 与监听段为 ≥）且（位移 dev ≥ <b>' + CFG.dev_min_usd +
+      ' $</b> 或 <b>' + CFG.sigma_min_usd +
       ' $ ≤ sd ≤ dev</b>）；② 只要求价格腿 + dev 腿。每注 <b>' + CFG.stake +
       ' U</b> · 盘口延迟闸 <b>' + CFG.max_book_lat_ms +
       'ms</b>。实盘为 GTC 挂单等成交（挂到闭市撤余量），与回测「瞬时即成交」不是同一个估计量。';

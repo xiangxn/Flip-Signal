@@ -8,6 +8,10 @@
 //	⑤ = hot_ask ≥ 0.80 且 ( dev ≥ 63 美元   或   ( sd ≥ 40 美元  且  dev ≥ sd ) )
 //	② = hot_ask ≥ 0.80 且   dev ≥ 63 美元
 //
+// ⚠️ 2026-09-26 起 **T=150 段的价格腿是严格大于**（`hot_ask > 0.80`）, 上面这两行
+// 的 ≥ 只对 T=60 段与监听段成立——见 decide.PriceLeg（本包唯一的段相关腿）与
+// docs/tail_integrated_2026-09-24.md §6。
+//
 // 2026-09-24 起每窗走**三段递进判定链**（用户决定, docs/tail_integrated_2026-09-24.md §1）:
 // rem≤150 判 ⑤ → 不达标则 rem≤60 再判 ⑤ → 再不达标则此后每秒判 ②（达标即下单）。
 // 任一段出信号即整窗只下一单。
@@ -72,7 +76,8 @@ const (
 	// RejectNoHist σ 不可用（hist_bps ≤ 0, 前 <3 个已完窗）。纯函数防线: 现网由
 	// cmd/tail 的前置闸整窗跳过（skip=no_sigma）, 到不了这里。
 	RejectNoHist = "no_hist"
-	// RejectPriceLow 价格腿不过: 热门侧有效价 < PriceMin（含整窗无任何报价的情形）。
+	// RejectPriceLow 价格腿不过（含整窗无任何报价的情形）。判据随段而变: T=150 段是
+	// `有效价 ≤ PriceMin`（严格大于的反面, 0.80 那一格落在这一侧）, 其余段是 `< PriceMin`。
 	RejectPriceLow = "price_low"
 	// RejectLegOut 价格腿过了但位移腿/σ 腿都没过: dev < 63 且不满足 (sd ≥ 40 ∧ dev ≥ sd)。
 	RejectLegOut = "leg_out"
@@ -134,7 +139,9 @@ func (s engineState) String() string {
 // 字段命名避开 python 里 `sig` 的一词两义（13 里是 bool 的「hot∧confirm」,
 // 15 里是 float 的 σ 倍数）: 这里一律用 Sigma/SigmaUSD40 指 σ 腿。
 type Rules struct {
-	Price      bool `json:"price"`       // hot_ask ≥ PriceMin
+	// Price 价格腿, **比较符取决于本行的 stage**（T=150 严格大于, 其余 ≥, 见 PriceLeg）
+	// ——它是落盘行的一部分, 必须与 reject_reason 自洽: `price = false` ⇔ price_low。
+	Price      bool `json:"price"`
 	Dev63      bool `json:"dev63"`       // dev ≥ DevMinUSD（原始, 未与 Price 合并）
 	Sigma      bool `json:"sigma"`       // σ 可用 ∧ dev ≥ sd（即 sig ≥ 1.0）
 	SigmaUSD40 bool `json:"sigma_usd40"` // σ 可用 ∧ sd ≥ SigmaMinUSD ∧ dev ≥ sd（σ 腿放行）
@@ -153,7 +160,8 @@ func (r Rules) Rule3() bool { return r.Price && r.Sigma }
 func (r Rules) Rule4() bool { return r.Price && (r.Dev63 || r.Sigma) }
 
 // Rule5 ⑤ = 价格腿 ∧ (dev ≥ 63 ∨ (sd ≥ 40 美元 ∧ dev ≥ sd)) ← **第一/二段下单的规则**
-// （docs/tail_sweep_2026-09-22.md §1.3）。
+// （docs/tail_sweep_2026-09-22.md §1.3）。价格腿取 r.Price（**该段适用的那一个**,
+// t150 行是严格大于）, 故同一个 Rule5 在三段上是同一套代码。
 func (r Rules) Rule5() bool { return r.Price && (r.Dev63 || r.SigmaUSD40) }
 
 // Observation 是一次快照观测（判定行与信号行共用本类型, 由 OK/Stage 区分）。

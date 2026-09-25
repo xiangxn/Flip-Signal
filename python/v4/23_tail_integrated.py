@@ -11,6 +11,12 @@
     ⑤ = hot ≥ 0.80 ∧ ( dev ≥ 63 或 ( sd ≥ 40 且 dev ≥ sd ) )
     ② = hot ≥ 0.80 ∧   dev ≥ 63
 
+⚠️ 2026-09-26 起 **T=150 段的价格腿改为严格大于**（`hot > 0.80`）——其余段（T=60 的 ⑤
+与监听段 ②）一字不改，仍是非严格 ≥。理由见 `docs/tail_integrated_2026-09-24.md` §6:
+报价落在 0.01 网格上, `hot == 0.80` 是常态形态而非浮点边界; 实盘 09-24~25 那 4 笔
+0.80 入场 WR 50% / −14.38U, 而同批 > 0.80 的 201 笔 WR 98.5% / +70.15U; 14 天回测里
+0.80 桶同样是整条价格梯度上唯一的负 EV 档（n=17 WR 76.5% −1.50U）。见 r5(strict_price)。
+
 任一段出信号即**整窗只下一单**。三行的 stage 分别记 t150 / t60 / listen。
 
 本脚本是 `internal/tail/parity_test.go` 的 oracle（Go 引擎逐窗重放的对照真值）,
@@ -112,9 +118,13 @@ def row(t, anchor, sd, date, outcome, stage):
     }
 
 
-def r5(r):
-    """⑤ = 价格腿 ∧ (dev ≥ 63 ∨ (sd ≥ 40 ∧ dev ≥ sd))。"""
-    if not (r["fill"] >= P_FLOOR):
+def r5(r, strict_price=False):
+    """⑤ = 价格腿 ∧ (dev ≥ 63 ∨ (sd ≥ 40 ∧ dev ≥ sd))。
+
+    strict_price=True 时价格腿用**严格大于**（`hot > P_FLOOR`）——**只用于 T=150 段**
+    （2026-09-26 用户决定, 见文件头）。T=60 段与 r2 保持非严格 ≥。
+    """
+    if not (r["fill"] > P_FLOOR if strict_price else r["fill"] >= P_FLOOR):
         return False
     if r["dev"] >= DEV_USD:
         return True
@@ -122,7 +132,7 @@ def r5(r):
 
 
 def r2(r):
-    """② = 价格腿 ∧ dev ≥ 63（监听段的规则, 不含 σ 腿）。"""
+    """② = 价格腿 ∧ dev ≥ 63（监听段的规则, 不含 σ 腿）。价格腿**非严格** ≥（不变）。"""
     return r["fill"] >= P_FLOOR and r["dev"] >= DEV_USD
 
 
@@ -137,9 +147,9 @@ def chain(ticks, anchor, sd, date, outcome):
     rows, rejects = [], []
     head = ticks[0]
     if head["rem"] > T60:
-        # 段 1: 首个可判定 tick 且 rem ≤ 150
+        # 段 1: 首个可判定 tick 且 rem ≤ 150（价格腿**严格**大于, 2026-09-26）
         r = row(head, anchor, sd, date, outcome, "t150")
-        if r5(r):
+        if r5(r, strict_price=True):
             r["ok"] = True
             return [r], rejects
         rejects.append("t150")
@@ -215,9 +225,10 @@ def main():
     def edges(r):
         """一条行距离 dev/σ 三条**连续量**边界的最小余量（|dev−63| / |sd−40| / |dev−sd|）。
 
-        ⚠️ 不含价格腿: 报价落在 0.01 的 tick 网格上, `fill == 0.80` 是常态（86 行）,
-        而它是**恰好在边界上放行**——两边读同一个 double, 行为确定。dev/sd 是浮点
-        连续量, 它们的余量才是「1ulp 差异会不会让 n 差 1」的安全垫。
+        ⚠️ 不含价格腿: 报价落在 0.01 的 tick 网格上, `fill == 0.80` 是常态,
+        而它是**恰好在边界上放行/拦下**——两边读同一个 double, 行为确定（T=150 段
+        严格大于后, 0.80 那一格从「恰好放行」变成「恰好拦下」, 同样是确定的）。
+        dev/sd 是浮点连续量, 它们的余量才是「1ulp 差异会不会让 n 差 1」的安全垫。
         """
         m = abs(r["dev"] - DEV_USD)
         if r["sd"] is not None:

@@ -10,6 +10,8 @@ import "github.com/necklace/flip-signal/internal/flip"
 
 // EvalRules 求四条原始腿（纯函数）。
 //
+//   - stage  本行所属的判定段——**唯一的作用是按段选价格腿的比较符**（见 PriceLeg:
+//     T=150 段严格大于, 其余段 ≥）。其余三条腿与段无关。
 //   - hotAsk 热门侧**有效价**（ask 优先、bid 兜底, 见 HotBook）——即成交价口径
 //   - dev    sgn·(spot − anchor)，**美元**——不要传 bps 量（python 13 里的 d_spot 是
 //     bps、15 里的 sd 是美元, 混用会得到 n=17 这种量级完全错误的族, 故本包一律用美元）
@@ -18,14 +20,35 @@ import "github.com/necklace/flip-signal/internal/flip"
 //     dev ≥ sd 恒真, ③④ 会在没有历史的窗口全放行（正是冷启动期最危险的那批）。
 //
 // 返回值是四条**原始**腿; 五格与价格腿的作用域见 Rules 的 Rule1…Rule5。
-func EvalRules(cfg Config, hotAsk, dev, sd float64, hasSigma bool) Rules {
+func EvalRules(cfg Config, stage string, hotAsk, dev, sd float64, hasSigma bool) Rules {
 	sigma := hasSigma && dev >= sd
 	return Rules{
-		Price:      hotAsk >= cfg.PriceMin,
+		Price:      PriceLeg(cfg, stage, hotAsk),
 		Dev63:      dev >= cfg.DevMinUSD,
 		Sigma:      sigma,
 		SigmaUSD40: sigma && sd >= cfg.SigmaMinUSD,
 	}
+}
+
+// PriceLeg 价格腿（纯函数）: 热门侧有效价是否过价格闸。**本包唯一的段相关腿**——
+//
+//	T=150 段（StageT150）: hotAsk >  PriceMin  （严格大于）
+//	其余段（T=60 / 监听）: hotAsk >= PriceMin
+//
+// 为什么 T=150 要严格大于（2026-09-26 用户决定, 依据见
+// docs/tail_integrated_2026-09-24.md §6）: 报价落在 0.01 的 tick 网格上,
+// `hotAsk == 0.80` 是**常态形态**而非浮点边界——两个样本里它都是整条价格梯度上
+// 唯一的负 EV 档（实盘 09-24~25: n=4 WR 50% −14.38U, 而同批 >0.80 的 201 笔
+// WR 98.5% +70.15U; 14 天回测: n=17 WR 76.5% −1.50U）。T=60 与监听段**不动**:
+// 那两段的价格本就更高（回测均价 0.978 / 0.974）, 0.80 入场几乎只出现在 T=150。
+//
+// ⚠️ 两者的差别只在 `hotAsk == PriceMin` 这一格上（同一格从「恰好放行」变成
+// 「恰好拦下」）——但它是确定的整数格, 不是浮点噪声, 故 parity 可逐位对账。
+func PriceLeg(cfg Config, stage string, hotAsk float64) bool {
+	if stage == StageT150 {
+		return hotAsk > cfg.PriceMin
+	}
+	return hotAsk >= cfg.PriceMin
 }
 
 // ── 派生量（纯函数）──

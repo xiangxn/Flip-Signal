@@ -325,6 +325,8 @@ func (e *Engine) snapshot(t flip.Tick, side string, px float64, src, stage strin
 	// 判定行同样计算: 离线复算与 dashboard 现窗口读数都靠这些字段。
 	o.Dev = DevUSD(side, t.BinPrice, e.anchor)
 	o.Sd = SigmaUSD(e.histBps, e.anchor)
-	o.Rules = EvalRules(e.cfg, px, o.Dev, o.Sd, e.histBps > 0)
+	// 价格腿按段取比较符（T=150 严格大于）——必须传 stage, 否则行里的
+	// rules.price 会与 reject_reason 自相矛盾（见 EvalRules/PriceLeg）。
+	o.Rules = EvalRules(e.cfg, stage, px, o.Dev, o.Sd, e.histBps > 0)
 	return o
 }

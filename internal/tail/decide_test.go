@@ -13,6 +13,9 @@ import (
 //   - 价格腿是**全部五格的前置**——hotAsk < 0.80 时哪怕 dev/σ 腿全过, 五格皆 false。
 //   - hasSigma=false 时 sd 必须被忽略——哪怕 dev 远大于 sd, ③ 也不得放行
 //     （sd=0 时 `dev >= sd` 恒真, 这是最容易写出「冷启动期全放行」的地方）。
+//
+// ⚠️ 本表的 stage 一律传 StageT60（**非严格**价格腿, 即 ≥）——这一维只影响
+// `hotAsk == PriceMin` 那一格, 由 TestPriceLegStageOperator 单独钉住。
 func TestEvalRules(t *testing.T) {
 	cfg := DefaultConfig()
 	cases := []struct {
@@ -33,7 +36,9 @@ func TestEvalRules(t *testing.T) {
 			want: Rules{Price: false, Dev63: true, Sigma: true, SigmaUSD40: true},
 		},
 		{
-			name: "价格腿边界: ask=0.80 恰好放行", hotAsk: 0.80, dev: 0, sd: 50, hasSigma: true,
+			// T=60 / 监听段口径（非严格）: 恰好 0.80 放行。T=150 段是严格大于,
+			// 同一格被拦下——见 TestPriceLegStageOperator。
+			name: "价格腿边界（T=60 口径）: ask=0.80 恰好放行", hotAsk: 0.80, dev: 0, sd: 50, hasSigma: true,
 			want: Rules{Price: true, Dev63: false, Sigma: false, SigmaUSD40: false},
 		},
 		{
@@ -85,7 +90,7 @@ func TestEvalRules(t *testing.T) {
 
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := EvalRules(cfg, c.hotAsk, c.dev, c.sd, c.hasSigma)
+			got := EvalRules(cfg, StageT60, c.hotAsk, c.dev, c.sd, c.hasSigma)
 			if got != c.want {
 				t.Fatalf("EvalRules(ask=%.2f dev=%.1f sd=%.1f hasSigma=%v)\n  得到 %+v\n  期望 %+v",
 					c.hotAsk, c.dev, c.sd, c.hasSigma, got, c.want)
@@ -116,13 +121,55 @@ func TestEvalRules(t *testing.T) {
 	}
 }
 
+// TestPriceLegStageOperator 钉住**本包唯一的段相关腿**: 价格腿在 T=150 段是严格
+// 大于（`hot > 0.80`）, 在 T=60 与监听段是 ≥（2026-09-26 用户决定; 依据见
+// docs/tail_integrated_2026-09-24.md §6——两个样本里 0.80 都是价格梯度上唯一负 EV 档）。
+//
+// 报价落在 0.01 的 tick 网格上, 故 `hotAsk == PriceMin` 是**常态形态**而非浮点噪声:
+// 这一格的取舍是确定的, 也正是本测试存在的理由（若哪天有人「顺手统一」两个比较符,
+// parity 会同时红, 但红在哪要知道）。
+func TestPriceLegStageOperator(t *testing.T) {
+	cfg := DefaultConfig()
+	cases := []struct {
+		stage  string
+		hotAsk float64
+		want   bool
+	}{
+		{StageT150, 0.79, false},
+		{StageT150, 0.80, false}, // ← 严格大于: 恰好 0.80 被拦下
+		{StageT150, 0.81, true},
+		{StageT60, 0.79, false},
+		{StageT60, 0.80, true}, // ← 非严格: 恰好 0.80 放行
+		{StageListen, 0.79, false},
+		{StageListen, 0.80, true},
+	}
+	for _, c := range cases {
+		if got := PriceLeg(cfg, c.stage, c.hotAsk); got != c.want {
+			t.Errorf("PriceLeg(%s, %.2f) = %v, 期望 %v", c.stage, c.hotAsk, got, c.want)
+		}
+	}
+
+	// ⑤ 的作用域必须跟着段走: 同一批输入（其余三腿全过）在两段上给出相反结论。
+	// 若 EvalRules 漏传 stage, 下面第一条会变成 true。
+	const dev, sd = 100, 50
+	if EvalRules(cfg, StageT150, 0.80, dev, sd, true).Rule5() {
+		t.Errorf("T=150 段 ask=0.80 不该放行 ⑤（严格大于）")
+	}
+	if !EvalRules(cfg, StageT60, 0.80, dev, sd, true).Rule5() {
+		t.Errorf("T=60 段 ask=0.80 该放行 ⑤（非严格）")
+	}
+	if !EvalRules(cfg, StageListen, 0.80, dev, sd, true).Rule2() {
+		t.Errorf("监听段 ask=0.80 该放行 ②（非严格）")
+	}
+}
+
 // TestRule5IsTheEngineRule 钉住「引擎只下单 ⑤」这一条: ⑤ 是 ④ 的**真子集**
 // （σ 腿多了 sd ≥ 40 的门），且 ④∖⑤ 的样本正是文档 §4.3 里被砍掉的那批。
 func TestRule5IsTheEngineRule(t *testing.T) {
 	cfg := DefaultConfig()
 	// sd=50 ≥ 40 → 两格都过; sd=39.9 → 只过 ④。
 	for _, sd := range []float64{50, 39.9} {
-		r := EvalRules(cfg, 0.92, sd, sd, true) // dev = sd ⇒ σ 腿刚好成立
+		r := EvalRules(cfg, StageT60, 0.92, sd, sd, true) // dev = sd ⇒ σ 腿刚好成立
 		if !r.Rule4() {
 			t.Fatalf("sd=%.1f: dev=sd 时 ④ 应成立, 得到 %+v", sd, r)
 		}

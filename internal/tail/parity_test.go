@@ -32,6 +32,9 @@ import (
 //     「引擎落一行 hist_bps=0 的观测」与「oracle 一行不产」的分水岭, 不跳过必然对不上。
 //   - 事件过滤 = 无 outcome 或无锚跳过（13_tail_sweep.py 的 snapshots 同款）
 //   - 判定     = tail.Engine.BeginWindow + ProcessTick 逐 tick 驱动
+//   - **价格腿** = 本包自己的段相关口径（T=150 段严格 > 0.80, 其余段 ≥ 0.80,
+//     见 decide.PriceLeg）——oracle 的 r5(strict_price=True) 是它的 python 孪生;
+//     本文件不复制规则, 只喂数据
 //
 // 行 ↔ oracle 的对应关系（stage 字段直接可比, 不再需要按 kind 反推）:
 //
@@ -51,17 +54,23 @@ var parityStages = []struct {
 	wr    float64 // 信号胜率（%）
 	pl    float64 // 14 天 P&L（U, 每笔 2U）
 }{
-	{StageT150, 3638, 1220, 93.934426, 16.022637},
-	{StageT60, 2414, 568, 99.119718, 15.756180},
-	{StageListen, 347, 347, 97.982709, 3.895932},
+	{StageT150, 3638, 1208, 94.039735, 15.022637},
+	{StageT60, 2426, 577, 99.133449, 16.153977},
+	{StageListen, 348, 348, 97.988506, 3.916134},
 }
 
 // parityTotals = 三段合计（oracle 第六节末行）。
+//
+// ⚠️ 这组数字是 **2026-09-26 T=150 价格腿改严格大于之后**的值（oracle 同日更新）。
+// 改前的对应值: t150 1220 / 93.934426 / 16.022637、t60 2414 / 568 / 99.119718 /
+// 15.756180、listen 347 / 347 / 97.982709 / 3.895932、合计 6399 / 2135 / 95.971897 /
+// 35.674749，见 git 历史。变动 = 12 笔 0.80 入场的 t150 信号被拦下, 其中 9 笔在 t60
+// 段以更高价重新入场、1 笔落到监听段 ⇒ 行数 +13、信号 −2、合计 P&L −0.58U。
 const (
-	parityAllRows   = 6399
-	parityAllSig    = 2135
-	parityAllWR     = 95.971897
-	parityAllPL     = 35.674749
+	parityAllRows   = 6412
+	parityAllSig    = 2133
+	parityAllWR     = 96.061885
+	parityAllPL     = 35.092748
 	parityWindows   = 3640 // 参与的窗数（有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ）
 	parityNoSigma   = 3    // σ 未就绪整窗跳过（决策 #13 的前置闸）
 	parityTolerance = 5e-5 // oracle 打印 6 位小数 ⇒ 容差取其末位之半; 实测两边差 <1e-9
