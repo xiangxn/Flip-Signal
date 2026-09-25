@@ -39,9 +39,11 @@ func TestTailRoutes(t *testing.T) {
 	mux := s.routes()
 
 	// 单页入口: / 出 HTML; 其它路径 404（不吞掉未知路由）
+	// 标题钉「Tail 监控」——页面品牌已从「扫尾盘」改为「Tail」（策略中文名仍叫扫尾盘，
+	// 见 CLAUDE.md；变的是页面，不是策略）。
 	if w := serve(t, mux, "/"); w.Code != http.StatusOK ||
 		!strings.Contains(w.Header().Get("Content-Type"), "text/html") ||
-		!strings.Contains(w.Body.String(), "扫尾盘") {
+		!strings.Contains(w.Body.String(), "<title>Tail 监控</title>") {
 		t.Fatalf("GET / = %d %q（body 前 120 字符: %.120s）",
 			w.Code, w.Header().Get("Content-Type"), w.Body.String())
 	}
