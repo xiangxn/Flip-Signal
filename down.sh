@@ -7,7 +7,7 @@ source .env
 #   v4  — 下载 /root/lastrading/data/v4（dog@0.2 触底观测 JSONL）到 ./data
 #   v3  — 下载 /root/lastrading/data/v3（旧 flip 信号 JSONL，兼容保留）
 #   btc — 下载 /root/lastrading/data 到 ./data（旧采集数据，兼容保留）
-#   eth — 下载 /root/lastrading/eth/data 到 ./data（兼容保留）
+#   eth — 下载 /root/lastrading/data/eth 到 ./data（走默认分支，同采集器默认输出目录）
 
 SYMBOL="${1:-}"
 
@@ -25,9 +25,6 @@ case "$SYMBOL" in
         ;;
     btc)
         REMOTE_DIR="/root/lastrading/data"
-        ;;
-    eth)
-        REMOTE_DIR="/root/lastrading/eth/data"
         ;;
     v4live)
         REMOTE_DIR="/root/lastrading/data/v4live"
