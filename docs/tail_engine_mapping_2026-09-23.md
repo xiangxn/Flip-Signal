@@ -29,7 +29,7 @@
 | `T150 = 150`（第一段判定点） | `Tail.T150Rem` | `tail.t150_rem` | 150 | 首个「`rem ≤ 150` 且 spot 可算」的**有效** tick 判一次 ⑤，**达标即下单**（2026-09-24 前这里只记一行原始帧） |
 | `T60 = 60`（第二段判定点 = 策略本体） | `Tail.T60Rem` | `tail.t60_rem` | 60 | 第一段没出信号时，首个「`rem ≤ 60` 且 spot 可算」的**有效** tick 再判一次 ⑤ |
 | 监听段 `scan60`（16 的 B 变体） | —（复用 `Tail.T60Rem`） | —（**无独立键**） | 60 | 前两段都没信号 ⇒ 此后**每秒**判 ②（价格腿 ∧ `dev ≥ 63`），达标即下单（2026-09-24 前是只记录的对账行，见 §2.4） |
-| `PRICE_MIN = 0.80` | `Tail.PriceMin` | `tail.price_min` | 0.80 | 热门侧**有效价**（ask 优先 / bid 兜底）≥ 此值——**全部五格与 ② 的前置**（见 §3.1） |
+| `PRICE_MIN = 0.80` | `Tail.PriceMin` | `tail.price_min` | 0.80 | 热门侧**有效价**（ask 优先 / bid 兜底）过此值——**全部五格与 ② 的前置**（见 §3.1）。⚠️ **比较符随段而变**（2026-09-26，决策 #26）：T=150 段 `> 0.80`（严格），T=60 与监听段 `≥ 0.80`；本键只给阈值不给算子（`internal/tail.PriceLeg`） |
 | `DEV_USD = 63` | `Tail.DevMinUSD` | `tail.dev_min_usd` | 63 | 位移腿：`dev ≥ 63 美元` 即放行 |
 | `SIGMA_USD = 40` | `Tail.SigmaMinUSD` | `tail.sigma_min_usd` | 40 | σ 腿门槛：`sd ≥ 40 美元` 才允许「dev ≥ sd」放行（⑤ 相对 ④ 的唯一差别） |
 | `STAKE = 2.0` | `Tail.Stake` | `tail.stake` | 2 | USDC/注。paper 股数 `= Stake/HotAsk` **精确除**（与回测 `shares = 2/fill` 恒等）；live 下单量由 `trading.OrderSpecForObs` 取 `floor2`（既有口径） |
