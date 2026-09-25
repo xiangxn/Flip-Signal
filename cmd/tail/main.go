@@ -6,7 +6,7 @@
 // 或「1σ 折美元 ≥40 且位移 ≥ 1σ」（⑤）；监听段只要求前者（②）。
 //
 // 数据源与 flip 完全相同：PM CLOB 订单簿（UP/DOWN 四档）+ Chainlink TWAP-60（锚/σ）
-// + Binance BTCUSDT spot（位移腿）。锚走决策 #15 的精确取锚（边界那一秒的推送,
+// + Binance spot（位移腿；同样由 runtime.slug_prefix 经 feed.Asset 派生）。锚走决策 #15 的精确取锚（边界那一秒的推送,
 // 500ms × 40 = 20s 预算）；σ 走 flip.HistState（前 ≤18 已完窗 |close−anchor| 均值）。
 //
 // ⚠️ 每窗走**三段递进判定链**（2026-09-24 用户决定, a.md；行数 1~3）:
@@ -332,6 +332,10 @@ func main() {
 		log.Printf("⚠️  [Config] %s", w)
 	}
 
+	// ── 资产参数（由 runtime.slug_prefix 派生：slug / Binance 交易对 / Chainlink 符号）──
+	// 一处配置驱动三处命名，换标的（eth-updown-5m 等）不改代码，见 feed.Asset。
+	asset := feed.AssetFromSlug(cfg.Runtime.SlugPrefix)
+
 	// ── Polymarket 客户端（未写 owner_key 则生成临时密钥，只读运行）──
 	cfgSDK := cfg.SDK
 	readOnly := false
@@ -420,12 +424,13 @@ func main() {
 	}()
 
 	// ── Chainlink TWAP-60（anchor/σ 数据源，结算口径）──
-	// symbol 后缀: SDK 将 "BTC" 解析为 30s 窗口，须显式 "BTC_60" 才订阅 twap_sixty。
-	twapAdapter := feed.NewTwapAdapter(client, "BTC", sdk.ChainlinkTwapWindowSixty, twapMaxStale)
+	// symbol 后缀: SDK 将资产符号解析为 30s 窗口，须显式 "_60" 才订阅 twap_sixty
+	// （TwapAdapter 内部拼 `<symbol>_<windowSec>`）。
+	twapAdapter := feed.NewTwapAdapter(client, string(asset.Chainlink), sdk.ChainlinkTwapWindowSixty, twapMaxStale)
 	twapAdapter.StartWithMonitor(ctx)
 
-	// ── Binance BTCUSDT spot（位移腿现货参考价，不出单）──
-	binance := feed.NewBinanceAdapterWithConfig(cfg.Binance)
+	// ── Binance spot（位移腿现货参考价，不出单；交易对由资产派生）──
+	binance := feed.NewBinanceAdapterWithConfig(asset.ApplyBinance(cfg.Binance))
 	go func() {
 		backoff := time.Second
 		for {
@@ -493,7 +498,7 @@ func main() {
 	// ——**不再往 gamma 预先注册**: 两个注册点抢同一行会有一边报「结算回填未命中」。
 	anchors := settle.NewAnchors()
 	resolver := settle.New(anchors, settle.Options{
-		Fetch: feed.NewPricePairFetcher(client, sdk.BTC, sdk.Fiveminute, twapLookbackSeconds),
+		Fetch: feed.NewPricePairFetcher(client, asset.Chainlink, sdk.Fiveminute, twapLookbackSeconds),
 		Pending: func() []settle.Row {
 			sigs := recorder.PendingSignals()
 			rows := make([]settle.Row, 0, len(sigs))
@@ -588,7 +593,7 @@ func main() {
 
 	// σ 启动预热（本地 tailwin_*.jsonl 优先, 不足/陈旧回退官方网络预热）
 	hist := flip.NewHistState()
-	warmupSigma(hist, recorder, client)
+	warmupSigma(hist, recorder, client, asset)
 
 	log.Println("========================================")
 	if effMode == "live" {
@@ -1061,7 +1066,7 @@ func warnLiveStartup(r *tail.Recorder) {
 // ⚠️ 两族各自独立预热（flip 读 windows_*, tail 读 tailwin_*）: 若两族都要「回测
 // 口径的历史 σ」，网络预热取的是官方 TWAP 历史（同源）; 本地预热则各读各的——
 // 同一目录下互不串读（前缀不同），分别部署时也各自完整。
-func warmupSigma(hist *flip.HistState, r *tail.Recorder, client *sdk.PolymarketClient) {
+func warmupSigma(hist *flip.HistState, r *tail.Recorder, client *sdk.PolymarketClient, asset feed.Asset) {
 	seeded := 0
 	if wins := r.RecentWindows(flip.HistWindows); len(wins) > 0 {
 		if block := flip.RecentBlock(wins, int64(2*windowSec*1000)); len(block) >= flip.HistMin &&
@@ -1081,7 +1086,7 @@ func warmupSigma(hist *flip.HistState, r *tail.Recorder, client *sdk.PolymarketC
 	if seeded == 0 {
 		go func() {
 			log.Printf("[Cycle] σ 网络预热: 本地窗口不足/断档/陈旧，拉取官方 TWAP 历史范围（≤%d 窗）...", flip.HistWindows)
-			vals := feed.FetchTwapRanges(client, flip.HistWindows, windowSec, twapLookbackSeconds)
+			vals := feed.FetchTwapRanges(client, asset.Chainlink, flip.HistWindows, windowSec, twapLookbackSeconds)
 			hist.Seed(vals)
 			log.Printf("[Cycle] σ 预热完成: %d 窗可用", len(vals))
 		}()

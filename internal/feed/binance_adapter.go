@@ -42,14 +42,19 @@ type BinanceMarketData struct {
 
 // BinanceConfig holds configuration for the Binance adapter.
 type BinanceConfig struct {
-	Symbol        string `mapstructure:"symbol"`          // e.g. "BTCUSDT"
+	// Symbol 交易对。**留空 = 由资产派生**（btc → BTCUSDT、eth → ETHUSDT，
+	// 见 Asset.ApplyBinance）——这样换标的只需改一处（资产/slug 前缀）。
+	// 显式填写则优先（应对引号货币不是 USDT 的标的）。
+	Symbol        string `mapstructure:"symbol"`
 	StreamBaseURL string `mapstructure:"stream_base_url"` // e.g. "wss://stream.binance.com:9443"
 	RestBaseURL   string `mapstructure:"rest_base_url"`   // e.g. "https://data-api.binance.vision"
 }
 
+// DefaultBinanceConfig 返回端点默认值；Symbol 有意留空（= 跟随资产，由调用方
+// 经 Asset.ApplyBinance 补齐）。直接用零配置构造适配器时由
+// NewBinanceAdapterWithConfig 兜底成 BTCUSDT（standalone 用例，不接引擎）。
 func DefaultBinanceConfig() BinanceConfig {
 	return BinanceConfig{
-		Symbol:        "BTCUSDT",
 		StreamBaseURL: "wss://data-stream.binance.vision",
 		RestBaseURL:   "https://data-api.binance.vision",
 	}
@@ -97,7 +102,9 @@ func NewBinanceAdapter() *BinanceAdapter {
 
 func NewBinanceAdapterWithConfig(cfg BinanceConfig) *BinanceAdapter {
 	if cfg.Symbol == "" {
-		cfg.Symbol = "BTCUSDT"
+		// 兜底：正常路径由 Asset.ApplyBinance 填好（Symbol 留空 = 跟随资产）。
+		// 走到这里说明调用方没接资产参数——退回 BTCUSDT 而不是订阅空交易对。
+		cfg.Symbol = AssetFor("btc").Binance
 	}
 	if cfg.StreamBaseURL == "" {
 		cfg.StreamBaseURL = "wss://stream.binance.com:9443"

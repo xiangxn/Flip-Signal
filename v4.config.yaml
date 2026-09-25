@@ -152,8 +152,10 @@ risk:
 # Binance 数据源（浅洞腿输入）
 # ---------------------------------------------------------------------------
 binance:
-  # 交易对。⚠️ 不影响引擎硬编码的 TWAP 符号 "BTC"（Chainlink crypto-price 口径）
-  symbol: "BTCUSDT"
+  # 交易对。**留空 = 由 runtime.slug_prefix 派生**（btc-updown-5m → BTCUSDT、
+  # eth-updown-5m → ETHUSDT，见 internal/feed/asset.go）——换标的改一处即可。
+  # 显式填写则优先（应对引号货币不是 USDT 的标的，如 1000XXXUSDT）。
+  symbol: ""
 
   # WebSocket 流地址（trade + depth20 多流复用）
   stream_base_url: "wss://data-stream.binance.vision"

@@ -311,10 +311,12 @@ func (t *TwapAdapter) Latest() (price float64, ageMs int64) {
 
 // FetchTwapRanges 通过 Polymarket crypto-price 接口拉取最近 windowN 个
 // 完整窗口的官方 TWAP 开/收盘价，返回各窗口振幅 |close-open|（按时间升序）。
-// 用于启动时预热 σ 滚动窗（cmd/flip main 的 histState），消除冷启动等待。
-// twapLookbackSeconds 为 TWAP 回看窗口秒数（btc-updown-5m 为 60）。
+// 用于启动时预热 σ 滚动窗（cmd/flip/cmd/tail main 的 histState），消除冷启动等待。
+// symbol 为 Chainlink 资产符号（资产名派生，见 Asset，如 BTC / ETH）。
+// twapLookbackSeconds 为 TWAP 回看窗口秒数（5 分钟窗为 60）。
 // 个别窗口数据缺失时跳过；全部缺失时返回空切片（调用方回退冷启动）。
-func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapLookbackSeconds int64) []float64 {
+func FetchTwapRanges(client *sdk.PolymarketClient, symbol sdk.CryptoPriceSymbol,
+	windowN int, windowSec, twapLookbackSeconds int64) []float64 {
 	// 对齐到最近的完整窗口边界，往前取 windowN 个已结束的窗口
 	now := time.Now().UTC()
 	aligned := now.Unix() / windowSec * windowSec
@@ -329,7 +331,7 @@ func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapL
 		start := time.Unix(aligned-int64(k)*windowSec, 0).UTC()
 		end := start.Add(time.Duration(windowSec) * time.Second)
 		openPrice, closePrice := client.FetchOpenPrice(
-			sdk.BTC, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
+			symbol, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
 		if openPrice <= 0 || closePrice <= 0 {
 			// 该接口失败多为 Polymarket 后端上游 Chainlink 限流——上游 429 被包成
 			// HTTP 400（body: Chainlink API error 429），SDK 仅对 429 重试故不生效。
@@ -337,7 +339,7 @@ func FetchTwapRanges(client *sdk.PolymarketClient, windowN int, windowSec, twapL
 			log.Printf("[Twap] ⚠️ 历史窗口 %s 官方价格缺失（上游限流？），2s 后重试", start.Format("15:04"))
 			time.Sleep(2 * time.Second)
 			openPrice, closePrice = client.FetchOpenPrice(
-				sdk.BTC, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
+				symbol, start, end, sdk.Fiveminute, true, int(twapLookbackSeconds))
 			if openPrice <= 0 || closePrice <= 0 {
 				log.Printf("[Twap] ⚠️ 历史窗口 %s 官方价格缺失，跳过", start.Format("15:04"))
 				continue
