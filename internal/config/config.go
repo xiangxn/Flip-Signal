@@ -62,6 +62,11 @@ type RuntimeConfig struct {
 	TailDashboardAddr string `mapstructure:"tail_dashboard_addr"`
 	// SlugPrefix Polymarket slug 前缀（运行时拼接 "-<unix_ts>"; 原 -slug）
 	SlugPrefix string `mapstructure:"slug_prefix"`
+	// EventsDir 事件级原始采集的落盘目录（数据格式 v2，与 cmd/collect 同构）。
+	// **留空串 = 关闭采集**；默认 "data/events" 即默认开启（cmd/tail 兼作采集器,
+	// 见 cmd/tail/events.go 与决策 #27）。一标的一目录——不要把两个标的或两族
+	// 进程指到同一个目录（同 start_time 的行会被 WriteUniqueEvent 判重跳过）。
+	EventsDir string `mapstructure:"events_dir"`
 }
 
 // FeedConfig 保存数据源新鲜度闸（book 阈值在 flip 节，因其属回测口径常量）。
@@ -129,6 +134,10 @@ func defaults() *AppConfig {
 			// 扫尾盘 Dashboard 同理留空（部署时命令行 -dashboard 覆盖, 或写进 config.local.yaml）
 			TailDashboardAddr: "",
 			SlugPrefix:        "btc-updown-5m",
+			// 原始采集默认**开启**（2026-09-27 用户需求：cmd/collect 早已停采,
+			// 「我们需要更多的原始数据」）。落盘在独立 goroutine 里尽力而为,
+			// 不影响交易路径; 留空串即关掉。
+			EventsDir: "data/events",
 		},
 		Flip: flip.DefaultConfig(), // 策略参数单一真相（含 MaxBookLatMs=300）, 见 internal/flip/config.go
 		// 扫尾盘（cmd/tail）参数: 与 flip 各自独立成节——两个引擎可分别部署,

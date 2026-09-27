@@ -65,6 +65,9 @@
   必须先定 stake ≥ 5U（每笔风险 2.5 倍，用户决定）+ 拿 1 笔小单验证下限；
   纸面 WR 量级不能直接外推到 live（live 是挂单等成交，成交样本天然偏向「热门侧走弱」，
   与回测「快照瞬间即成交」**不是同一个估计量**）。
+- **兼作数据采集器**：本进程默认把每秒原始采样按**数据格式 v2** 落 `runtime.events_dir`
+  （默认 `data/events`，与 `cmd/collect` 同构；留空串 = 关闭）——BTC 的 `cmd/collect`
+  已停，离线研究靠它续料。见决策 #27 与 `docs/tail_events_2026-09-27.md`。
 - **待办**：① 纸面判决改离线脚本（判决卡已随整合改造整删，脚本**未写**）；
   ② 两族合并熔断未实现（flip/tail 各一条独立 −24U 线，等效 48U）；
   ③ 止损腿未落引擎（见决策 #24）。
@@ -92,7 +95,8 @@ FlipSignal/
 ├── cmd/flip/                         # 狗@0.2 引擎主入口（纸面/实盘同源, -mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
 ├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
-│   └── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市 + 窗口运行时载体
+│   ├── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市 + 窗口运行时载体（采集器 4 处接线）
+│   └── events.go                     # **兼作数据采集器**: 每秒原始采样落 events_*（数据格式 v2, 决策 #27）+ events_test.go
 ├── cmd/collect/                      # 数据格式 v2 高频采集器（**任意标的**）
 │   └── main.go                       # 6 flag: -config/-asset/-slug/-symbol/-output/-custom-feature；资产由 feed.Asset 派生
 ├── cmd/compact/                      # 采集数据的合并修正（把 settlement_correction 行并回事件行; 与标的无关）
@@ -149,6 +153,7 @@ FlipSignal/
 │   │   ├── decide.go                 # 纯函数 HotBook（ask 优先/bid 兜底）/ SgnFor / DevUSD / SigmaUSD / EvalRules + PriceLeg + Rule1()…Rule5()
 │   │   ├── engine.go                 # 三段递进判定链（Watching→Await60→Listening→Done）+ Resume 崩溃续跑, ProcessTick 返回 0~1 行
 │   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* / tailhold_* 四前缀（独立于 flip 三前缀, 决策 #9 红线）+ recomputePnL
+│   │   │                             # ⚠️ 另有第五路输出 events_*（cmd/tail/events.go 的采集器, 走 internal/collect, 与本层无关）
 │   │   ├── hold.go                   # 持仓监察（纯函数 HoldWatchRow + HoldRow）: 信号成交后逐 tick 记持仓侧盘口, **只记录不判定**
 │   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像; HandleDecision 单入口）
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
@@ -185,6 +190,7 @@ FlipSignal/
 | `book_empty_ask_2026-09-24.md` | 尾盘赢家侧 ask 整侧撤空（决策 #21） |
 | `collect_eth_sync_2026-09-25.md` | 采集管线回归 + 多标的参数化（决策 #23） |
 | `eth_data_review_2026-09-25.md` | ETH 服务器数据复核 + 阈值重标定待办（决策 #25） |
+| `tail_events_2026-09-27.md` | cmd/tail 兼作采集器：口径对齐表 / 三条红线 / 已知洞（决策 #27） |
 
 ### 脚本地图（`python/v4/`）
 
@@ -367,11 +373,13 @@ replace github.com/xiangxn/go-polymarket-sdk => /tmp/go-polymarket-sdk
 ### 测试与常用命令
 
 ```bash
-go test ./internal/... -count=1        # 引擎/编排/记录器/盘口工具/结算/配置（含 YAML 漂移守卫）
+go test ./internal/... ./cmd/... -count=1  # 引擎/编排/记录器/盘口工具/结算/配置 + cmd/tail 采集器（含 YAML 漂移守卫）
 go test ./internal/... -race           # 同上 + 竞态（含扫尾盘 parity 全量重放, ~2min）
+go test ./cmd/tail/ -race              # 采集器的窗口换装/成交路由竞态回归
 go test ./internal/tail/ -run TestParityBacktest -v   # 扫尾盘 Go↔py 逐窗对账（opt-in; data/btc 缺失即 skip）
 go build ./...
 go run ./cmd/flip -config v4.config.yaml -dashboard :8090     # 运行引擎 + Dashboard
+go run ./cmd/tail -config v4.config.yaml                      # 扫尾盘（**兼采集 events_* → data/events**）
 go run ./cmd/collect -config v4.config.yaml -asset eth        # 采集 ETH → data/eth
 
 # python 分析/回测脚本一律用项目内 venv（系统 python3 无 numpy/pandas）
@@ -380,6 +388,7 @@ python/venv/bin/python python/v4/06_oos_review.py                      # 09-15 �
 python/venv/bin/python python/v4/07_source_health_check.py [--bt-scan] # 数据源健康度审计
 python/venv/bin/python python/v4/13_tail_sweep.py                      # 扫尾盘早期回测
 python/venv/bin/python python/v4/24_asset_data_check.py --asset eth    # 采集数据校验（任意标的）
+python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/events   # 校验 cmd/tail 采下来的事件行
 ```
 
 > ⚠️ `internal/feed` 的 `TestRecoverAnchorSettleGuard` 是**既有**的时序敏感用例
@@ -686,6 +695,33 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset eth    # 采集�
       `reject_reason` 自相矛盾）。比较符**故意不做成配置键**（做成键会让人按行情调它）。
     - 与「参数不可调」不冲突的理由只有一条：**它是用户对规则本身的决定，不是拿回测网格挑出来的
       参数**（`price_min` 阈值一字未动，改的是算子）。
+27. **cmd/tail 兼作数据采集器：每秒原始采样落 `events_*`（数据格式 v2）**（2026-09-27 用户需求;
+    `cmd/tail/events.go` + `cmd/tail/main.go` 4 处接线; 完整口径表与已知洞见
+    `docs/tail_events_2026-09-27.md`）。**动机**：BTC 原始采集（`cmd/collect`）自 2026-08-31
+    起已停 ⇒ 离线研究（止损成交换手、成交量、OFI…）无米下锅，而**常驻进程本来就在采**。
+    - **默认开启**：`runtime.events_dir` 默认 `"data/events"`，留空串 = 关闭。服务器那份手工
+      维护的 tail 配置没有这个键 ⇒ 走默认值 ⇒ **部署即生效**，不必改配置（也没加任何 flag）。
+    - **采样不挂在交易 tick 循环里**：每窗一个独立 goroutine 自带 1s ticker（循环内有同步
+      gamma 预取、live POST、持仓监察落盘，卡顿会丢 tick），终点精确补采一次，再等精确收盘
+      推送（≤10s）→ 组装 → `SettlementWorker.Submit`。两个 goroutine 入口各一个 `recover`：
+      **采集侧 panic 绝不允许杀活钱进程**，只停用采集。
+    - **与 `data/btc` 逐字段同构**，口径全部照 `cmd/collect`：锚来源词表**必须翻译**
+      （`feed.AnchorSourceStream → collect.SourcePush`——两个包的 `"stream"` 同名不同义，
+      不翻译则校验 G 段白丢一道红线 + 每窗白跑官方修正）、`outcome` 平局算 Up、
+      close 推送缺失回退流值/锚价、tick 用 `LatestData()` **原始值**（不套引擎的陈旧钳零——
+      落 0 是校验 D 段硬 FAIL）。
+    - **成交按自身时戳选桶、用被选中那个桶自己的 token 表**映射 YES/NO（本族 upTok/downTok
+      每窗换装，不能像 `cmd/collect` 那样用全局 prev 变量）；边界后 1~2s 才推送的尾盘笔由此
+      回填进上一窗。
+    - **三条落盘红线（宁可留洞，不写脏行）**：锚 ≤ 0 / `binance_open` ≤ 0 / tick 数 < 293
+      （校验 `TICK_MIN`）或首 tick `rem` < 295 ⇒ 整窗丢弃并各打一行 ⚠️。
+    - **跳窗路径从不 BeginWindow**（`no_sigma`/`late`/`no_market`/`no_token`/`dup_record`）
+      ⇒ 那些窗一行都没有 ⇒ **下游按 `start_time` 对齐，不能按行数/连续性假设**。
+    - **顺带修掉的隐患**：`feed.FetchKlineOpenPrice` 失败时 adapter 里留的是**上一窗**的开盘价
+      （静默陈旧）⇒ 改成返回 `float64`（失败返 0），调用方一律用返回值（`cmd/collect` 同源隐患
+      一并修）。
+    - **有意不重构 `cmd/collect`、不下沉 `internal/collect`**：下沉会让格式层反向依赖 feed 的
+      数据源层；两族同目录双写会互相盖行（同 `start_time` 判重跳过）。这是刻意的重复。
 
 ---
 
@@ -705,9 +741,15 @@ go run ./cmd/flip
 go run ./cmd/flip -config config.local.yaml -stake 5 -mode live
 
 # 扫尾盘（第二条策略线, 独立进程可并行跑；自带 Dashboard, 无 -encrypt）
+# **兼作数据采集器**: 默认把每秒原始采样按 v2 格式落到 runtime.events_dir（data/events）
 go run ./cmd/tail -config v4.config.yaml -dashboard :8091
 go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
 ```
+
+采集关闭只认一个开关: 配置文件 `runtime.events_dir: ""`（没有独立 flag）。
+启动横幅打印 `[Events] 📥 原始采集开启: <目录>`；每窗收尾打印
+`[Events] 📥 窗口 <slug> 采集完成: ticks=… trades=… close=…(<src>) outcome=…`，
+被红线拦下则打印 `[Events] ⚠️ 窗口 <slug> 不落盘: <原因>`（丢窗必须有痕，见决策 #27）。
 
 ### CLI flag（`cmd/flip` main() 只有这 4 个引擎参数 + 1 个工具 flag）
 
@@ -736,6 +778,7 @@ go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
 | `runtime.tail_dashboard_addr` | `""` | **tail 进程**的 Dashboard 监听地址（独立键） |
 | `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录；**flip 与 tail 可共用**——前缀各自不撞） |
 | `runtime.slug_prefix` | `btc-updown-5m` | 市场 slug 前缀 |
+| `runtime.events_dir` | `data/events` | **cmd/tail 的原始采集目录**（数据格式 v2，与 `cmd/collect` 同构）。留空串 = 关闭；一标的一目录（见决策 #27） |
 | `tail.*` | — | 扫尾盘 7 键——⚠️ **全部不可调**（见项目概述）|
 
 启动校验（`internal/config/validate.go`，判**最终生效值**）：三阈值必须 > 0、

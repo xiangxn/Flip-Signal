@@ -559,6 +559,13 @@ func main() {
 		return upBook, downBook
 	}
 
+	// ── 原始数据采集（cmd/tail 兼作采集器; 见 cmd/tail/events.go 与决策 #27）──
+	// 每秒原始盘口/Binance 微观数据按「数据格式 v2」落盘（与 data/btc 同构），供离线
+	// 研究（止损成交换手、成交量、OFI…）。采样在**独立 goroutine** 里跑，交易 tick
+	// 循环一行不改；落盘失败只记日志。runtime.events_dir 留空即关闭（默认 data/events）。
+	ev := newEventCollector(ctx, cfg.Runtime, client, asset, binance, twapAdapter, runtime.books)
+	go ev.ConsumeTrades(ctx, monitor)
+
 	// ── GTC 挂单跟踪 ──
 	// 撤单点 = **闭市**（trading.CancelAtClose）: 快照在 rem≈60 产出，挂单只等 ~1 分钟
 	// 就撤等于白挂（且会把「热门侧走弱」的那批位置全部让出）。挂到闭市由 CLOB 自动
@@ -796,6 +803,8 @@ func main() {
 		endTime := nextStart.Add(windowSec * time.Second)
 		// 换装 Dashboard 的窗口现场（锚可见性一并清零, 由取锚通道稍后注入）
 		runtime.setWindow(engine, conditionID, slug, nextStart.Unix())
+		// 采集器换装到本窗并起采样 goroutine（跳窗路径不会走到这里 ⇒ 那些窗无事件行）
+		ev.BeginWindow(ctx, conditionID, slug, nextStart, upTokenID, downTokenID)
 
 		var (
 			cancelAnch context.CancelFunc
@@ -816,6 +825,8 @@ func main() {
 				// 边界锚入结算表（无条件: 无论引擎是否接纳, 这条值就是官方 open/close
 				// 口径, 结算要用——引擎拒收只代表本窗不再判定, 不影响已成交行的结算）。
 				anchors.Put(nextStart.Unix(), r.Price)
+				// 同一条锚喂采集器（同样无条件: 事件行的 twap_open_price 就是它）。
+				ev.SetAnchor(nextStart.Unix(), r.Price, r.Source)
 				if !engine.UpgradeAnchor(r.Price, bps) {
 					continue // 本窗已产出帧（锚已冻结）或窗口已结束
 				}

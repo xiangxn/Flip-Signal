@@ -50,6 +50,13 @@ runtime:
   # Polymarket 市场 slug 前缀，运行时拼接 "-<unix_timestamp>"
   slug_prefix: "btc-updown-5m"
 
+  # 事件级原始采集目录（数据格式 v2: events_YYYY-MM-DD.jsonl，每窗一行 ticks+trades，
+  # 与 cmd/collect 的输出同构）。**cmd/tail 兼作采集器**：常驻进程顺手把每秒原始盘口/
+  # Binance 微观数据采下来，见 cmd/tail/events.go 与 CLAUDE.md 决策 #27。
+  # 留空串 = 关闭采集。⚠️ 一标的一目录: 不要把两个标的、或 cmd/collect 的 -output
+  # 指到同一目录（同 start_time 的行会判重跳过）。
+  events_dir: "data/events"
+
 # ---------------------------------------------------------------------------
 # 策略参数（1:1 对应 flip.Config；标定出处 python/v4/01_backtest_r1.py）
 # ---------------------------------------------------------------------------
