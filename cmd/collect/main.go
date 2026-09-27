@@ -445,8 +445,9 @@ func main() {
 		klineCh := make(chan float64, 1)
 		go func() {
 			time.Sleep(2 * time.Second)
-			binance.FetchKlineOpenPrice()
-			klineCh <- binance.LatestData().OpenPrice
+			// 用返回值而不是 LatestData().OpenPrice: 后者在取数失败时保留**上一窗**
+			// 的值（静默陈旧），会把错的开盘价写进本窗的 binance_open。
+			klineCh <- binance.FetchKlineOpenPrice()
 		}()
 
 		// 步骤 4: 使用预取的市场信息。

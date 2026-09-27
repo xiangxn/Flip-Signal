@@ -161,46 +161,55 @@ func (b *BinanceAdapter) dialAndSet() error {
 	return nil
 }
 
-// FetchKlineOpenPrice fetches the current 5-minute kline open price from Binance REST.
-// Called at the start of each market cycle (with 1-2s delay after window start).
-// This replaces the previous value so each new 5-minute window gets its own open price.
 // klineClient 是 K 线接口专用 client：5s 超时防止网络异常时
 // FetchKlineOpenPrice 无限期阻塞调用方（采集/引擎主循环）。
 var klineClient = &http.Client{Timeout: 5 * time.Second}
 
-func (b *BinanceAdapter) FetchKlineOpenPrice() {
+// FetchKlineOpenPrice fetches the current 5-minute kline open price from Binance REST.
+// Called at the start of each market cycle (with 1-2s delay after window start).
+// This replaces the previous value so each new 5-minute window gets its own open price.
+//
+// ⚠️ **失败返回 0，调用方一律用返回值**：adapter 内的 `data.OpenPrice` 字段在失败时
+// 保留的是**上一窗**的值（静默陈旧），拿它当本窗的 binance_open 会写错值，且校验脚本
+// 的 D 段要求「binance_open 与 5m K 线开盘价逐位相等」——错一个窗就是硬 FAIL。
+// 返回值语义与调用方的初值（窗口起点现货价）天然接续：0 = 本次没取到，沿用初值。
+func (b *BinanceAdapter) FetchKlineOpenPrice() float64 {
 	url := fmt.Sprintf("%s/api/v3/klines?symbol=%s&interval=5m&limit=1",
 		b.cfg.RestBaseURL, b.cfg.Symbol)
 
 	resp, err := klineClient.Get(url)
 	if err != nil {
 		log.Printf("[BinanceAdapter] fetch kline error: %v", err)
-		return
+		return 0
 	}
 	defer resp.Body.Close()
 
 	var klines [][]any
 	if err := json.NewDecoder(resp.Body).Decode(&klines); err != nil {
 		log.Printf("[BinanceAdapter] decode kline error: %v", err)
-		return
+		return 0
 	}
 
 	if len(klines) == 0 || len(klines[0]) < 2 {
 		log.Printf("[BinanceAdapter] empty kline response")
-		return
+		return 0
 	}
 
 	openStr, ok := klines[0][1].(string)
 	if !ok {
-		return
+		return 0
 	}
 
 	openPrice := parseFloat(openStr)
+	if openPrice <= 0 {
+		return 0
+	}
 	b.dataMu.Lock()
 	b.data.OpenPrice = openPrice
 	b.dataMu.Unlock()
 
 	log.Printf("[BinanceAdapter] %s 5m kline open: %.2f", b.cfg.Symbol, openPrice)
+	return openPrice
 }
 
 func (b *BinanceAdapter) LatestData() BinanceMarketData {
@@ -217,6 +226,11 @@ func (b *BinanceAdapter) LatestData() BinanceMarketData {
 	return d
 }
 
+// ConsumeVolume 取走「自上次调用以来」累计的主买/主卖量（读取即清零）。
+//
+// ⚠️ **单一消费者**: 语义是「取走」，两个调用方（如引擎与采集器）并发调用会各拿到
+// 一半的秒增量（谁先谁得），两边的量字段就都错了。本仓库每个进程只有一个消费者——
+// cmd/collect 是采集循环；cmd/tail 是事件采集器（cmd/tail/events.go），引擎侧不读量。
 func (b *BinanceAdapter) ConsumeVolume() (buyAcc, sellAcc float64) {
 	b.volMu.Lock()
 	defer b.volMu.Unlock()
