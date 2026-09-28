@@ -533,6 +533,8 @@
       // 未成交列: 无仓位（被闸/被拒/0 成交/挂单未定稿）, 不进胜率与 P&L
       '<td class="' + noexecCls + '">' + r.noexec + '</td>' +
       '<td>' + r.pending + '</td>' +
+      // 输列: 有仓位的已结算信号里判负的注数（>0 标红 = 一眼看出哪天在输）
+      '<td class="' + (r.lost > 0 ? 'neg' : 'muted') + '">' + r.lost + '</td>' +
       '<td>' + wr + '</td>' +
       '<td class="' + pnlCls + '">' + fmtPnl(r.pnl) + '</td></tr>';
   }
