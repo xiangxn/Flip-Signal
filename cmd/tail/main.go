@@ -537,7 +537,6 @@ func main() {
 		Live:         effMode == "live",
 		Stake:        cfg.Tail.Stake,
 		MaxDailyLoss: cfg.Risk.MaxDailyLoss,
-		FirstWindow:  effMode == "live", // live 首窗禁单（重启防双单缝隙）
 		Tokens: func() (string, string) {
 			tokMu.RLock()
 			defer tokMu.RUnlock()
@@ -971,13 +970,6 @@ func main() {
 
 		// 本窗 tick 健康度无条件落盘（含锚缺失/σ 未计的窗口——可见性优先于整洁）
 		logStats(conditionID, slug, nextStart.Unix(), anchor, histBps, engine.WindowStats(), "", ai)
-
-		// live 首窗禁单解除: 首个完整跑完的窗口结束后置 false。窗口被跳过（continue）
-		// 则顺延——保守多禁一窗，防重启残留窗双单的缝隙优先于交易频率。
-		if exec.FirstWindow {
-			exec.FirstWindow = false
-			log.Println("[Trading] 重启后首窗结束, 禁单解除")
-		}
 	}
 }
 
@@ -1092,7 +1084,7 @@ func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.
 	if len(addr) > 12 {
 		addr = addr[:6] + "…" + addr[len(addr)-4:]
 	}
-	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 热门侧有效价, 挂到闭市才撤余量; 首窗禁单）", addr)
+	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 热门侧有效价, 挂到闭市才撤余量; 重启后首窗即可下单——重启用「先杀旧、再起新」, 勿两实例并跑, 见决策 #28）", addr)
 	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client})
 }
 

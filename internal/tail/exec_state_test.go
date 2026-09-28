@@ -207,7 +207,10 @@ func TestExecStateLiveTwoPhase(t *testing.T) {
 
 // TestExecStateGate 风控闸两模式**同一后果**（2026-09-24 起）: 被闸 = rejected 行
 // = 未成交（不计 P&L / 不进胜率）, 但仍注册结算以便页面显示官方结果;
-// 且被闸行进 GatedOn 锁存 —— 当日不再复牌。first_window 只在 live 生效。
+// 且被闸行进 GatedOn 锁存 —— 当日不再复牌。
+//
+// ⚠️ 闸只剩 daily_loss 一条: live 首窗禁单已于 2026-09-29 删除（决策 #28）——
+// 重启后首窗照常下单（live 首窗的下单路径由 TestExecStateLiveTwoPhase 覆盖）。
 func TestExecStateGate(t *testing.T) {
 	ts := time.Now().UnixMilli()
 
@@ -261,26 +264,18 @@ func TestExecStateGate(t *testing.T) {
 		t.Fatal("结算回填后仍须锁存（这正是锁存必需的原因）")
 	}
 
-	// ② live: 首窗禁单 → rejected 行, 不调用执行器。
-	ex2 := &fakeExec{}
+	// ② 闸不再含首窗禁单（决策 #28）: 一个干净的 live 实例（= 重启后首窗）
+	// 在未过熔断线时照常下单——这条就是防止将来有人把首窗闸加回来的回归钉。
+	ex2 := &fakeExec{res: flip.ExecResult{Status: flip.ExecStatusFilled, OrderID: "o-fw", FillPrice: 0.90, Shares: 2.22, Cost: 2.0}}
 	x2, rec2, _ := newTestExec(t, true, ex2)
-	x2.FirstWindow = true
 	r := x2.HandleDecision(okSnap(ts, flip.SideYes), "0xfw", "slug-fw", 1780000000)
-	if r == nil || r.ExecStatus != flip.ExecStatusRejected || r.GateReason != GateFirstWindow {
-		t.Fatalf("live 首窗应记 rejected + first_window: %+v", r)
+	if r == nil || r.GateReason != "" {
+		t.Fatalf("重启后首窗不得再被风控闸拦下: %+v", r)
 	}
-	if ex2.calls != 0 {
-		t.Fatal("live 首窗禁单不得下单")
+	if ex2.calls != 1 {
+		t.Fatalf("首窗信号必须真下单, Ex 被调用 %d 次", ex2.calls)
 	}
-	if n := len(rec2.PendingSignals()); n != 1 {
-		t.Fatalf("被闸行照常注册结算, 得到 %d", n)
-	}
-	// paper 侧同条件**不**按首窗拦（无真实仓位可撞）——用干净实例, 免得撞上 ① 的
-	// 日亏锁存（那会以 daily_loss 而非 first_window 拦下）。
-	ex3 := &fakeExec{}
-	xp, _, _ := newTestExec(t, false, ex3)
-	xp.FirstWindow = true
-	if reason, blocked := xp.gate(); blocked {
-		t.Fatalf("first_window 只对 live 生效, paper 被 %s 拦下", reason)
+	if rec2.GatedOn(utcToday(), GateFirstWindow) {
+		t.Fatal("引擎不应再产出 first_window 行（该常量只留给历史数据）")
 	}
 }

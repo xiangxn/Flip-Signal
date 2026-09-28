@@ -29,6 +29,7 @@
     no_sigma: 'σ 未就绪'
   };
   // 风控闸原因（= internal/tail Gate* 常量字面量）
+  // ⚠️ first_window 只剩历史行（2026-09-29 决策 #28 起引擎不再产出）——标签保留是为了照显旧数据。
   var GATE_CN = {
     daily_loss: '日亏熔断',
     first_window: '首窗禁单'

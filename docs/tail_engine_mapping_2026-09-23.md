@@ -82,7 +82,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 | `settle_won` | `won` | 结算后回填（官方 outcome；**未成交行也回填**，见 §5.5） |
 | — | `pnl` / `shares` / `stake` / `cost` | 结算后回填 / 决策时计算（`cost` 仅 live）；**无仓位行 `pnl` 恒 0** |
 | — | `settle_src` | **结算来源**（2026-09-24 起，§5.5）：`push` / `official` / `gamma`；空 = 旧行 |
-| — | `gate_reason` | 风控闸（`daily_loss` / `first_window`）。⚠️ 2026-09-24 起被闸行 = `exec_status=rejected` + **无仓位** |
+| — | `gate_reason` | 风控闸（`daily_loss`；`first_window` 仅历史行，2026-09-29 决策 #28 已删，引擎不再产出）。⚠️ 2026-09-24 起被闸行 = `exec_status=rejected` + **无仓位** |
 | — | `exec_status` / `order_id` / `avg_fill_price` / `cost` / `exec_note` | live 执行回填（paper 行恒空） |
 
 ### 2.3 ⚠️ 两个容易写错的口径（已固化在代码里）

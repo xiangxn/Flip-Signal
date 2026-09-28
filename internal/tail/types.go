@@ -87,14 +87,17 @@ const (
 )
 
 // 风控闸原因常量（Record.GateReason 取值; 空 = 未被闸）。口径与 internal/flip 一致
-// 的部分只有**判据本身**（GateDailyLoss/GateFirstWindow + CanTrade 纯函数）——
+// 的部分只有**判据本身**（GateDailyLoss + CanTrade 纯函数）——
 // 后果不同: 2026-09-24 起 tail 两模式统一成「被闸 = 未成交」的 rejected 行
 // （a.md 第 3/4 条把「被风控拦」明确归入未成交, 见 docs/tail_integrated_2026-09-24.md §3.3）,
 // 而 flip 仍是方案 A（被闸行照常结算, 只标记不拦单）。
 const (
 	// GateDailyLoss 日亏熔断: 当日（UTC）已结算 P&L ≤ risk.max_daily_loss, 当日锁存。
+	// 本族**唯一**还会新产出的闸原因。
 	GateDailyLoss = "daily_loss"
-	// GateFirstWindow live 重启后首窗禁单（防重启残留窗双单; paper 无仓位不设）。
+	// GateFirstWindow **legacy 只读, 引擎不再产出**（2026-09-29 决策 #28 删掉 live 首窗禁单;
+	// flip 侧仍有）。保留常量只为让读历史行/Dashboard 标签一眼能认——
+	// data/tail-live 09-24~27 里还有 5 条这样的行（全部 ≥0.94 且全赢）。
 	GateFirstWindow = "first_window"
 )
 
@@ -233,7 +236,8 @@ type Record struct {
 	// 与 flip.Record 同字段同语义（两族共用同一套结算编排）。
 	SettleSrc string `json:"settle_src,omitempty"`
 
-	// GateReason 风控闸原因（GateDailyLoss/GateFirstWindow; 空 = 未被闸）。
+	// GateReason 风控闸原因（现口径恒 GateDailyLoss; GateFirstWindow 只存在于历史行;
+	// 空 = 未被闸）。
 	// ⚠️ 2026-09-24 起两模式统一: 被闸行 = ExecStatusRejected + 无仓位
 	//（a.md 把「被风控拦」归入未成交）——判据仍是两模式同源, 差别只在 flip 侧仍走方案 A。
 	GateReason string `json:"gate_reason,omitempty"`

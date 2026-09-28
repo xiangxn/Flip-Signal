@@ -37,7 +37,6 @@ type ExecState struct {
 	Live         bool                    // Ex 为真实下单实现（= 构造时模式 live）
 	Stake        float64                 // 每信号投入（构造后不变）
 	MaxDailyLoss float64                 // 日亏熔断线（构造后不变; 两模式同判据, 见 gate）
-	FirstWindow  bool                    // 重启后首窗禁单（live）: 主循环首个完整窗口跑完后置 false
 	Tokens       func() (string, string) // 窗口 UP/DOWN token（live 下单取热门侧 tokenID; paper 忽略）
 }
 
@@ -171,13 +170,15 @@ func (x *ExecState) ApplyFillFinal(f flip.FillFinal) *Record {
 	return rec
 }
 
-// gate 风控闸（模式无关的判据与顺序）: 返回命中原因与是否拦截。
-//   - first_window: 仅 live（重启防双单缝隙; paper 无真实仓位可撞, 不设）;
-//   - daily_loss:   两模式同源同后果（都落 rejected 行, 都不下单）。
+// gate 风控闸: 只剩日亏熔断一条（两模式同源同后果——都落 rejected 行, 都不下单）。
+//
+// ⚠️ 2026-09-29 起**不再有 live 首窗禁单**（决策 #28）。理由: 「旧进程已死、新进程才起」
+// 的重启路径撞不上同一市场——重启落在边界后 >lateLimit(15s) 时整窗跳过（旧进程交易过的
+// 那一窗根本不重入）, ≤15s 时 join 的那一窗旧进程也来不及下单（本族最早决策点在 +150s）,
+// 万一真重入还有 HasSignal/dup_record + Engine.Resume 兜住。该闸唯一还挡着的只剩
+// 「两实例同时在跑」（滚动重启先起新再杀旧）——那是运维纪律问题, 不该每启一次白丢一窗信号
+// （实盘 09-24~27 已挡 5 笔, 全部 ≥0.94 且全赢）。
 func (x *ExecState) gate() (reason string, blocked bool) {
-	if x.Live && x.FirstWindow {
-		return GateFirstWindow, true
-	}
 	if x.breakerTripped() {
 		return GateDailyLoss, true
 	}
@@ -225,10 +226,7 @@ func (x *ExecState) rejectedRecord(reason, conditionID, slug string, eventStart 
 
 // gateNote 闸命中原因的可读说明（进 ExecNote; 载今日已结算与线值便于事后核对）。
 func (x *ExecState) gateNote(reason string) string {
-	switch reason {
-	case GateFirstWindow:
-		return "重启后首窗禁单"
-	case GateDailyLoss:
+	if reason == GateDailyLoss {
 		return fmt.Sprintf("日亏熔断(锁存): 今日已结算 %.2fU, 线 %.2fU", x.todaySettledPnl(), x.MaxDailyLoss)
 	}
 	return reason
