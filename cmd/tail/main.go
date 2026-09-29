@@ -617,6 +617,8 @@ func main() {
 		cfg.Runtime.OutputDir, cfg.Runtime.SlugPrefix)
 	log.Printf(" 参数: 三段链 rem≤%ds(判⑤)/rem≤%ds(判⑤)/此后每秒判② 热门侧有效价≥%.2f 位移≥%.0f美元 或 (1σ≥%.0f美元 且 位移≥1σ) stake=%.0fUSDC",
 		cfg.Tail.T150Rem, cfg.Tail.T60Rem, cfg.Tail.PriceMin, cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD, cfg.Tail.Stake)
+	log.Printf(" 入场闸: T=150 段 已结算位移 walk≥%.0f美元（tail.walk_min_usd; BTC 标定值, 换标的须重标定）",
+		cfg.Tail.WalkMinUSD)
 	log.Printf(" 新鲜度闸: book_lat≤%dms + spot_age≤%dms + twap_age≤%dms（tail.max_book_lat_ms / feed.*）",
 		cfg.Tail.MaxBookLatMs, cfg.Feed.MaxSpotAgeMs, cfg.Feed.MaxTwapAgeMs)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 位移]")

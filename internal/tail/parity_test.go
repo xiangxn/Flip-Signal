@@ -35,6 +35,11 @@ import (
 //   - **价格腿** = 本包自己的段相关口径（T=150 段严格 > 0.80, 其余段 ≥ 0.80,
 //     见 decide.PriceLeg）——oracle 的 r5(strict_price=True) 是它的 python 孪生;
 //     本文件不复制规则, 只喂数据
+//   - **T=150 段入场闸** = `walk = sgn·(twap − anchor) ≥ cfg.WalkMinUSD`（2026-09-29
+//     决策 #29, 见 decide.WalkLeg）——oracle 的 walk_ok() 是它的 python 孪生。⚠️ 它是
+//     **段相关**的: 段 2/3 一字不动; twap 缺失 ⇒ 两边都放行（fail-open）。
+//     ⚠️ 下面这组 pin **只在 `cfg.WalkMinUSD = 43`（默认值）下成立**——本测试用的是
+//     `DefaultConfig()`（配置键是为其他标的各带一份自己的标定值而存在, 见决策 #25）。
 //
 // 行 ↔ oracle 的对应关系（stage 字段直接可比, 不再需要按 kind 反推）:
 //
@@ -54,25 +59,30 @@ var parityStages = []struct {
 	wr    float64 // 信号胜率（%）
 	pl    float64 // 14 天 P&L（U, 每笔 2U）
 }{
-	{StageT150, 3638, 1208, 94.039735, 15.022637},
-	{StageT60, 2426, 577, 99.133449, 16.153977},
-	{StageListen, 348, 348, 97.988506, 3.916134},
+	{StageT150, 3638, 958, 96.242171, 42.173827},
+	{StageT60, 2676, 750, 99.200000, 19.067819},
+	{StageListen, 372, 372, 97.849462, 2.784708},
 }
 
 // parityTotals = 三段合计（oracle 第六节末行）。
 //
-// ⚠️ 这组数字是 **2026-09-26 T=150 价格腿改严格大于之后**的值（oracle 同日更新）。
-// 改前的对应值: t150 1220 / 93.934426 / 16.022637、t60 2414 / 568 / 99.119718 /
-// 15.756180、listen 347 / 347 / 97.982709 / 3.895932、合计 6399 / 2135 / 95.971897 /
-// 35.674749，见 git 历史。变动 = 12 笔 0.80 入场的 t150 信号被拦下, 其中 9 笔在 t60
-// 段以更高价重新入场、1 笔落到监听段 ⇒ 行数 +13、信号 −2、合计 P&L −0.58U。
+// ⚠️ 这组数字是 **2026-09-29 T=150 段加入场闸 `walk ≥ 43 美元`之后**的值
+// （oracle 同日更新, 决策 #29）。改前（= 决策 #26 之后）的对应值: t150 3638 / 1208 /
+// 94.039735 / 15.022637、t60 2426 / 577 / 99.133449 / 16.153977、listen 348 / 348 /
+// 97.988506 / 3.916134、合计 6412 / 2133 / 96.061885 / 35.092748，见 git 历史。
+//
+// 变动 = 250 个 t150 信号被入场闸拦下（walk < 43 美元）, 其中 **197 个改道**到 t60/
+// 监听段（重入价更高 ⇒ 该批 P&L 从 +18.99U 压到 +1.78U）、**53 个整窗死亡**（基线里
+// 那批输率 49.1%、P&L −46.14U）⇒ 行数 +274、信号 −53、合计 P&L **+28.93U**。
+// 相对 pin: 行 6412→6686、信号 2133→2080、WR 96.061885→97.596154、P&L 35.092748→64.026354。
 const (
-	parityAllRows   = 6412
-	parityAllSig    = 2133
-	parityAllWR     = 96.061885
-	parityAllPL     = 35.092748
-	parityWindows   = 3640 // 参与的窗数（有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ）
+	parityAllRows   = 6686
+	parityAllSig    = 2080
+	parityAllWR     = 97.596154
+	parityAllPL     = 64.026354
+	parityWindows   = 3640 // 参与的窗数（有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ）——闸不改窗数
 	parityNoSigma   = 3    // σ 未就绪整窗跳过（决策 #13 的前置闸）
+	parityWalkLow   = 250  // T=150 段被入场闸拦下的行数（⑤ 达标 ∧ walk < 43; 决策 #29）
 	parityTolerance = 5e-5 // oracle 打印 6 位小数 ⇒ 容差取其末位之半; 实测两边差 <1e-9
 )
 
@@ -99,6 +109,7 @@ func TestParityBacktest(t *testing.T) {
 	rows := map[string]int{}             // 各段全部行数
 	universe := map[string][]parityRow{} // 各段信号行（ok=true）
 	windows, noSigma, bidFallback := 0, 0, 0
+	walkLow := 0 // T=150 段被入场闸拦下的行数（决策 #29）
 
 	for i := range events {
 		ev := &events[i]
@@ -156,8 +167,20 @@ func TestParityBacktest(t *testing.T) {
 					if !o.Rules.Price || o.Rules.Rule5() {
 						t.Fatalf("窗 %d: leg_out 但价格腿为假/⑤ 已达标: %+v", ev.StartTime, o.Rules)
 					}
+				case RejectWalkLow:
+					// 入场闸的**判据语义**（决策 #29）: 只在 ⑤ 已达标时出现, 且只该
+					// 出现在段 1——否则离线反事实会把「本来就不达标」的行读成「被闸的」。
+					if o.Stage != StageT150 || !o.Rules.Rule5() {
+						t.Fatalf("窗 %d: walk_low 但 stage=%s / ⑤ 未达标: %+v",
+							ev.StartTime, o.Stage, o.Rules)
+					}
+					if WalkLeg(cfg, o.Stage, o.Side, o.Twap, o.Anchor) {
+						t.Fatalf("窗 %d: walk_low 但入场闸为真（twap=%.4f anchor=%.4f）",
+							ev.StartTime, o.Twap, o.Anchor)
+					}
+					walkLow++
 				default:
-					t.Fatalf("窗 %d: %s 判定行的拒绝原因 = %q（只应是 price_low/leg_out）",
+					t.Fatalf("窗 %d: %s 判定行的拒绝原因 = %q（只应是 price_low/leg_out/walk_low）",
 						ev.StartTime, o.Stage, o.RejectReason)
 				}
 			}
@@ -186,6 +209,9 @@ func TestParityBacktest(t *testing.T) {
 	}
 	if noSigma != parityNoSigma {
 		t.Errorf("σ 未就绪跳过 = %d 窗, 期望 %d", noSigma, parityNoSigma)
+	}
+	if walkLow != parityWalkLow {
+		t.Errorf("T=150 入场闸拦下 = %d 行, 期望 %d（oracle 第二节）", walkLow, parityWalkLow)
 	}
 
 	// 各段行数 / 信号数（**精确整数**）+ 胜率 / P&L（容差 5e-5）——oracle 第六节。

@@ -17,6 +17,15 @@
 0.80 入场 WR 50% / −14.38U, 而同批 > 0.80 的 201 笔 WR 98.5% / +70.15U; 14 天回测里
 0.80 桶同样是整条价格梯度上唯一的负 EV 档（n=17 WR 76.5% −1.50U）。见 r5(strict_price)。
 
+⚠️ 2026-09-29 起 **T=150 段加一道入场闸 `walk ≥ 43 美元`**（用户决定, 决策 #29; 分析
+`docs/tail_walk_gate_2026-09-29.md`）——`walk = sgn·(twap − anchor)`（本文 `row()` 的
+`walk` 键）, 也就是「**已经写进结算线的**那部分位移」（`dev = basis + walk`,
+basis = sgn·(spot − twap) 是还没写进去的缺口）。T=150 段上 `⑤ 达标但 walk < 43`
+⇒ **本段不出信号, 链继续**走到 T=60/监听（**不是**整窗丢弃: 那一种明显更差, Δ 只有
++14.48U 且区间含零）。其余两段**一字不动**。理由 = 段 1 是位移最没写进去的决策点,
+`dev ≥ 63` 由缺口撑起来的单在这里最容易混进来（14 天 2U/注: 合计 +35.09 → **+64.03U**,
+只少 53 笔 = 2.5%, 被闸那批输率 49.1% vs 保留 3.98%）。见 walk_ok()。
+
 任一段出信号即**整窗只下一单**。三行的 stage 分别记 t150 / t60 / listen。
 
 本脚本是 `internal/tail/parity_test.go` 的 oracle（Go 引擎逐窗重放的对照真值）,
@@ -36,6 +45,10 @@
      那是纯函数防线（现网到不了）, 故 oracle 不做「σ 缺失仍判 dev 腿」的放行。
   3. **迟到接入**（首个可判定 tick 已 rem ≤ 60）跳过 T=150 段, **不伪造 t150 行**。
   4. **缺 spot 的 tick 只跳过、不推进任何段**（等下一个可判定 tick）——不是整窗丢弃。
+  5. **T=150 段的入场闸**（2026-09-29 决策 #29）: ⑤ 达标 ∧ `walk ≥ 43 美元` 才算信号,
+     walk 不够 ⇒ 落一行判定行（拒绝原因 walk_low）、**链继续**。⚠️ twap 缺失（walk 无值）
+     ⇒ 闸**放行**（fail-open, 与 Go 的 WalkLeg 同口径）——14 天里 T=150 判定 tick 的
+     twap 从不缺失, 故这一支在回测里零命中。
 
 成交口径与 13/16 恒等: fill = 下单 tick 热门侧有效价; shares = STAKE/fill;
 赢 → shares−STAKE, 输 → −STAKE。判决区间复用 14 的日级 bootstrap（2000 次, seed 42）。
@@ -58,6 +71,9 @@ MAX_LAT = 300
 P_FLOOR = 0.80
 DEV_USD = 63.0
 SD_MIN_USD = 40.0
+WALK_MIN_USD = 43.0        # T=150 段入场闸（决策 #29）。⚠️ 引擎侧已改成配置键 tail.walk_min_usd
+                           # （默认 43, 为 ETH 等标的各带标定值）——本脚本**不读配置**, 恒定 43:
+                           # 它是 parity 的对账口径, 与引擎 DefaultConfig() 逐位一致
 T150, T60 = 150, 60
 FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 
@@ -110,10 +126,14 @@ def win_ticks(e):
 def row(t, anchor, sd, date, outcome, stage):
     sgn = 1.0 if t["side"] == "yes" else -1.0
     dev = sgn * (t["spot"] - anchor)
+    tw = t.get("twap")
     return {
         "date": date, "stage": stage, "rem": t["rem"], "side": t["side"],
         "fill": t["fill"], "buy": t["fill"],      # buy 别名: 复用 14 的 pl/day_bootstrap
         "dev": dev, "sd": sd, "sig": (dev / sd) if sd else None,
+        # walk = sgn·(twap − anchor) = **已写进结算线**的那部分位移（美元）;
+        # dev = basis + walk（basis = sgn·(spot−twap) 是缺口/领先量）。None = twap 缺失。
+        "walk": (sgn * (tw - anchor)) if tw else None,
         "settle_won": 1 if ((outcome == 0) if t["side"] == "yes" else (outcome == 1)) else 0,
     }
 
@@ -136,6 +156,17 @@ def r2(r):
     return r["fill"] >= P_FLOOR and r["dev"] >= DEV_USD
 
 
+def walk_ok(r, x=WALK_MIN_USD):
+    """T=150 段的**入场闸**（2026-09-29 决策 #29）: walk ≥ x 美元。
+
+    ⚠️ 只在段 1 用（见 chain 的 T=150 分支）——段 2/3 一字不动。
+    walk 无值（twap 缺失）⇒ **放行**（fail-open）: 数据洞不该变成「静默不下单」
+    （与 Go 的 decide.WalkLeg 同口径; 14 天里这一支零命中）。
+    """
+    w = r.get("walk")
+    return True if w is None else w >= x
+
+
 def chain(ticks, anchor, sd, date, outcome):
     """三段递进判定链 → 本窗产出的行（至多 3 条: t150 判定 / t60 判定 / listen 信号）。
 
@@ -149,10 +180,13 @@ def chain(ticks, anchor, sd, date, outcome):
     if head["rem"] > T60:
         # 段 1: 首个可判定 tick 且 rem ≤ 150（价格腿**严格**大于, 2026-09-26）
         r = row(head, anchor, sd, date, outcome, "t150")
-        if r5(r, strict_price=True):
+        ok5 = r5(r, strict_price=True)
+        # 段 1 的入场闸（2026-09-29 决策 #29）: ⑤ 达标 ∧ walk ≥ 43 美元才算信号。
+        # 闸掉 ⇒ 落一行判定行, **链继续**（T=60/监听段照常判, 不是整窗丢弃）。
+        if ok5 and walk_ok(r):
             r["ok"] = True
             return [r], rejects
-        rejects.append("t150")
+        rejects.append("t150:walk_low" if ok5 else "t150")
         rows.append(r)
         rest = [x for x in ticks if x["rem"] <= T60]
     else:
@@ -216,6 +250,7 @@ def main():
 
     signals = {s: [] for s in STAGES}      # **信号行**（ok=true, 按段）
     rows_n = collections.Counter()         # 全部行（判定行 + 信号行, 按段）
+    walk_low = 0                           # T=150 段被入场闸拦下的行数（决策 #29）
     skipped_no_sigma = 0                   # σ 未就绪整窗跳过（与 cmd/tail 前置闸同源）
     windows = 0                            # 参与统计的窗数（有可判定 tick 的）
     audit = collections.Counter()          # 空簿/twap/门控差集审计
@@ -255,7 +290,8 @@ def main():
         if not ticks:
             continue
         windows += 1
-        rows, _ = chain(ticks, anchor, sd, date, outcome)
+        rows, rej = chain(ticks, anchor, sd, date, outcome)
+        walk_low += sum(1 for x in rej if x.endswith("walk_low"))
         for r in rows:
             rows_n[r["stage"]] += 1
             margin = min(margin, edges(r))
@@ -280,7 +316,8 @@ def main():
                 eff[side] = ask if ask > 0 else bid
             if quad:
                 if not (x.get("twap") or {}).get("price"):
-                    audit["四档齐但 twap 缺（引擎不用 twap 判, 不影响宇宙）"] += 1
+                    # twap 缺的 tick 上 walk 无值 ⇒ 入场闸 fail-open（两边同口径, 不改变宇宙）
+                    audit["四档齐但 twap 缺（walk 闸 fail-open, 不影响宇宙）"] += 1
                 continue
             if not any(eff.values()):
                 audit["整簿全空（四档齐 0 = 该窗无 PM 簿, 两套门一致判无效）"] += 1
@@ -315,6 +352,8 @@ def main():
     print("  注: t150 判定行 = 「首个可判定 tick 且 rem ≤ 150」的窗数（迟到接入的窗没有它）;")
     print("      t60 判定行 = 走到第二段的窗数（迟到接入的窗只有 t60 一行）;")
     print("      listen 段只在达标时落行, 故它没有被拒行。")
+    print(f"  T=150 入场闸拦下（reject = walk_low, 决策 #29）= {walk_low} 行"
+          f"（= ⑤ 达标但 walk < {WALK_MIN_USD:g} 美元的那批; 链继续 ⇒ 其中多数改道到 t60/listen）")
     print(f"  判定边界的最小余量（dev/σ 三条连续量腿的浮点安全垫, 应远大于 1e-9）: {margin:.3e}")
     print("      （价格腿不在内: 报价在 0.01 网格上, `fill == 0.80` 恰好边界放行是常态形态）")
 
@@ -355,6 +394,7 @@ def main():
     print(f"  {'合计':<8}{sum(rows_n.values()):>8}{len(allsig):>8}{tot_wr:>12.6f}{pl(allsig):>14.6f}")
     print(f"  // 参与判定的窗数 = {windows}（= 有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ 的窗）")
     print(f"  // σ 未就绪整窗跳过 = {skipped_no_sigma} 窗（引擎前置闸同源, 决策 #13）")
+    print(f"  // T=150 入场闸拦下 = {walk_low} 行（reject_reason = walk_low, 决策 #29）")
     print("  // 兜底零命中: 全部行 HotSrc 恒 ask（14 天里没有一次单侧空簿, 见第五节）")
 
     print("\n" + "=" * 100)

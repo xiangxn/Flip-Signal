@@ -20,6 +20,10 @@ import "github.com/necklace/flip-signal/internal/flip"
 //     dev ≥ sd 恒真, ③④ 会在没有历史的窗口全放行（正是冷启动期最危险的那批）。
 //
 // 返回值是四条**原始**腿; 五格与价格腿的作用域见 Rules 的 Rule1…Rule5。
+//
+// ⚠️ T=150 段的**入场闸**（WalkLeg）**不在这里**——它是 decision() 里价格腿与 ⑤ 之后的
+// 一道独立闸（2026-09-29 决策 #29）, 也不是五格的组成部分（五格是本族的历史口径,
+// 回测对照用; 入场闸是链的准入）。理由见 WalkLeg 注释。
 func EvalRules(cfg Config, stage string, hotAsk, dev, sd float64, hasSigma bool) Rules {
 	sigma := hasSigma && dev >= sd
 	return Rules{
@@ -30,7 +34,8 @@ func EvalRules(cfg Config, stage string, hotAsk, dev, sd float64, hasSigma bool)
 	}
 }
 
-// PriceLeg 价格腿（纯函数）: 热门侧有效价是否过价格闸。**本包唯一的段相关腿**——
+// PriceLeg 价格腿（纯函数）: 热门侧有效价是否过价格闸。除入场闸（WalkLeg）外
+// **本包唯一的段相关腿**——
 //
 //	T=150 段（StageT150）: hotAsk >  PriceMin  （严格大于）
 //	其余段（T=60 / 监听）: hotAsk >= PriceMin
@@ -49,6 +54,47 @@ func PriceLeg(cfg Config, stage string, hotAsk float64) bool {
 		return hotAsk > cfg.PriceMin
 	}
 	return hotAsk >= cfg.PriceMin
+}
+
+// ── T=150 段入场闸（walk 腿, 2026-09-29 决策 #29）──
+
+// WalkUSD 已结算位移（**美元**, 正 = 朝押注方向）= sgn·(twap − anchor)。
+//
+// 与 DevUSD 的关系（恒等式, 逐 tick 残差 0）:
+//
+//	dev  = sgn·(spot − anchor) = basis + walk
+//	basis = sgn·(spot − twap)    缺口 = **领先量**（现货动了、结算线还没跟上）
+//	walk  = sgn·(twap − anchor)  位移 = **状态量**（唯一已经落进结算线的那部分）
+//
+// ⚠️ 单位是美元（同 DevUSD）: twap 与 anchor 都是价格本身, 不是 bps。
+func WalkUSD(side string, twap, anchor float64) float64 {
+	return SgnFor(side) * (twap - anchor)
+}
+
+// WalkLeg 入场闸（纯函数）: **仅 T=150 段生效**——该段要 `walk ≥ cfg.WalkMinUSD` 才放行。
+//
+// 为什么只闸第一段（2026-09-29 用户决定, 决策 #29）: 三段链里段 1 是**位移最没写进去**
+// 的决策点（rem=150, 也是报价最便宜的入场点）, 「`dev ≥ 63` 由缺口撑起来」的单最容易
+// 在这里混进来; 而闸掉它**不等于**该窗不下单——链继续走到 T=60/监听, 多数会在更高的价
+// 上重入（14 天: 250 个被闸的 T150 信号里 197 个改道, 53 个整窗死亡）。把闸加到全部
+// 三段（A 口径）多砍 258 笔净效果为零的交易; 改成「整窗不下单」（B 口径）会把改道这
+// 条路也堵死, Δ 只有 +14.48U 且区间含零——两种都不如只闸段 1（+28.93U）。
+//
+// ⚠️ **阈值取 `cfg.WalkMinUSD`（默认 43）, 不是硬编码常量**: 它是 **BTC 价格的标定量**,
+// 换标的（ETH 等）必须自己标定一份（决策 #25）——键的存在就是为这件事（+28.93U 这个数
+// 只对 BTC 的 43 成立）, **不代表在 BTC 上该调它**。
+//
+// ⚠️ **twap 缺失（≤0）⇒ 放行**（fail-open）: 数据洞不该变成「静默不下单」, 且与
+// oracle / 分析脚本（`walk is None ⇒ 放行`）同口径。14 天数据里 T=150 判定 tick 的
+// twap 从不缺失（§5 审计: 缺 twap 的 tick 只在判定区外）, 故这一支零命中。
+func WalkLeg(cfg Config, stage, side string, twap, anchor float64) bool {
+	if stage != StageT150 {
+		return true // 段 2/3 一字不动（这一段链的规则差异只有价格腿与本闸）
+	}
+	if !(twap > 0) {
+		return true
+	}
+	return WalkUSD(side, twap, anchor) >= cfg.WalkMinUSD
 }
 
 // ── 派生量（纯函数）──

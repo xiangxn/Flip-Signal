@@ -121,7 +121,7 @@ func TestEvalRules(t *testing.T) {
 	}
 }
 
-// TestPriceLegStageOperator 钉住**本包唯一的段相关腿**: 价格腿在 T=150 段是严格
+// TestPriceLegStageOperator 钉住价格腿这条**段相关腿**（本包另一条是入场闸 WalkLeg）: 价格腿在 T=150 段是严格
 // 大于（`hot > 0.80`）, 在 T=60 与监听段是 ≥（2026-09-26 用户决定; 依据见
 // docs/tail_integrated_2026-09-24.md §6——两个样本里 0.80 都是价格梯度上唯一负 EV 档）。
 //
@@ -160,6 +160,64 @@ func TestPriceLegStageOperator(t *testing.T) {
 	}
 	if !EvalRules(cfg, StageListen, 0.80, dev, sd, true).Rule2() {
 		t.Errorf("监听段 ask=0.80 该放行 ②（非严格）")
+	}
+}
+
+// TestWalkLegStageAndFailOpen 钉住入场闸（2026-09-29 决策 #29）的三条边界:
+//
+//  1. **只闸 T=150 段**——段 2/3 无论 walk 多小都放行（否则就不是「只闸段 1」了）;
+//  2. 阈值取 `cfg.WalkMinUSD`（默认 43）且是**非严格** ≥（43 本身放行, 42.999… 拦下）,
+//     键一变判定立刻跟着变（本节末尾直接改 cfg 复验——键不能是摆设）;
+//  3. twap 缺失/非正 ⇒ **放行**（fail-open）——数据洞不该变成静默不下单,
+//     与 oracle 的 `walk is None ⇒ 放行` 同口径。
+//
+// 侧别符号也在内: 押 no 时 walk = −(twap − anchor), 故「twap 在锚下方」= 正位移。
+func TestWalkLegStageAndFailOpen(t *testing.T) {
+	const anchor float64 = 100000
+	cases := []struct {
+		name        string
+		stage, side string
+		twap        float64
+		want        bool
+	}{
+		{"T150 walk=43 恰好放行", StageT150, "yes", anchor + 43, true},
+		{"T150 walk=42.99 拦下", StageT150, "yes", anchor + 42.99, false},
+		{"T150 walk=0 拦下", StageT150, "yes", anchor, false},
+		{"T150 walk 为负（背离）拦下", StageT150, "yes", anchor - 20, false},
+		{"T150 押 no: twap 在锚下方 = 正位移", StageT150, "no", anchor - 50, true},
+		{"T150 押 no: twap 在锚上方拦下", StageT150, "no", anchor + 10, false},
+		{"T150 twap=0 缺失 ⇒ 放行", StageT150, "yes", 0, true},
+		{"T150 twap<0 ⇒ 放行", StageT150, "yes", -1, true},
+		{"T60 段不设闸（walk 极小也放行）", StageT60, "yes", anchor, true},
+		{"监听段不设闸", StageListen, "yes", anchor - 999, true},
+	}
+	cfg := DefaultConfig()
+	for _, c := range cases {
+		if got := WalkLeg(cfg, c.stage, c.side, c.twap, anchor); got != c.want {
+			t.Errorf("%s: WalkLeg(%s, %s, %.2f, %.0f) = %v, 期望 %v",
+				c.name, c.stage, c.side, c.twap, anchor, got, c.want)
+		}
+	}
+	// 阈值**由配置驱动**（2026-09-29: 键存在是为了其他标的各带一份自己的标定值,
+	// 见决策 #25/#29）——钉住「改 cfg 就改行为」, 否则这个键只是个摆设。
+	tuned := cfg
+	tuned.WalkMinUSD = 30
+	if !WalkLeg(tuned, StageT150, "yes", anchor+43, anchor) {
+		t.Errorf("阈值 30 时 walk=43 该放行")
+	}
+	if WalkLeg(tuned, StageT150, "yes", anchor+29.99, anchor) {
+		t.Errorf("阈值 30 时 walk=29.99 该拦下")
+	}
+	tuned.WalkMinUSD = 500
+	if WalkLeg(tuned, StageT150, "yes", anchor+43, anchor) {
+		t.Errorf("阈值 500 时 walk=43 该拦下（BTC 默认值下它是放行的）")
+	}
+	// WalkUSD 与 DevUSD 的恒等式: walk + basis(= sgn·(spot−twap)) ≡ dev = sgn·(spot−anchor)。
+	const spot = 100200
+	sgn := SgnFor("no")
+	walk, basis := WalkUSD("no", 99900, anchor), sgn*(spot-99900)
+	if dev := DevUSD("no", spot, anchor); math.Abs(walk+basis-dev) > 1e-9 {
+		t.Errorf("分解恒等式破了: walk %+.6f + basis %+.6f ≠ dev %+.6f", walk, basis, dev)
 	}
 }
 

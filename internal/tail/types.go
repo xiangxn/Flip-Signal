@@ -9,8 +9,14 @@
 //	② = hot_ask ≥ 0.80 且   dev ≥ 63 美元
 //
 // ⚠️ 2026-09-26 起 **T=150 段的价格腿是严格大于**（`hot_ask > 0.80`）, 上面这两行
-// 的 ≥ 只对 T=60 段与监听段成立——见 decide.PriceLeg（本包唯一的段相关腿）与
+// 的 ≥ 只对 T=60 段与监听段成立——见 decide.PriceLeg（本包两条段相关腿之一）与
 // docs/tail_integrated_2026-09-24.md §6。
+//
+// ⚠️ 2026-09-29 起 **T=150 段另有一道入场闸**（决策 #29）: ⑤ 达标之外还要
+// `walk = sgn·(twap − anchor) ≥ cfg.WalkMinUSD`（默认 43 美元; 已写进结算线的位移,
+// 见 decide.WalkLeg;
+// `dev = basis + walk`, basis 是还没写进去的缺口 = 领先量）。本段不达标 ⇒ 不出信号、
+// **链继续**; 段 2/3 一字不动。这是本包两条段相关腿里的另一条。
 //
 // 2026-09-24 起每窗走**三段递进判定链**（用户决定, docs/tail_integrated_2026-09-24.md §1）:
 // rem≤150 判 ⑤ → 不达标则 rem≤60 再判 ⑤ → 再不达标则此后每秒判 ②（达标即下单）。
@@ -64,7 +70,8 @@ func isKnownKind(kind string) bool {
 
 // 拒绝原因常量（Record.RejectReason 取值; 空 + ok=false 不应出现）。
 //
-// 顺序即判定顺序（decide 内 switch 固定）: missing_spot → no_hist → price_low → leg_out。
+// 顺序即判定顺序（decide 内 switch 固定）:
+// missing_spot → no_hist → price_low → **leg_out → walk_low**。
 // 前两条是**纯函数防线**（现网到不了）: 缺 spot 的 tick 根本不落行（引擎等下一个
 // 可判定的 tick）, σ 未就绪由 cmd/tail 整窗跳过（skip=no_sigma）。
 //
@@ -81,6 +88,15 @@ const (
 	RejectPriceLow = "price_low"
 	// RejectLegOut 价格腿过了但位移腿/σ 腿都没过: dev < 63 且不满足 (sd ≥ 40 ∧ dev ≥ sd)。
 	RejectLegOut = "leg_out"
+	// RejectWalkLow **T=150 段入场闸**（2026-09-29 决策 #29）: ⑤ 达标, 但
+	// `walk = sgn·(twap − anchor) < cfg.WalkMinUSD`（默认 43, 见 decide.WalkLeg）。
+	// 本段不出信号, **链继续**走到 T=60/监听（改道, 不是整窗丢弃）。
+	//
+	// ⚠️ 判据排在 leg_out **之后** ⇒ 它只表示「**闸是唯一的拦路者**」: 去掉闸这一行
+	// 就会是信号（14 天 = 250 行, 即离线反事实里被闸掉的 250 个 T150 信号）;
+	// 反之 dev/σ 腿本来就不达标的行一律读 leg_out——**离线统计别按「walk < 43 的行数」
+	// 数它**, 那会把两种不同的行混在一起。
+	RejectWalkLow = "walk_low"
 	// RejectMissingTwap **legacy-only**: 旧口径的快照宇宙要求 spot 与 twap 同时在场,
 	// 现口径不再产出（⑤ 不用 twap）。保留常量是为了让读旧数据/审计脚本时一眼能认。
 	RejectMissingTwap = "missing_twap"
@@ -184,8 +200,10 @@ type Observation struct {
 	YesAsk float64 `json:"yes_ask"`
 	NoBid  float64 `json:"no_bid"`
 	NoAsk  float64 `json:"no_ask"`
-	Spot   float64 `json:"spot"`   // Binance BTCUSDT 最新价（0 = 缺失/陈旧 >2s）
-	Twap   float64 `json:"twap"`   // Chainlink TWAP-60 流值（0 = 缺失; 判定不用它, 仅诊断）
+	Spot   float64 `json:"spot"` // Binance BTCUSDT 最新价（0 = 缺失/陈旧 >2s）
+	// Twap Chainlink TWAP-60 流值（0 = 缺失）。⚠️ T=150 段的入场闸由它算 walk
+	// （decide.WalkLeg: walk = sgn·(Twap−Anchor) ≥ cfg.WalkMinUSD, 默认 43）, 其余段仅诊断。
+	Twap   float64 `json:"twap"`
 	Anchor float64 `json:"anchor"` // 本窗锚 = 边界那一秒的 TWAP 推送（恒 >0, 无锚整窗不产出）
 	// HistBps 本窗生效的 σ（bps; 前 ≤18 已完窗 |close−anchor| 均值 ÷ anchor × 1e4）。
 	HistBps float64 `json:"hist_bps"`

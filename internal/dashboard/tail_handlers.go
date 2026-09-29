@@ -37,7 +37,7 @@ type tailStateResponse struct {
 	TwapAgeMs int64   `json:"twap_age_ms"`
 	SpotAgeMs int64   `json:"spot_age_ms"` // Binance spot 距本地接收毫秒（−1 = 尚无推送）
 	SpotPrice float64 `json:"spot_price"`
-	TwapPrice float64 `json:"twap_price"` // Chainlink TWAP-60 流值（判定不用它, 只作诊断）
+	TwapPrice float64 `json:"twap_price"` // Chainlink TWAP-60 流值（T=150 段入场闸的 walk 由它算; 其余段只作诊断）
 
 	// 锚与 σ（锚 = 边界那一秒的 TWAP 推送, 决策 #15）
 	Anchor          float64 `json:"anchor"`   // 0 = 本窗尚未取到（本窗一行不产出）
@@ -302,6 +302,7 @@ func (s *TailState) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"sigma_min_usd":   s.cfg.SigmaMinUSD,
 		"stake":           s.cfg.Stake,
 		"max_book_lat_ms": s.cfg.MaxBookLatMs,
+		"walk_min_usd":    s.cfg.WalkMinUSD,
 	})
 }
 

@@ -15,6 +15,10 @@ package tail
 // 意义是「能读、能对账」，不是「该调」——改任何一个都等于换一条没标定过的策略，
 // 必须先在 python 侧重做 §5.2 的决策表。
 //
+// ⚠️ 唯一的例外是 `walk_min_usd`（2026-09-29 决策 #29 加入）: 它**存在的理由**就是
+// 跨标的各带一份自己的标定值（ETH 等, 见决策 #25）——因为 43 是 **BTC 价格**的标定量,
+// 搬过去毫无意义。**在 BTC 上它受同一条纪律约束**（43 是那批数据的 argmax, 别按行情调）。
+//
 // 2026-09-24 起 Config 的两个时间腿换了语义（三段判定链, 见
 // docs/tail_integrated_2026-09-24.md §1）: 原来「帧（只记录）+ 快照（判定）」的
 // 两帧折中改成**两次真判定**——`t150_rem` 与 `t60_rem` 各自是一个**下单点**，
@@ -51,6 +55,16 @@ type Config struct {
 	// 与 flip.max_book_lat_ms 同值但独立成键——两个引擎可分别部署，共享一个键会让
 	// 调其中一个时误改另一个。默认值 = 数据支持值（收紧在 flip 侧已证负收益）。
 	MaxBookLatMs int64 `mapstructure:"max_book_lat_ms"`
+	// WalkMinUSD T=150 段**入场闸**的阈值（43 美元, 决策 #29）: 该段还要
+	// `walk = sgn·(twap − anchor) ≥ 此值` 才放行（walk = 已写进结算线的位移;
+	// 闸不达标落 reject_reason=walk_low 且**链继续**到 T=60/监听段）。
+	//
+	// ⚠️ 与 dev_min_usd / sigma_min_usd 同一性质: **BTC 价格的标定量**（43 美元 ≈
+	// 该窗 σ 中位 62.56 美元的 0.7σ），**换标的必须重新标定**、不能把 43 直接搬过去
+	// （决策 #25 的跨标红线）。本键存在的意义就是让 ETH 等标的各自带一份**自己的**
+	// 标定值（用户 2026-09-29 决定）；**在 BTC 上它同样不该调**——改它等于换一条
+	// 没在 14 天数据上验过的策略（43 是那批数据上的 argmax, 见文档 §4 风险 1）。
+	WalkMinUSD float64 `mapstructure:"walk_min_usd"`
 }
 
 // DefaultConfig 返回文档 §1.4 定稿的默认参数（全部不可调, 见 Config 注释）。
@@ -77,5 +91,6 @@ func DefaultConfig() Config {
 		SigmaMinUSD:  40,   // σ 腿下限 F（USD, 不可辨识——别调）
 		Stake:        2,    // 每笔 2 USDC
 		MaxBookLatMs: 300,  // 盘口延迟闸（回测 MAX_LAT=300）
+		WalkMinUSD:   43,   // T=150 段入场闸（决策 #29; BTC 标定量——别在 BTC 上调）
 	}
 }

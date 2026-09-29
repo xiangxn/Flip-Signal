@@ -408,11 +408,14 @@ func TestEngineNoSigmaRejectsWithNoHist(t *testing.T) {
 // TestEngineSideAndDevSign 热门侧 = 有效价高的一侧（平局取 yes）; dev 的符号随侧别翻转。
 func TestEngineSideAndDevSign(t *testing.T) {
 	// no 侧为热门（0.92 > 0.10）, 且现货在锚**下方** 100 美元 ⇒ 押 no 的 dev = +100。
+	// twap 也在锚下方 60 ⇒ walk = +60 过 T=150 的入场闸（否则这一窗会被 walk_low 拦下,
+	// 见 TestEngineWalkGateBlocksGapOnlyT150 —— 本用例只关心侧别与符号）。
 	e := newTestEngine(t, 10)
 	o := row(t, e, 149, func(x *flip.Tick) {
 		x.UpAsk, x.UpBid = 0.10, 0.09
 		x.DownAsk, x.DownBid = 0.92, 0.90
 		x.BinPrice = testAnchor - 100
+		x.TwapPrice = testAnchor - 60
 	})
 	if o.Side != flip.SideNo || o.HotAsk != 0.92 {
 		t.Fatalf("热门侧应为 no/0.92, 得到 %s/%.2f", o.Side, o.HotAsk)
@@ -423,12 +426,99 @@ func TestEngineSideAndDevSign(t *testing.T) {
 	if !o.OK || !o.Rules.Rule5() {
 		t.Fatalf("dev=+100 应构成 ⑤, 得到 ok=%v rules=%+v", o.OK, o.Rules)
 	}
+	// 分解恒等式: dev = basis(sgn·(spot−twap)) + walk(sgn·(twap−anchor))。
+	if w, b := WalkUSD(o.Side, o.Twap, o.Anchor), SgnFor(o.Side)*(o.Spot-o.Twap); w+b != o.Dev {
+		t.Fatalf("dev 分解破了: walk %+.4f + basis %+.4f ≠ dev %+.4f", w, b, o.Dev)
+	}
 
 	// 平局取 yes（python: `"yes" if ya >= na else "no"`）。
 	e2 := newTestEngine(t, 10)
 	o2 := row(t, e2, 149, func(x *flip.Tick) { x.UpAsk, x.DownAsk = 0.18, 0.18 })
 	if o2.Side != flip.SideYes {
 		t.Fatalf("有效价平局应取 yes, 得到 %s", o2.Side)
+	}
+}
+
+// TestEngineWalkGateBlocksGapOnlyT150 钉住入场闸在**引擎链上**的真实形态（决策 #29）:
+//
+//	dev = +100（⑤ 成立）但 walk = −50（结算线还在锚的另一侧）⇒ 段 1 落一行 walk_low,
+//	**链继续**——紧接着的 T=60 段照常判（同一批 tick 上 walk 已长好 ⇒ 该段出信号）。
+//
+// 这一形态正是闸要拦的那批: `dev` 全由**缺口**（basis = +150）撑起来, 而缺口是领先量、
+// 还没写进结算线（"便宜价编码的是还没定局"）。若哪天有人把闸挪到 leg_out 之前、
+// 或让它对整窗生效, 本用例会红。
+func TestEngineWalkGateBlocksGapOnlyT150(t *testing.T) {
+	e := newTestEngine(t, 10) // sd = 100 美元
+	// 押 no（热门侧）: 现货在锚**下方** 100 ⇒ dev = +100; 而 twap 还在锚**上方** 50
+	// ⇒ walk = −50（结算线在锚的反侧, 一点没往押注方向走）, 缺口 basis = +150 撑起全部 dev。
+	o := row(t, e, 149, func(x *flip.Tick) {
+		x.UpAsk, x.UpBid = 0.10, 0.09
+		x.DownAsk, x.DownBid = 0.92, 0.90
+		x.BinPrice = testAnchor - 100 // 押 no: dev = +100
+		x.TwapPrice = testAnchor + 50 // walk = −50 < 43 ⇒ 闸拦下
+	})
+	if o.Stage != StageT150 || o.OK {
+		t.Fatalf("段 1 应被入场闸拦下, 得到 stage=%s ok=%v", o.Stage, o.OK)
+	}
+	if o.RejectReason != RejectWalkLow {
+		t.Fatalf("拒绝原因应为 %s, 得到 %s", RejectWalkLow, o.RejectReason)
+	}
+	// 闸的**判据语义**: 它只在 ⑤ 已达标时才会出现（否则读 leg_out）。
+	if !o.Rules.Rule5() {
+		t.Fatalf("walk_low 行必须 ⑤ 达标（否则该读 leg_out）: %+v", o.Rules)
+	}
+	if lim, got := DefaultConfig().WalkMinUSD, WalkUSD(o.Side, o.Twap, o.Anchor); got >= lim {
+		t.Fatalf("本用例的前提是 walk < %.0f（默认阈值）, 实为 %+.4f", lim, got)
+	}
+
+	// 链继续: T=60 段照常判, 且此时 walk 已长好（twap 也翻到锚下方）⇒ 该段出信号。
+	o2 := row(t, e, 59, func(x *flip.Tick) {
+		x.UpAsk, x.UpBid = 0.10, 0.09
+		x.DownAsk, x.DownBid = 0.95, 0.94
+		x.BinPrice = testAnchor - 100
+		x.TwapPrice = testAnchor - 70 // walk = +70
+	})
+	if o2.Stage != StageT60 || !o2.OK {
+		t.Fatalf("段 2 应出信号（闸只闸段 1）, 得到 stage=%s ok=%v reject=%s",
+			o2.Stage, o2.OK, o2.RejectReason)
+	}
+}
+
+// TestEngineWalkGateThresholdFromConfig 钉住「闸的阈值取自**引擎持有的 cfg**」这条接线
+// （决策 #29 的阈值在同日稍后由常量改成配置键 `tail.walk_min_usd`, 为的是 ETH 等标的各带
+// 一份自己的标定值）——同一批 tick 换个 cfg 就该换结果, 阈值不能是摆设、更不能被
+// decision() 里某个写死的默认值盖掉。
+func TestEngineWalkGateThresholdFromConfig(t *testing.T) {
+	// 押 no（热门侧）: spot 在锚下方 100 ⇒ dev = +100; twap 在锚下方 60 ⇒ walk = +60。
+	// ⇒ 默认阈值 43 下是信号, 阈值抬到 200 后同一 tick 落 walk_low。
+	tick := func(x *flip.Tick) {
+		x.UpAsk, x.UpBid = 0.10, 0.09
+		x.DownAsk, x.DownBid = 0.92, 0.90
+		x.BinPrice = testAnchor - 100
+		x.TwapPrice = testAnchor - 60
+	}
+	loose := DefaultConfig() // 43
+	e1 := NewEngine(loose)
+	e1.BeginWindow(0, 0)
+	if !e1.UpgradeAnchor(testAnchor, 10) {
+		t.Fatal("窗口开局注入锚被拒")
+	}
+	if o := row(t, e1, 149, tick); !o.OK || o.Stage != StageT150 {
+		t.Fatalf("默认阈值 43 下 walk=+60 该出信号, 得到 ok=%v stage=%s reject=%s",
+			o.OK, o.Stage, o.RejectReason)
+	}
+
+	strict := DefaultConfig()
+	strict.WalkMinUSD = 200
+	e2 := NewEngine(strict)
+	e2.BeginWindow(0, 0)
+	if !e2.UpgradeAnchor(testAnchor, 10) {
+		t.Fatal("窗口开局注入锚被拒")
+	}
+	o := row(t, e2, 149, tick)
+	if o.OK || o.RejectReason != RejectWalkLow {
+		t.Fatalf("阈值抬到 200 后同一 tick 该落 %s, 得到 ok=%v reject=%s",
+			RejectWalkLow, o.OK, o.RejectReason)
 	}
 }
 

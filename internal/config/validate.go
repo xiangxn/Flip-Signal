@@ -77,6 +77,13 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 		return nil, fmt.Errorf("tail.dev_min_usd 必须 > 0、tail.sigma_min_usd 必须 ≥ 0（现值 %.3f / %.3f）",
 			cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD)
 	}
+	// 入场闸阈值为负 = 闸形同虚设（walk 只要不是深负就放行）, 却仍按「有闸」的口径解释
+	// 落盘的 walk_low 行——静默退化, 故挡在启动前。⚠️ 只做**结构性**校验: 「值是否是该
+	// 标的的合理解」是标定问题, 归 python 侧（BTC = 43, 换标的必须重标定, 决策 #25/#29）。
+	if cfg.Tail.WalkMinUSD < 0 {
+		return nil, fmt.Errorf("tail.walk_min_usd 必须 ≥ 0（现值 %.3f）——负值会让入场闸形同虚设",
+			cfg.Tail.WalkMinUSD)
+	}
 
 	return warnings, nil
 }

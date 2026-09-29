@@ -317,6 +317,13 @@ func TestValidate(t *testing.T) {
 			wantErr: "tail.sigma_min_usd",
 		},
 		{
+			// 负阈值 = 入场闸形同虚设（walk 只要不是深负就放行）, 却仍按「有闸」落
+			// walk_low 行 ⇒ 静默退化。0 是合法弱闸（walk ≥ 0）, 故只挡负值。
+			name:    "tail 入场闸阈值为负",
+			mutate:  func(c *AppConfig) { c.Tail.WalkMinUSD = -1 },
+			wantErr: "tail.walk_min_usd",
+		},
+		{
 			name:    "tail stake 为零",
 			mutate:  func(c *AppConfig) { c.Tail.Stake = 0 },
 			wantErr: "tail.stake 必须 > 0",

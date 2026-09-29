@@ -286,9 +286,19 @@ func (e *Engine) Latches() Latches {
 // decision 采一条判定行并求 ⑤（t150/t60 段; 判定行**成功与否都落盘**）。
 // 调用方已持锁、已保证本 tick 为可判定 tick（盘口有效价 > 0 ∧ spot > 0 ∧ anchor > 0）。
 //
-// 判定顺序固定（文档化, 复验按原因计数）: missing_spot → no_hist → price_low → leg_out。
+// 判定顺序固定（文档化, 复验按原因计数）:
+//
+//	missing_spot → no_hist → price_low → leg_out → walk_low
+//
 // 前两条是纯函数防线: 缺 spot 的 tick 在 ProcessTick 就被挡下（不落行）, σ 未就绪由
 // cmd/tail 整窗跳过——这里保留分支是为了让判定函数自身封闭（不依赖调用方的前置条件）。
+//
+// ⚠️ 入场闸（walk_low, 决策 #29）**排在 leg_out 之后**是有意的: 这样每个原因都是
+// 「本行不是信号」的**真解释**, 且 `walk_low` 恰好只覆盖**闸是唯一拦路者**的行
+// （`Price ∧ Rule5 ∧ ¬Walk`）——把它排在前面会让 dev/σ 腿本来就不达标的行也读成
+// walk_low, 而那种行去掉闸也不会是信号（离线反事实会凭空多出一批）。14 天里
+// walk_low = 250 行, 正是「⑤ 达标但 walk < 43」的那 250 个 T150 信号（只闸段 1）。
+// ⚠️ 43 是 `cfg.WalkMinUSD` 的**默认值**（BTC 标定值）——上句的计数只在该默认值下成立。
 func (e *Engine) decision(t flip.Tick, side string, px float64, src, stage string, frameT int) Observation {
 	o := e.snapshot(t, side, px, src, stage, frameT)
 	switch {
@@ -300,6 +310,8 @@ func (e *Engine) decision(t flip.Tick, side string, px float64, src, stage strin
 		o.RejectReason = RejectPriceLow
 	case !o.Rules.Rule5():
 		o.RejectReason = RejectLegOut
+	case !WalkLeg(e.cfg, stage, side, t.TwapPrice, e.anchor):
+		o.RejectReason = RejectWalkLow
 	default:
 		o.OK = true
 		// 纸面目标股数 = Stake/有效价（精确除, 与回测 shares = stake/fill 恒等）;

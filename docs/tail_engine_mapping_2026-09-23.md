@@ -32,6 +32,7 @@
 | `PRICE_MIN = 0.80` | `Tail.PriceMin` | `tail.price_min` | 0.80 | 热门侧**有效价**（ask 优先 / bid 兜底）过此值——**全部五格与 ② 的前置**（见 §3.1）。⚠️ **比较符随段而变**（2026-09-26，决策 #26）：T=150 段 `> 0.80`（严格），T=60 与监听段 `≥ 0.80`；本键只给阈值不给算子（`internal/tail.PriceLeg`） |
 | `DEV_USD = 63` | `Tail.DevMinUSD` | `tail.dev_min_usd` | 63 | 位移腿：`dev ≥ 63 美元` 即放行 |
 | `SIGMA_USD = 40` | `Tail.SigmaMinUSD` | `tail.sigma_min_usd` | 40 | σ 腿门槛：`sd ≥ 40 美元` 才允许「dev ≥ sd」放行（⑤ 相对 ④ 的唯一差别） |
+| `WALK_MIN_USD = 43` | `Tail.WalkMinUSD` | `tail.walk_min_usd` | 43 | **T=150 段入场闸**（2026-09-29，决策 #29）：该段还要 `walk = sgn·(twap − anchor) ≥ 43 美元` 才放行（walk = **已写进结算线**的位移；`dev = basis + walk`）。不达标 ⇒ 本段落一行 `reject_reason=walk_low` 的判定行、**链继续**到 T=60/监听段。非 T=150 段恒放行，`twap ≤ 0` **放行**（fail-open，`internal/tail.WalkLeg`） |
 | `STAKE = 2.0` | `Tail.Stake` | `tail.stake` | 2 | USDC/注。paper 股数 `= Stake/HotAsk` **精确除**（与回测 `shares = 2/fill` 恒等）；live 下单量由 `trading.OrderSpecForObs` 取 `floor2`（既有口径） |
 | `MAX_LAT = 300` | `Tail.MaxBookLatMs` | `tail.max_book_lat_ms` | 300 | `book_latency_ms > 300` 的 tick 无效。与 `flip.max_book_lat_ms` 同值但**独立成键**（两族可分别部署/分别标定） |
 | hist ≤18 窗、≥3 可用 | `flip.HistState`（共用类型） | —（常量） | 18 / 3 | σ 滚动窗；`flip.HistMin = 3`，`hist.Count() < 3` ⇒ 整窗跳过 `skip=no_sigma` |
@@ -43,6 +44,11 @@
 一次都没成为最优（真 argmax=35），`63` 是本 14 天 1σ 折美元的中位数（换波动率
 regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义是「能读能对账」，
 不是「该调」——改任何一个都等于换一条没标定过的策略。
+
+⚠️ **唯一的例外是「存在理由」而不是「可调性」**：`walk_min_usd` 也一样不该在 BTC 上调
+（43 是那 14 天数据上的 argmax），它成为配置键只为**跨标的各带一份自己的标定值**
+（`walk_min_usd` / `dev_min_usd` / `sigma_min_usd` 三者都是 **BTC 价格的标定量**，
+换 ETH 必须重标定，决策 #25）。故校验只有结构性一条：`walk_min_usd ≥ 0`。
 
 ## 2. 记录映射
 
@@ -68,7 +74,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 | — | `ts` / `rem` | 该段 tick 的采样时刻（unix 毫秒）/ 剩余秒（`≤ frame_t`） |
 | `yes_bid/yes_ask/no_bid/no_ask` | 同名字段 | 四档报价（§5.3 原始字段，离线可复算任意 T） |
 | `spot` | `spot` | Binance 最新价（0 = 缺失/陈旧 >2s） |
-| `twap_price` | `twap` | TWAP-60 流值（0 = 缺失；⑤/② 都不用**它**，仅诊断） |
+| `twap_price` | `twap` | TWAP-60 流值（0 = 缺失）。⑤/② 都不用**它**；唯一用它的是 T=150 段的入场闸（`walk = sgn·(twap − anchor)`，2026-09-29 决策 #29），其余场合仅诊断。⇒ **`walk` 不另落字段**，逐行由 `twap`/`anchor`/`side` 复算 |
 | `twap_open_price` | `anchor` | 本窗锚（**恒 > 0**：无锚整窗不产出，见 §3.2） |
 | `hist_bps` | `hist_bps` | 本窗生效 σ（bps） |
 | — | `book_latency_ms` / `spot_age_ms` / `twap_age_ms` | 诊断（§5.3 要求） |
@@ -135,7 +141,7 @@ regime 会失义），`T=60` 的标定只在该 T 上成立。配置键的意义
 ### 3.1 三段递进判定链（用户决定，2026-09-24）
 
 ```
-Watching ──首个「rem ≤ t150_rem(150) 且 spot 可算」的有效 tick──▶ [判 ⑤]
+Watching ──首个「rem ≤ t150_rem(150) 且 spot 可算」的有效 tick──▶ [判 ⑤ ∧ walk ≥ 43 美元]
    ├─ OK   → 落信号行（下单）→ Done
    └─ 拒绝 → Await60
              （首个可判定 tick 已在 rem ≤ t60_rem 时: 整段跳过, **不伪造 t150 行**）
@@ -147,6 +153,15 @@ Listening ──此后**每秒**: 有效 tick ∧ ② 达标──▶ 落信号�
 ```
 
 - **任一段出信号即整窗只下一单**，之后不再判定（与「每窗最多一个仓位」的既有约束一致）。
+- **T=150 段的入场闸**（2026-09-29，决策 #29）：段 1 多一条 `walk ≥ walk_min_usd`（默认 43 美元，
+  `internal/tail.WalkLeg`）——`walk = sgn·(twap − anchor)` 是**已写进结算线**的那部分位移，
+  而 `dev = basis + walk`（basis 是还没写进去的缺口）。故被闸的单 = 「**缺口撑过腿**」的单
+  （`dev ≥ 63` 却 `walk < 43` ⇒ `basis > 20`）。段 2/3 **一字不动**（闸只加在位移最没写进去、
+  也最便宜的决策点上）。拒绝原因 `walk_low`；**链继续**是它的一部分语义（多数改道到 T=60/监听，
+  重入价中位 0.990）。
+- **拒绝原因链的顺序**：`missing_spot → no_hist → price_low → leg_out → walk_low`——
+  `walk_low` **排在最后**，这样它只覆盖「闸是唯一拦路者」的行（14 天 = 250 行，
+  = 被闸的 T=150 信号数）；排在前面会把 dev/σ 本来就不达标的行也读成被闸。
 - **两个判定段各落一行**（成功与否都落盘），**监听段只在达标时落行**（否则每窗白写 ~60 行）。
   ⇒ `tail_*` 每窗 ≤ 3 行。
 - **历史沿革**（→ ⚠️ 作废）：2026-09-23 的方案是「两帧折中」——`rem ≤ 150` 首帧

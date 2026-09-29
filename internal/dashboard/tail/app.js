@@ -19,7 +19,8 @@
     missing_twap: 'TWAP 缺失', // legacy 旧行（新口径不再产出）
     no_hist: 'σ 窗口不足',
     price_low: '价格腿不过',
-    leg_out: '两腿都不过'
+    leg_out: '两腿都不过',
+    walk_low: '入场闸不过' // T=150 段: ⑤ 达标但 walk < 43 美元（决策 #29, 链继续）
   };
   // 整窗跳过原因（tailstats_*.jsonl 的 skip 字段 = cmd/tail 主循环里的字面量）
   var SKIP_CN = {
@@ -306,7 +307,8 @@
       spotAge.textContent = s.spot_age_ms + 'ms';
       spotAge.className = 'src-age' + (s.spot_age_ms > (lim.spot_age_ms || 2000) ? ' stale' : '');
     }
-    // TWAP-60 流值: ⑤ 判定不用它（只作诊断与 σ 的 close 口径）
+    // TWAP-60 流值: T=150 段的入场闸由它算 walk（walk = sgn·(twap−anchor) ≥ 43）;
+    // 其余段只作诊断（以及 σ 的 close 口径）
     var twapAge = $('winTwapAge');
     if (s.twap_price > 0) {
       $('winTwapPrice').textContent = s.twap_price.toFixed(2);
@@ -346,7 +348,10 @@
       '规则：热门侧**有效价**（ask 优先、bid 兜底）过 <b>' + CFG.price_min +
       '</b>（<b>T=150 段要求严格大于</b>，T=60 与监听段为 ≥）且（位移 dev ≥ <b>' + CFG.dev_min_usd +
       ' $</b> 或 <b>' + CFG.sigma_min_usd +
-      ' $ ≤ sd ≤ dev</b>）；② 只要求价格腿 + dev 腿。每注 <b>' + CFG.stake +
+      ' $ ≤ sd ≤ dev</b>）；② 只要求价格腿 + dev 腿。' +
+      '<b>T=150 段另有一道入场闸</b>：已写进结算线的位移 walk ≥ <b>' + CFG.walk_min_usd +
+      ' $</b>（不达标 ⇒ 落 walk_low 判定行、<b>链继续</b>到 T=60/监听；阈值是 BTC 标定量，' +
+      '换标的须重标定）。每注 <b>' + CFG.stake +
       ' U</b> · 盘口延迟闸 <b>' + CFG.max_book_lat_ms +
       'ms</b>。实盘为 GTC 挂单等成交（挂到闭市撤余量），与回测「瞬时即成交」不是同一个估计量。';
   }
