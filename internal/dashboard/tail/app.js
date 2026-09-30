@@ -1,5 +1,6 @@
 // 扫尾盘 ⑤ 纸面监控前端。
-// 轮询: /api/state 5s（窗口/盘口/统计）、/api/signals + /api/snaps 15s。
+// 轮询: /api/state 5s（窗口/盘口/统计）、/api/curve 1s（本窗曲线）、
+// /api/signals + /api/snaps 15s。
 // 阈值一律由服务端下发（/api/state 的 limits、/api/config），前端不得硬编码
 // ——调参后颜色语义与文案必须跟随实际生效值。
 //
@@ -12,6 +13,7 @@
   var $ = function (id) { return document.getElementById(id); };
   var stateInterval = 5000;
   var listInterval = 15000;
+  var curveInterval = 1000; // 曲线服务端每秒采一点, 拉快于此没有意义
 
   // 判定失败原因的中文映射（决策表用）
   var REJECT_CN = {
@@ -339,21 +341,365 @@
       s.signal_count + ' 条 · 未成交 ' + s.noexec_count + ' 条';
   }
 
-  // ── 配置（标定参数; 一次拉取，用于文案与闩锁闸值）──
+  // ── 本窗动态曲线（anchor / twap / spot 三线同轴, 美元）──
+  //
+  // 数据由服务端按 tick 逐秒采样（/api/curve, 见 cmd/tail/curve.go）——前端只画,
+  // 不自己攒点: /api/state 是 5s 轮询, 用它攒点会漏掉 4/5 的采样。
+  //
+  // 三条线的取值差常常只有几十美元（BTC 十万量级）, 所以 y 量程**必须**按数据自适应,
+  // 否则三线叠成一条; 代价是量程逐秒可能微调, 用「取整到好看步长」把它压到不晃眼。
+  // 第 4/5 条是两条派生阈值线（虚线, 中性墨色）, 也进量程但**限量**——见 drawChart 里的
+  // TIE_ROOM 与 SERIES 的注释。
+  //
+  // 换窗: event_start 变化 = 换窗 ⇒ 整条重画; 新窗还没采样时服务端返回的仍是**上一窗**
+  // （points 非空）⇒ 这里什么都不做, 旧曲线一直留到新窗第一个点到来。
+  //
+  // 两处用同一套绘制: 这里是本窗主图; 点信号表/决策表的某一行时会开一个弹窗画**那一行
+  // 所属窗口**的曲线（历史窗从原始采集重建, 决策 #31）。
+  //
+  // 配色 = 分类槽 1/2/3（蓝/橙/水绿）, 经 dataviz 校验器在 #161b22 暗面上全项通过
+  // （定义在 style.css 的 --c-* 里; 换色前后都要重跑 scripts/validate_palette.js）。
+  //
+  // 图**实例**（决策 #31）: 主图与「点行看曲线」弹窗图共用同一套绘制代码, 但数据/悬停下标/
+  // 换算参数必须**按实例分开**——原来是模块级单例（CURVE/hoverIdx/geom）, 两张图并存时
+  // 弹窗一开会把主图的悬停下标套到弹窗的数据上（下标错位 ⇒ 准星乱跳）。
+  // mark = 要标注的竖线时刻（ms; 0 = 不画）——弹窗用来标「那一行发生在第几秒」。
+  function makeChart(cvId, roId) {
+    return { cv: $(cvId), ro: $(roId), data: null, hover: -1, geom: null, mark: 0, empty: '等待本窗数据…' };
+  }
+  var mainChart = makeChart('curveCanvas', 'curveReadout');       // 本窗曲线（1s 轮询 /api/curve）
+  var winChart = makeChart('winCurveCanvas', 'winCurveReadout');  // 点行弹窗（冻结的历史窗）
+  var COLORS = null;   // 各线颜色（从 CSS 变量读一次后缓存; 两图共一份）
 
-  function renderConfig() {
-    if (!CFG) return;
-    $('cfgNote').innerHTML = '三段链（<b>不可调</b>，仅纸面登记）：rem ≤ <b>' + CFG.t150_rem +
-      's</b> 判 ⑤ → 不达标则 rem ≤ <b>' + CFG.t60_rem + 's</b> 再判 ⑤ → 仍不达标则此后每秒判 ②。' +
-      '规则：热门侧**有效价**（ask 优先、bid 兜底）过 <b>' + CFG.price_min +
-      '</b>（<b>T=150 段要求严格大于</b>，T=60 与监听段为 ≥）且（位移 dev ≥ <b>' + CFG.dev_min_usd +
-      ' $</b> 或 <b>' + CFG.sigma_min_usd +
-      ' $ ≤ sd ≤ dev</b>）；② 只要求价格腿 + dev 腿。' +
-      '<b>T=150 段另有一道入场闸</b>：已写进结算线的位移 walk ≥ <b>' + CFG.walk_min_usd +
-      ' $</b>（不达标 ⇒ 落 walk_low 判定行、<b>链继续</b>到 T=60/监听；阈值是 BTC 标定量，' +
-      '换标的须重标定）。每注 <b>' + CFG.stake +
-      ' U</b> · 盘口延迟闸 <b>' + CFG.max_book_lat_ms +
-      'ms</b>。实盘为 GTC 挂单等成交（挂到闭市撤余量），与回测「瞬时即成交」不是同一个估计量。';
+  // ⚠️ 后两条（tie / extrap）是**派生量**（所谓「临界价」——现货得走到哪才结算 Up）,
+  // 不是读数: 它们走**虚线 + 中性墨色**, 不占分类槽（分类槽没有第 4 色可用, 见 style.css）,
+  // 两条之间靠**虚线节奏**区分。二者的定义域**正好拼满整窗**、假设正好相反:
+  //   - tie（长划）: rem ≤ 60 —— 从现在起**守住一个价**不动（运动停住）;
+  //   - extrap（点线）: rem ∈ [60, 150] —— **保持当前速度**线性走下去（运动继续）,
+  //     从三段链的第一个判定点 T=150 起画。
+  // hint 是图例的悬浮说明（可选）。图例由这里生成（renderLegend）——主图与弹窗图两处
+  // 共用同一份定义, 不然加一条线要记得改两处（第 4/5 条线加进来时正是这么漏的）。
+  var SERIES = [
+    { key: 'anchor', cn: 'Anchor', fallback: '#3987e5' },              // 边界那一秒的 TWAP 推送（本窗冻结）
+    { key: 'twap', cn: 'TWAP', fallback: '#199e70' },              // TWAP-60 流值 = 结算线本身
+    { key: 'spot', cn: 'Spot', fallback: '#d95926' },              // Binance 现货（领先量）
+    {
+      key: 'tie', cn: '临界价', fallback: '#8b949e', derived: true, dash: [5, 4],
+      hint: '假设现货从此刻起一直不动: 守在它之上 ⇒ 闭市 TWAP 压在锚上 ⇒ 结算 Up（rem ≤ 60 才有值）'
+    },
+    {
+      key: 'extrap', cn: '外推临界价', fallback: '#8b949e', derived: true, dash: [1.5, 3.5],
+      hint: '假设现货保持当前速度线性运行: 进入最后 60s 时须达到的价格, 才能让闭市 TWAP 等于锚（rem 60~150 才有值）'
+    }
+  ];
+  var CURVE_FONT = '10px -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif';
+  // 派生线能把 y 量程在三条实测线之外**每侧**撑开多少（单位 = 三线 span 的倍数）。
+  // 0.5 ⇒ 量程最多涨到三线 span 的 2 倍, 三条实测线因此至少占约 1/3 图高（量程还要过
+  // 「取整到好看步长」那一关, 实际比值看当窗数据）。
+  // 为什么不是 1.0（= 三线 span 的 3 倍）: 三条实测线的可读性是这张图的第一目的, 而
+  // 0.5→1.0 换来的可见秒数极少（真实窗实测 41s → 41s, 一动不动; 极端合成窗 45s → 48s）,
+  // 代价却是三线占高 36% → 26%。0.5 落在实测的**平台中段**: 0.25~1.0 之间在真实数据上
+  // 给出的是同一个量程（步长取整把它们吸到了一起）, 取中段最不易被某一次取整甩出去。
+  // 调大 = 临界价在画上留得更久、三线更挤; 调小 = 反过来。
+  var TIE_ROOM = 0.5;
+
+  function seriesColors() {
+    if (!COLORS) {
+      var cs = getComputedStyle(document.documentElement);
+      COLORS = {};
+      SERIES.forEach(function (s) {
+        COLORS[s.key] = cs.getPropertyValue('--c-' + s.key).trim() || s.fallback;
+      });
+    }
+    return COLORS;
+  }
+
+  // 图例（主图与弹窗图各调一次, 内容同一份 SERIES）。色块是 <i class="sw <key>">——虚线那两条
+  // 也靠 CSS 里的同款虚线色块, 与图上编码一致。
+  function renderLegend(el) {
+    el.innerHTML = SERIES.map(function (s) {
+      return '<span class="lg"' + (s.hint ? ' title="' + esc(s.hint) + '"' : '') + '>' +
+        '<i class="sw ' + s.key + '"></i>' + s.cn + '</span>';
+    }).join('');
+  }
+
+  // 刻度步长取 1/2/5×10^n 里第一个 ≥ raw 的——每格都是整数, 量程逐秒重算也不晃。
+  function niceStep(raw) {
+    var steps = [0.1, 0.2, 0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
+    for (var i = 0; i < steps.length; i++) { if (steps[i] >= raw) return steps[i]; }
+    return Math.ceil(raw / 1000) * 1000;
+  }
+
+  // 采样点的窗口内秒数（以 ts 为准; ts 缺失时退回 窗口长−rem）
+  function elapsedSec(p, start, winSec) {
+    return start > 0 ? p.ts / 1000 - start : winSec - p.rem;
+  }
+
+  // 画一张曲线图（ch = makeChart 出来的实例）。主图与弹窗图都走这里, 区别只有数据源与
+  // ch.mark（弹窗才标竖线）。
+  function drawChart(ch) {
+    var cv = ch.cv;
+    var wrap = cv.parentNode;
+    var W = wrap.clientWidth, H = wrap.clientHeight;
+    if (!W || !H) return; // 隐藏中（卡片折叠等）: 不画也不改尺寸
+    var dpr = window.devicePixelRatio || 1;
+    if (cv.width !== Math.round(W * dpr) || cv.height !== Math.round(H * dpr)) {
+      cv.width = Math.round(W * dpr);
+      cv.height = Math.round(H * dpr);
+    }
+    var ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+
+    var css = getComputedStyle(document.documentElement);
+    var muted = css.getPropertyValue('--muted').trim() || '#8b949e';
+    var grid = css.getPropertyValue('--grid').trim() || '#21262d';
+    var surface = css.getPropertyValue('--card').trim() || '#161b22';
+
+    var pts = (ch.data && ch.data.points) || [];
+    var winSec = (ch.data && ch.data.window_sec) || 300;
+    var start = ch.data ? ch.data.event_start : 0;
+
+    // 左侧留出整数价刻度（110432.15 这类 9 字符）; 右侧留一格给末位时间刻度
+    var padL = 56, padR = 12, padT = 10, padB = 18;
+    var pw = W - padL - padR, ph = H - padT - padB;
+    if (pw < 40 || ph < 40) return;
+    ch.geom = null;
+    ctx.font = CURVE_FONT;
+
+    // y 量程: 三条**实测**线打底, 两条派生线**也参与**（同轴同刻度才可比——临界价是价格,
+    // 存在的意义就是跟现货直接比高低）, 但参与的**取值要限幅**; 一个有效读数都没有 = 等待数据。
+    // ⚠️ tie 必须限幅: 它在 rem→0 时发散（要几秒扳回整段偏差, rem=5 放大 11 倍、rem=1
+    // 放大 59 倍）, 全额放进来会把三条价格线压成一条平线。做法 = 它在量程里的**取值先夹到
+    // 三线 span 的 ±TIE_ROOM 倍以内**再取 min/max: rem 还大时它完整可见（这正是修的那个
+    // bug——原样全额取量程会立刻把三线压扁, 完全不取量程则它一涨出三线范围就贴边消失）,
+    // 发散到离谱时量程停涨、超出的部分由下面的 clip 裁掉。
+    // 用**夹取**而不是「超了就整段退回三线量程」是为了**连续性**: 量程随临界价平缓长大、
+    // 到顶后停住, 画面不会跳一下。
+    // ⚠️ extrap 过这一关是**恒等变换**: 它是 Spot 与 anchor 的凸组合, 而这两个值本身就在
+    // 三线 min/max 里 ⇒ 它永远落在三线之间, 夹不夹都一样。放进来只为「派生量统一处理」,
+    // 免得日后有人以为这里漏了它（真正让它保持可读的是这个凸组合性质, 不是这行代码）。
+    var lo = Infinity, hi = -Infinity;
+    pts.forEach(function (p) {
+      SERIES.forEach(function (s) {
+        if (s.derived) return;
+        var v = p[s.key];
+        if (v > 0) { if (v < lo) lo = v; if (v > hi) hi = v; }
+      });
+    });
+    if (!isFinite(lo)) {
+      ctx.fillStyle = muted;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(ch.empty, W / 2, H / 2);
+      return;
+    }
+    if (hi - lo < 0.5) { var mid = (lo + hi) / 2; lo = mid - 0.5; hi = mid + 0.5; } // 单点/极窄
+    var room = (hi - lo) * TIE_ROOM;                 // 派生线每侧最多撑开这么多
+    var capLo = lo - room, capHi = hi + room;
+    pts.forEach(function (p) {
+      SERIES.forEach(function (s) {
+        if (!s.derived) return;
+        var v = p[s.key];
+        if (!(v > 0)) return;
+        if (v < capLo) v = capLo; else if (v > capHi) v = capHi;
+        if (v < lo) lo = v; else if (v > hi) hi = v;
+      });
+    });
+    var pad = (hi - lo) * 0.12;
+    lo -= pad; hi += pad;
+    var step = niceStep((hi - lo) / 3);
+    lo = Math.floor(lo / step) * step;
+    hi = Math.ceil(hi / step) * step;
+    var lines = Math.round((hi - lo) / step);
+
+    var xOf = function (sec) { return padL + Math.min(Math.max(sec, 0), winSec) / winSec * pw; };
+    var yOf = function (val) { return padT + (hi - val) / (hi - lo) * ph; };
+    var secs = pts.map(function (p) { return elapsedSec(p, start, winSec); });
+    ch.geom = { padL: padL, pw: pw, winSec: winSec, secs: secs };
+
+    // 网格与刻度（实线发丝线, 比表面亮一档——虚线会读成阈值/预测）
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = grid;
+    ctx.fillStyle = muted;
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    for (var i = 0; i <= lines; i++) {
+      var gy = Math.round(yOf(lo + i * step)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(padL, gy);
+      ctx.lineTo(padL + pw, gy);
+      ctx.stroke();
+      ctx.fillText((lo + i * step).toFixed(2), padL - 6, gy);
+    }
+    ctx.textAlign = 'center';
+    var xStep = winSec > 300 ? 120 : 60;
+    for (i = 0; i <= winSec; i += xStep) {
+      var gx = Math.round(xOf(i)) + 0.5;
+      ctx.beginPath();
+      ctx.moveTo(gx, padT);
+      ctx.lineTo(gx, padT + ph);
+      ctx.stroke();
+      ctx.fillText(String(i), gx, padT + ph + 9);
+    }
+
+    // 标记线（弹窗才有）: 标出「这一行发生在第几秒」。画在网格之上、五条线**之下**——
+    // 它是**注释**不是数据序列, 压在上面会把「那一刻价在哪」盖住。
+    // 与悬停准星同色（都是竖线）, 靠**顶部标签**区分（准星没有标签）; 也不占分类色槽。
+    if (ch.mark > 0 && start > 0) {
+      var markSec = ch.mark / 1000 - start;
+      if (markSec >= 0 && markSec <= winSec) {
+        var mx = Math.round(xOf(markSec)) + 0.5;
+        var rightSide = mx > padL + pw / 2;
+        ctx.save();
+        ctx.strokeStyle = 'rgba(230, 237, 243, 0.4)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(mx, padT);
+        ctx.lineTo(mx, padT + ph);
+        ctx.stroke();
+        // 标签贴线写, 靠右半边就翻到线左侧（免得跑出画框）; 贴着画框上沿
+        ctx.fillStyle = muted;
+        ctx.textAlign = rightSide ? 'right' : 'left';
+        ctx.textBaseline = 'top';
+        ctx.fillText('t=' + Math.round(markSec) + 's', mx + (rightSide ? -4 : 4), padT + 1);
+        ctx.restore();
+      }
+    }
+
+    // 曲线（2px; 该点无读数就断线, 不跨着空洞连——两条派生线的定义域不重叠, 所以这一段
+    // 里每一条都只有半窗有值, 断线是它们正常的写法而不是缺数据）。**派生量先画、垫在
+    // 下面**: 阈值不是读数, 三条实测线压在上面才读得清; 量程已经给 tie 让过路（TIE_ROOM）,
+    // 但 rem→0 它仍可能跑出去 ⇒ 裁到绘图矩形内——线贴边消失 = 量程依然装不下它 =
+    // 「现货离守住差得远」（确切数字看读数行）。
+    var colors = seriesColors();
+    var order = SERIES.filter(function (s) { return s.derived; })
+      .concat(SERIES.filter(function (s) { return !s.derived; }));
+    order.forEach(function (s) {
+      ctx.save();
+      ctx.strokeStyle = colors[s.key];
+      ctx.lineWidth = 2;
+      ctx.lineJoin = 'round';
+      ctx.lineCap = 'round';
+      if (s.derived) {
+        ctx.setLineDash(s.dash); // 同一支中性墨色, 靠**虚线节奏**分两条（不再有可用的分类色）
+        ctx.beginPath();
+        ctx.rect(padL, padT, pw, ph);
+        ctx.clip();
+      }
+      ctx.beginPath();
+      var pen = false;
+      for (var j = 0; j < pts.length; j++) {
+        var v = pts[j][s.key];
+        if (!(v > 0)) { pen = false; continue; }
+        if (pen) ctx.lineTo(xOf(secs[j]), yOf(v));
+        else { ctx.moveTo(xOf(secs[j]), yOf(v)); pen = true; }
+      }
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    // 悬停/触摸: 竖直准星 + 三个点 + 线下读数（点/触即得, 不靠悬浮窗遮挡曲线）
+    var ro = ch.ro;
+    if (ch.hover >= 0 && ch.hover < pts.length) {
+      var hx = xOf(secs[ch.hover]);
+      ctx.strokeStyle = 'rgba(230, 237, 243, 0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(Math.round(hx) + 0.5, padT);
+      ctx.lineTo(Math.round(hx) + 0.5, padT + ph);
+      ctx.stroke();
+      SERIES.forEach(function (s) {
+        var v = pts[ch.hover][s.key];
+        if (!(v > 0)) return;
+        ctx.save();
+        if (s.derived) { // tie 可能落在量程外 ⇒ 与线同一刀裁掉
+          ctx.beginPath();
+          ctx.rect(padL, padT, pw, ph);
+          ctx.clip();
+        }
+        ctx.beginPath();
+        ctx.arc(hx, yOf(v), 3, 0, 6.2832);
+        if (s.derived) { // 空心点: 与虚线同一套「这不是读数」的编码
+          ctx.strokeStyle = colors[s.key];
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        } else {
+          ctx.fillStyle = colors[s.key];
+          ctx.fill();
+          ctx.strokeStyle = surface; // 2px 表面色描边: 三线重叠时也分得开
+          ctx.lineWidth = 2;
+          ctx.stroke();
+        }
+        ctx.restore();
+      });
+      // 每项包一个 .bit（nowrap: 「现货」不能和它后面那个数分家）: 窄屏放不下时在
+      // **项与项之间**折行——5 项合起来在手机上必然两行。
+      // ⚠️ join 的分隔符必须是**一个空格**, 不能是空串: .bit 是 nowrap 的 inline,
+      // 相邻两个之间没有空白就**没有断行机会**, 整行会横着溢出视口（实测 597px）。
+      // 视觉上的「 · 」分隔由 CSS 的 .bit::before 加, 它跟着后一项走, 不会留在行尾。
+      var bits = SERIES.map(function (s) {
+        var v = pts[ch.hover][s.key];
+        return '<span class="bit"><i class="sw ' + s.key + '"></i>' + s.cn + ' ' +
+          (v > 0 ? v.toFixed(2) : '—') + '</span>';
+      });
+      ro.innerHTML = '<span class="bit"><b>t=' + Math.round(secs[ch.hover]) + 's</b></span> ' +
+        bits.join(' ');
+    } else {
+      ro.textContent = '窗口内秒 0 → ' + winSec + '（0 = 边界）· 点按曲线查看某秒读数';
+    }
+  }
+
+  // 悬停/触摸 → 最近采样点（1s 一个点, 命中区就是整列, 不必精确对准）
+  function hoverChart(ch, clientX) {
+    if (!ch.geom || !ch.data || !ch.data.points.length) return;
+    var rect = ch.cv.getBoundingClientRect();
+    var sec = (clientX - rect.left - ch.geom.padL) / ch.geom.pw * ch.geom.winSec;
+    var best = -1, bestD = Infinity;
+    ch.geom.secs.forEach(function (s, i) {
+      var d = Math.abs(s - sec);
+      if (d < bestD) { bestD = d; best = i; }
+    });
+    if (best === ch.hover) return;
+    ch.hover = best;
+    drawChart(ch);
+  }
+
+  // 一张图的四条指针事件（两图共用）。被动监听: 触摸要能顺着页面滚动（touch-action: pan-y）。
+  function bindChartHover(ch) {
+    ch.cv.addEventListener('mousemove', function (e) { hoverChart(ch, e.clientX); });
+    ch.cv.addEventListener('mouseleave', function () { resetHover(ch); });
+    ch.cv.addEventListener('touchstart', function (e) {
+      if (e.touches[0]) hoverChart(ch, e.touches[0].clientX);
+    }, { passive: true });
+    ch.cv.addEventListener('touchmove', function (e) {
+      if (e.touches[0]) hoverChart(ch, e.touches[0].clientX);
+    }, { passive: true });
+    ch.cv.addEventListener('touchend', function () { resetHover(ch); });
+  }
+
+  function resetHover(ch) {
+    if (ch.hover === -1) return; // 没悬停过就不重画（轮询那边每秒也在画, 别白画两次）
+    ch.hover = -1;
+    drawChart(ch);
+  }
+
+  // 主图的 1s 轮询回来（永远是「本窗」）——弹窗图不走这里, 它是冻结的历史窗, 不轮询。
+  function onCurve(d) {
+    d.points = d.points || [];
+    var ch = mainChart;
+    if (ch.data && d.event_start === ch.data.event_start) {
+      ch.data = d;          // 同窗: 追加的点直接上屏
+    } else if (d.points.length > 0) {
+      ch.data = d;          // 换窗且已有采样: 整条换装
+      ch.hover = -1;
+    } else {
+      return;               // 换窗但还没有采样 / 服务端重启: 保留旧曲线不擦
+    }
+    $('curveTitle').textContent = d.event_start > 0
+      ? '本窗曲线 · ' + fmtTime(d.event_start * 1000) + ' 起 · ' + d.points.length + ' 点'
+      : '本窗曲线';
+    drawChart(ch);
   }
 
   // ── 信号 / 决策列表（服务端分页）──
@@ -365,13 +711,24 @@
     snaps: { url: '/api/snaps', cardId: 'snapsCard', pagerId: 'snapsPager', infoId: 'snapsPgInfo', page: 1, pages: 1, total: 0, auto: true }
   };
 
+  // 让一行可点（信号表与决策表都点）: 带上该行所属窗口的起点与时刻, 点击弹窗画那一窗的曲线。
+  // ⚠️ 定位原始采集只认 event_start, **不能**拿 date 反推——date 是**行 ts** 的 UTC 日,
+  // 跨午夜的窗会差一天, 而 events 文件按**窗口起点**归日（决策 #31）。
+  function clickableRow(tr, r) {
+    tr.className = 'row-click';
+    tr.title = '点击看这一窗的曲线';
+    tr.setAttribute('data-es', r.event_start || 0);
+    tr.setAttribute('data-ts', r.ts || 0);
+    return tr;
+  }
+
   // 信号表: 时间 侧 rem ask dev$ sd$ 份额 状态 结果 P&L
   function renderSignals(resp) {
     var tb = document.querySelector('#signalsTable tbody');
     tb.innerHTML = '';
     $('signalsEmpty').hidden = resp.items.length > 0;
     resp.items.forEach(function (r) {
-      var tr = document.createElement('tr');
+      var tr = clickableRow(document.createElement('tr'), r);
       var shares = hasPosition(r) ? r.shares.toFixed(1) : '—';
       tr.innerHTML =
         '<td class="muted">' + fmtTime(r.ts) + '</td>' +
@@ -395,7 +752,7 @@
     tb.innerHTML = '';
     $('snapsEmpty').hidden = resp.items.length > 0;
     resp.items.forEach(function (r) {
-      var tr = document.createElement('tr');
+      var tr = clickableRow(document.createElement('tr'), r);
       var verdict = r.ok
         ? '<span class="won">信号</span>'
         : '<span class="muted">' + (REJECT_CN[r.reject_reason] || esc(r.reject_reason || '—')) + '</span>';
@@ -573,9 +930,70 @@
   $('dailyMask').addEventListener('click', function (e) {
     if (e.target === this) closeDaily();
   });
-  // Esc 关闭
+
+  // ── 点行看曲线弹窗（信号表 / 决策表任意一行）──
+  // 画的是**那一行所属窗口**的完整曲线 + 一条标出该行时刻的竖线。数据两条路, 由服务端定:
+  // 正好是内存里这一窗 ⇒ 实况; 否则从原始采集（events_*.jsonl）重建（决策 #31）。
+  // 它是冻结的历史窗, 所以**不轮询**——1s 的 /api/curve 只喂主图。
+  function openWindowCurve(es, ts) {
+    // ⚠️ 先解锁遮罩再画: hidden 时 wrap.clientWidth === 0, drawChart 会直接 return（什么都不画）
+    $('winCurveMask').hidden = false;
+    winChart.data = null;
+    winChart.hover = -1;
+    winChart.mark = ts > 0 ? ts : 0;
+    winChart.empty = '加载中…';
+    $('winCurveNote').hidden = true;
+    $('winCurveNote').textContent = '';
+    $('winCurveSub').textContent = '加载中…';
+    drawChart(winChart);
+
+    if (!(es > 0)) { // 旧口径的行（frame / scan）没记 event_start, 定位不到窗口
+      winChart.empty = '这一行没有窗口起点';
+      $('winCurveSub').textContent = '无法定位窗口';
+      $('winCurveNote').textContent = '旧口径的行（frame / scan）没记 event_start, 因此无法回读它的原始采集。';
+      $('winCurveNote').hidden = false;
+      drawChart(winChart);
+      return;
+    }
+    $('winCurveTitle').textContent = '窗口曲线 · ' + fmtTime(es * 1000) + ' 起';
+    fetchJSON('/api/curve?event_start=' + es, function (d) {
+      d.points = d.points || [];
+      var ch = winChart;
+      ch.data = d;
+      ch.hover = -1;
+      if (d.points.length === 0) ch.empty = '这一窗没有曲线数据';
+      var src = d.source === 'live' ? '实况采样' : (d.source === 'events' ? '原始采集重建' : '无数据');
+      $('winCurveSub').textContent =
+        (ts > 0 ? '点击时刻 ' + fmtTime(ts) + ' · ' : '') + d.points.length + ' 点 · ' + src;
+      if (d.note) {
+        $('winCurveNote').textContent = d.note;
+        $('winCurveNote').hidden = false;
+      }
+      drawChart(ch);
+    });
+  }
+  function closeWindowCurve() {
+    $('winCurveMask').hidden = true;
+  }
+  $('winCurveClose').addEventListener('click', closeWindowCurve);
+  $('winCurveMask').addEventListener('click', function (e) {
+    if (e.target === this) closeWindowCurve();
+  });
+  // 行点击用**委托**（表体每次轮询整块重渲染, 逐行绑定会全丢）。单击即开: 双击的第一次
+  // click 也会触发它, 所以「双击」同样能用; 而 iOS Safari 的双击是缩放, dblclick 不可靠。
+  ['signalsTable', 'snapsTable'].forEach(function (id) {
+    $(id).addEventListener('click', function (e) {
+      var tr = e.target && e.target.closest ? e.target.closest('tr[data-es]') : null;
+      if (!tr) return; // 落在表头/空白/分页上: 不是「点行」
+      openWindowCurve(Number(tr.getAttribute('data-es')), Number(tr.getAttribute('data-ts')));
+    });
+  });
+
+  // Esc 两个弹窗都关（逐日明细与窗口曲线）
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape') closeDaily();
+    if (e.key !== 'Escape') return;
+    closeDaily();
+    closeWindowCurve();
   });
 
   function fetchJSON(url, cb, timeoutMs) {
@@ -614,10 +1032,29 @@
   bindCollapse('signals');
   bindCollapse('snaps');
 
-  fetchJSON('/api/config', function (c) { CFG = c; renderConfig(); });
+  // 标定参数只服务闩锁闸值（T150/T60 的 rem 阈值）与 sd 标红（sigma_min_usd）
+  fetchJSON('/api/config', function (c) { CFG = c; });
+
+  // 曲线: 主图 1s 轮询 + 两图各自的悬停/触摸读数; 标签页在后台时不拉（无人在看）
+  renderLegend($('curveLegend'));
+  renderLegend($('winCurveLegend'));
+  bindChartHover(mainChart);
+  bindChartHover(winChart);
+  // 宽度变化要两张都重画（弹窗关着时 clientWidth = 0, drawChart 自己会跳过）
+  window.addEventListener('resize', function () { drawChart(mainChart); drawChart(winChart); });
+  document.addEventListener('visibilitychange', function () {
+    if (!document.hidden) tickCurve();
+  });
+
+  function tickCurve() {
+    if (document.hidden) return;
+    fetchJSON('/api/curve', onCurve);
+  }
 
   setInterval(tick, stateInterval);
   setInterval(tickLists, listInterval);
+  setInterval(tickCurve, curveInterval);
   tick();
   tickLists();
+  tickCurve(); // 首帧: 立刻画出「等待本窗数据…」或上一窗的曲线
 })();

@@ -82,8 +82,9 @@ import (
 	"github.com/necklace/flip-signal/internal/trading"
 )
 
-// windowSec 是 btc-updown-5m 窗口长度（秒）。
-const windowSec = 300
+// windowSec 是 btc-updown-5m 窗口长度（秒）。定义在 internal/tail（决策 #31: 实时曲线
+// 与 events 重建共用一份公式），这里只留别名——本文件与 events.go/curve.go 有十几处引用。
+const windowSec = tail.WindowSec
 
 // prefetchLead 是市场信息预取提前量：窗口边界前多少秒开始调 FetchMarketBySlug。
 const prefetchLead = 20 * time.Second
@@ -99,8 +100,8 @@ const lateLimit = 15 * time.Second
 // （TwapAdapter 内建看门狗，与 cmd/flip 同值）。
 const twapMaxStale = 2 * time.Minute
 
-// twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。
-const twapLookbackSeconds = 60
+// twapLookbackSeconds 是结算口径 TWAP 回看窗口秒数（Chainlink TWAP-60）。同 windowSec，别名。
+const twapLookbackSeconds = tail.TwapLookbackSeconds
 
 // 精确取锚参数（决策 #15）: 锚 = **边界那一秒**的 TWAP-60 评估值（实测与官方
 // openPrice 收敛值逐位相同）。该条推送 p50 +2.0s 到达，20s 预算 = p50 的 10 倍余量，
@@ -154,6 +155,7 @@ type runtimeState struct {
 	StartedAt   time.Time                               // 进程启动时刻（构造后不变）
 	Exec        *tail.ExecState                         // 行编排（HandleDecision 单入口 + LiveSummary; 构造后不变）
 	books       func() (*sdk.OrderBook, *sdk.OrderBook) // 当前窗口 UP/DOWN 盘口闭包
+	curve       curveBuf                                // 本窗动态曲线缓冲（见 curve.go; 自带锁）
 
 	// 锚可见性（取锚 goroutine 写 → 主循环 join 后读, Dashboard 也在读）。
 	// 单独一把锁、**不与窗口换装的 mu 嵌套**: 前者在窗口内异步写、每窗清零,
@@ -597,7 +599,8 @@ func main() {
 			SpotAgeMs: cfg.Feed.MaxSpotAgeMs,
 			TwapAgeMs: cfg.Feed.MaxTwapAgeMs,
 		}
-		dashState := dashboard.NewTailState(recorder, runtime, cfg.Tail, effMode, limits)
+		// eventsDir 供页面「点行看曲线」回读历史窗的原始采集（决策 #31）——dashboard 只读它。
+		dashState := dashboard.NewTailState(recorder, runtime, cfg.Tail, effMode, cfg.Runtime.EventsDir, limits)
 		go dashState.ListenAndServe(cfg.Runtime.TailDashboardAddr)
 	}
 
@@ -868,6 +871,9 @@ func main() {
 				rem = max(rem, 0)
 				lastSampleAt = time.Now()
 				lastTick = runtime.tick(tickTime, rem, cfg.Feed.MaxSpotAgeMs)
+				// 本窗曲线（Dashboard 只读; 与判定路径无交集）。remMax 传第一个判定点:
+				// 速度外推那条线从 T=150 起画（见 curve.go 的 ExtrapPrice）。
+				runtime.sampleCurve(lastTick, cfg.Tail.T150Rem)
 
 				// 引擎驱动: 本 tick 的**至多一行**（三段链任一段出信号即整窗只下一单）。
 				// 判定行（t150/t60 未达标）只落盘; 信号行（OK）才进风控闸与执行路径——

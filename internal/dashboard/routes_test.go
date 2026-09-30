@@ -32,9 +32,9 @@ func TestTailRoutes(t *testing.T) {
 		t.Fatalf("NewRecorder: %v", err)
 	}
 	defer rec.Close()
-	s := NewTailState(rec, fakeTailSnap{tail.LiveSnapshot{
+	s := NewTailState(rec, fakeTailSnap{s: tail.LiveSnapshot{
 		Mode: "paper", EventStart: time.Now().Unix(), EngineState: "Watching",
-	}}, tail.DefaultConfig(), "paper", SourceLimits{BookLatMs: 300})
+	}}, tail.DefaultConfig(), "paper", "", SourceLimits{BookLatMs: 300})
 
 	mux := s.routes()
 
@@ -64,7 +64,7 @@ func TestTailRoutes(t *testing.T) {
 
 	// JSON API: 每口都应 200 且是 JSON（内容由各自的 handler 测试负责）
 	for _, path := range []string{
-		"/api/state", "/api/snaps", "/api/signals", "/api/daily", "/api/config",
+		"/api/state", "/api/curve", "/api/snaps", "/api/signals", "/api/daily", "/api/config",
 	} {
 		w := serve(t, mux, path)
 		if w.Code != http.StatusOK {
@@ -102,7 +102,7 @@ func TestNoStoreHeaders(t *testing.T) {
 	defer tailRec.Close()
 
 	fs := NewFlipState(flipRec, fakeSnap{flip.LiveSnapshot{}}, flip.DefaultConfig(), "paper", SourceLimits{})
-	ts := NewTailState(tailRec, fakeTailSnap{tail.LiveSnapshot{}}, tail.DefaultConfig(), "paper", SourceLimits{})
+	ts := NewTailState(tailRec, fakeTailSnap{s: tail.LiveSnapshot{}}, tail.DefaultConfig(), "paper", "", SourceLimits{})
 
 	for _, tc := range []struct {
 		family string

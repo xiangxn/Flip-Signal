@@ -101,10 +101,14 @@ type tailRecordResponse struct {
 	Date        string `json:"date"`
 	ConditionID string `json:"condition_id"`
 	Slug        string `json:"slug"`
-	Kind        string `json:"kind"`            // snap（frame/scan 为 legacy 行, 不再产出）
-	Stage       string `json:"stage,omitempty"` // t150 | t60 | listen; 空 = legacy 旧行
-	FrameT      int    `json:"frame_t"`
-	Rem         int    `json:"rem"`
+	// EventStart 窗口起点（unix 秒）——前端「点行看曲线」拿它回读该窗的原始采集
+	// （/api/curve?event_start=N）。⚠️ 不能拿 Date 反推：Date 是**行 ts** 的 UTC 日,
+	// 跨午夜的窗会差一天, 而 events 文件按**窗口起点**归日（决策 #31）。
+	EventStart int64  `json:"event_start"`
+	Kind       string `json:"kind"`            // snap（frame/scan 为 legacy 行, 不再产出）
+	Stage      string `json:"stage,omitempty"` // t150 | t60 | listen; 空 = legacy 旧行
+	FrameT     int    `json:"frame_t"`
+	Rem        int    `json:"rem"`
 
 	YesBid    float64 `json:"yes_bid"`
 	YesAsk    float64 `json:"yes_ask"`
@@ -264,6 +268,8 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// handleCurve 见 tail_curve.go（实况曲线 + 按窗回读重建都在那个文件里）。
+
 // handleSnaps 返回全部决策行（判定行 + 信号行, 时间倒序分页）。
 func (s *TailState) handleSnaps(w http.ResponseWriter, r *http.Request) {
 	all := filterKind(s.recorder.Observations(), tail.KindSnap)
@@ -329,6 +335,7 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 		Date:         rec.Date,
 		ConditionID:  rec.ConditionID,
 		Slug:         rec.Slug,
+		EventStart:   rec.EventStart,
 		Kind:         rec.Kind,
 		Stage:        rec.Stage,
 		FrameT:       rec.FrameT,

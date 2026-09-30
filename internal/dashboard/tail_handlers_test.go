@@ -21,10 +21,14 @@ import (
 	"github.com/necklace/flip-signal/internal/tail"
 )
 
-// fakeTailSnap 实现 tail.Snapshotter（固定快照）。
-type fakeTailSnap struct{ s tail.LiveSnapshot }
+// fakeTailSnap 实现 tail.Snapshotter（固定快照 + 固定曲线）。
+type fakeTailSnap struct {
+	s     tail.LiveSnapshot
+	curve tail.Curve
+}
 
 func (f fakeTailSnap) Snapshot() tail.LiveSnapshot { return f.s }
+func (f fakeTailSnap) Curve() tail.Curve           { return f.curve }
 
 // newTailState 建一个 tail dashboard 载体（记录器用临时目录）。
 func newTailState(t *testing.T, snap tail.LiveSnapshot, limits SourceLimits) (*TailState, *tail.Recorder, string) {
@@ -35,7 +39,7 @@ func newTailState(t *testing.T, snap tail.LiveSnapshot, limits SourceLimits) (*T
 		t.Fatalf("NewRecorder: %v", err)
 	}
 	t.Cleanup(func() { rec.Close() })
-	s := NewTailState(rec, fakeTailSnap{snap}, tail.DefaultConfig(), "paper", limits)
+	s := NewTailState(rec, fakeTailSnap{s: snap}, tail.DefaultConfig(), "paper", "", limits)
 	return s, rec, dir
 }
 
@@ -381,6 +385,46 @@ func TestTailDaily(t *testing.T) {
 	}
 	if got.Days[0].Date >= got.Days[1].Date {
 		t.Fatalf("逐日未按时间正序: %s / %s", got.Days[0].Date, got.Days[1].Date)
+	}
+}
+
+// ── /api/curve ──
+
+// TestTailCurvePassthrough 曲线口: 采样序列（含 0 = 缺读数的点）与窗口量程原样透出。
+// 前端据此画三条实测线 + 一条派生阈值, 并用 event_start 判「换窗了没有」（换窗 = 整条
+// 重画; 新窗还没采样时服务端返回的仍是上一窗, 前端据此保留旧曲线不擦）。
+func TestTailCurvePassthrough(t *testing.T) {
+	const start = 1780000000
+	curve := tail.Curve{
+		EventStart: start, Slug: "btc-updown-5m-1780000000", WindowSec: 300,
+		Points: []tail.CurvePoint{
+			{Ts: start * 1000, Rem: 300}, // 锚未到手 + 两源都没推送(canonical: 全 0 的起点)
+			{Ts: start*1000 + 1000, Rem: 299, Anchor: 100000, Twap: 100010.5, Spot: 100012.25},
+			{Ts: start*1000 + 2000, Rem: 298, Anchor: 100000, Twap: 100004.5}, // spot 缺失 ⇒ 0
+			// rem > 60: 临界价无定义 ⇒ 0（前端不画、读数行显示「—」）
+			{Ts: start*1000 + 240000, Rem: 59, Anchor: 100000, Twap: 100003, Spot: 100020, Tie: 100017.47},
+		},
+	}
+	rec, err := tail.NewRecorder(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	defer rec.Close()
+	s := NewTailState(rec, fakeTailSnap{curve: curve}, tail.DefaultConfig(), "paper", "", SourceLimits{})
+
+	var got tail.Curve
+	getJSON(t, s.handleCurve, "/api/curve", &got)
+	if got.EventStart != start || got.WindowSec != 300 || len(got.Points) != 4 {
+		t.Fatalf("曲线头 = %+v（%d 点）", got, len(got.Points))
+	}
+	if got.Points[0].Anchor != 0 || got.Points[0].Twap != 0 || got.Points[0].Spot != 0 || got.Points[0].Tie != 0 {
+		t.Fatalf("起点应为全 0（锚未到手 + 无推送）: %+v", got.Points[0])
+	}
+	if got.Points[1].Spot != 100012.25 || got.Points[2].Spot != 0 {
+		t.Fatalf("读数未原样透出: %+v", got.Points)
+	}
+	if got.Points[1].Tie != 0 || got.Points[3].Tie != 100017.47 {
+		t.Fatalf("临界价未原样透出（rem>60 应为 0）: %+v", got.Points)
 	}
 }
 

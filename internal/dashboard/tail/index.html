@@ -83,6 +83,23 @@
         <span>spot <b id="winSpot">—</b> <span class="src-age" id="winSpotAge">—</span></span>
         <span>twap <b id="winTwapPrice">—</b> <span class="src-age" id="winTwapAge">—</span></span>
       </div>
+      <!-- 本窗动态曲线（三线同轴, 美元）: 每窗从边界起逐秒画, 窗末保留到下一窗
+           第一个采样到来。数据源 = /api/curve（服务端按 tick 采样, 1s 轮询——
+           不跟 /api/state 的 5s 走, 那条路会漏掉 4/5 的采样）。
+           第 4/5 项是两条**派生量**（阈值: 现货得走到哪才结算 Up）——「临界价」管
+           rem ≤ 60（守住一个价不动）、「外推临界价」管 rem ∈ [60,150]（保持当前速度
+           走下去）, 两条合起来拼满整窗。都画成虚线 + 同一支中性墨色（分类槽没有第 4 色
+           可用）、互靠虚线节奏区分, 详见 app.js 的 SERIES 注释。 -->
+      <div class="curve" id="curveBox">
+        <div class="curve-head">
+          <span class="curve-title" id="curveTitle">本窗曲线</span>
+          <!-- 图例由 app.js 的 renderLegend() 按 SERIES 生成（主图与弹窗图同一份;
+               写死在这里的话, 加一条线要记得改两处） -->
+          <span class="curve-legend" id="curveLegend"></span>
+        </div>
+        <div class="curve-wrap"><canvas id="curveCanvas">本窗曲线</canvas></div>
+        <div class="curve-readout" id="curveReadout">窗口内秒 0 → 300（0 = 边界）</div>
+      </div>
       <!-- 本窗 tick 健康度（延迟闸挡掉的 tick 在此可见; 窗口间隐藏） -->
       <div class="win-health" id="winHealth" hidden>
         <span>ticks <b id="whTicks">—</b></span>
@@ -93,7 +110,6 @@
       </div>
       <!-- 今日采集健康度（读当日 tailstats_*.jsonl; 判决的辅助闸门） -->
       <div class="note" id="todayHealth">今日采集：—</div>
-      <div class="note" id="cfgNote">标定参数：加载中…</div>
     </section>
 
     <!-- 信号（判定通过、已进执行路径的行; 未成交行的 P&L 显示「—」但结果照显） -->
@@ -174,6 +190,32 @@
           <tbody></tbody>
         </table>
         <div class="empty" id="dailyEmpty" hidden>暂无数据</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 窗口曲线弹窗（点信号表 / 决策表任意一行打开）: 画那一行**所属窗口**的完整曲线 +
+       一条标出该行时刻的竖线。曲线两条来源（服务端决定）: 内存里正好是这一窗 ⇒ 实况采样;
+       否则从原始采集 events_*.jsonl 重建（决策 #31）。无采集时这里说明原因。 -->
+  <div class="modal-mask" id="winCurveMask" hidden>
+    <div class="modal curve-modal" role="dialog" aria-label="窗口曲线">
+      <div class="modal-head">
+        <div class="modal-title">
+          <h2 id="winCurveTitle">窗口曲线</h2>
+          <div class="modal-sub" id="winCurveSub">—</div>
+        </div>
+        <button class="modal-close" id="winCurveClose" aria-label="关闭">✕</button>
+      </div>
+      <div class="modal-body">
+        <div class="curve">
+          <div class="curve-head">
+            <span class="curve-title">竖线 = 该行发生的时刻</span>
+            <span class="curve-legend" id="winCurveLegend"></span>
+          </div>
+          <div class="curve-wrap"><canvas id="winCurveCanvas">窗口曲线</canvas></div>
+          <div class="curve-readout" id="winCurveReadout">窗口内秒 0 → 300（0 = 边界）</div>
+        </div>
+        <div class="note" id="winCurveNote" hidden>—</div>
       </div>
     </div>
   </div>

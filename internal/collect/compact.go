@@ -23,7 +23,7 @@ import (
 //
 // 返回合并修正数（merged）与孤立修正数（orphan）。
 func CompactDay(dir, day string) (merged, orphan int, err error) {
-	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
+	path := eventPath(dir, day)
 
 	// 数据文件不存在时直接返回，不创建 .lock（避免留下垃圾锁文件）。
 	// 先 stat 后加锁存在 TOCTOU 窗口：期间采集进程若新建了文件，本次
@@ -122,7 +122,7 @@ func CompactDay(dir, day string) (merged, orphan int, err error) {
 	}
 
 	// 原子重写：tmp + fsync + rename
-	tmp, err := os.CreateTemp(dir, fmt.Sprintf("events_%s.jsonl.tmp.*", day))
+	tmp, err := os.CreateTemp(dir, filepath.Base(eventPath(dir, day))+".tmp.*")
 	if err != nil {
 		return 0, 0, fmt.Errorf("create tmp: %w", err)
 	}

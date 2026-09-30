@@ -83,15 +83,25 @@ func appendLine(f *os.File, v any) error {
 	return nil
 }
 
-// dayForStart 返回窗口起点所属 UTC 日。事件与修正行按窗口起点日归文件：
+// DayForStart 返回窗口起点所属 UTC 日。事件与修正行按窗口起点日归文件：
 // 跨午夜窗口（23:55 事件在窗口末落盘，官方修正分钟级延迟到达）若按写入
 // 时刻归日，事件与修正行会落进不同文件，compact 永远合并不上。start_time
 // 未设置时回退当前日（仅测试/异常构造场景，无窗口归属可依）。
-func dayForStart(startTime int64) string {
+//
+// ⚠️ 读侧（LoadEventByStart、Dashboard 的按窗回读）也必须走这个函数，**不能**拿
+// 「行数据落在这天」或「交易发生在这天」去反推：归日只认**窗口起点**。跨午夜的窗
+// 整行都在起点日的文件里。
+func DayForStart(startTime int64) string {
 	if startTime <= 0 {
 		return time.Now().UTC().Format("2006-01-02")
 	}
 	return time.Unix(startTime, 0).UTC().Format("2006-01-02")
+}
+
+// eventPath 返回某 UTC 日的采集文件路径（`<dir>/events_YYYY-MM-DD.jsonl`）。
+// 文件命名口径的唯一来源：写侧、compact、按窗回读都从这里取。
+func eventPath(dir, day string) string {
+	return filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
 }
 
 // WriteUniqueEvent 将事件以 start_time 去重后追加到当日文件（跨进程安全）。
@@ -105,8 +115,7 @@ func WriteUniqueEvent(dir string, ev *Event) (written bool, err error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create output dir: %w", err)
 	}
-	day := dayForStart(ev.StartTime)
-	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
+	path := eventPath(dir, DayForStart(ev.StartTime))
 
 	f, release, err := openLocked(path)
 	if err != nil {
@@ -141,8 +150,7 @@ func WriteCorrection(dir string, corr *SettlementCorrection) (written bool, err 
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return false, fmt.Errorf("create output dir: %w", err)
 	}
-	day := dayForStart(corr.StartTime)
-	path := filepath.Join(dir, fmt.Sprintf("events_%s.jsonl", day))
+	path := eventPath(dir, DayForStart(corr.StartTime))
 
 	f, release, err := openLocked(path)
 	if err != nil {

@@ -15,8 +15,12 @@ import (
 // ⚠️ 2026-09-24 起本族不再有 Go 侧判决机器（tail.Judge/mt19937 已删, /api/judge
 // 下线）——纸面判决走离线脚本 python/v4/23_tail_integrated.py。
 type TailState struct {
-	recorder  *tail.Recorder
-	snapshot  tail.Snapshotter
+	recorder *tail.Recorder
+	snapshot tail.Snapshotter
+	// eventsDir = cmd/tail 落原始采集的目录（`runtime.events_dir`）。**只读**：历史窗的
+	// 曲线由这里的 events 行重建（决策 #31），本进程一行都不写。空串 = 采集关闭 ⇒
+	// 按窗回读一律查不到（前端显示「无原始采集」）。
+	eventsDir string
 	cfg       tail.Config
 	mode      string
 	limits    SourceLimits
@@ -24,11 +28,13 @@ type TailState struct {
 	nowFn     func() time.Time // 可注入时钟（测试用），默认 time.Now
 }
 
-// NewTailState 构造 tail dashboard 状态载体（limits 见 SourceLimits 注释）。
-func NewTailState(recorder *tail.Recorder, snapshot tail.Snapshotter, cfg tail.Config, mode string, limits SourceLimits) *TailState {
+// NewTailState 构造 tail dashboard 状态载体（limits 见 SourceLimits 注释；
+// eventsDir 见 TailState.eventsDir）。
+func NewTailState(recorder *tail.Recorder, snapshot tail.Snapshotter, cfg tail.Config, mode string, eventsDir string, limits SourceLimits) *TailState {
 	return &TailState{
 		recorder:  recorder,
 		snapshot:  snapshot,
+		eventsDir: eventsDir,
 		cfg:       cfg,
 		mode:      mode,
 		limits:    limits,

@@ -70,8 +70,49 @@ type LiveSnapshot struct {
 	Live *flip.LiveExec
 }
 
-// Snapshotter 由 cmd/tail main 的 runtimeState 实现，返回当前运行快照
-// （dashboard handler 每 5s 轮询）。
+// CurvePoint 是当前窗口动态曲线上的一个采样点（读数一律**美元**；0 = 该 tick
+// 无该读数，前端断线不画）。
+//
+// 采样由 cmd/tail 主循环每 tick 追加一条（dashboard 只读，不参与任何判定）:
+//   - Anchor = 边界那一秒的 TWAP 推送（取锚通道命中前恒 0）——本族的锚在最早的判定行
+//     之前早已定局, 所以曲线上它是一条从边界后 ~2s 起拉平的水平参考线;
+//   - Twap = Chainlink TWAP-60 流值（0 = 尚无推送）;
+//   - Spot = Binance 现货最新价（0 = 无推送/超龄——与引擎判现货缺失同口径,
+//     不把陈旧价画进曲线）;
+//   - Tie = **结算线**（只在 rem ≤ 60 有值, 其余恒 0）: 从此刻起现货保持在该水平、
+//     到闭市一直不动, 闭市那一刻的 TWAP-60 恰好等于 anchor 的**临界价**——
+//     现货在它之上 ⇒ 结算 Up, 之下 ⇒ Down。推导与口径见 cmd/tail/curve.go 的
+//     RequiredPrice（它是**派生量**不是读数: 前端画成虚线阈值, 与三条实测线区分）。
+//   - Extrap = **速度外推临界价**（只在 rem ∈ [60, 150] 有值, 其余恒 0）: 假设现货
+//     从此刻起保持当前速度线性运行, 进入最后 60s 那一刻的价格须达到此值, 闭市 TWAP-60
+//     才刚好等于 anchor（用户口径, 推导见 docs/l.md 与 cmd/tail/curve.go 的 ExtrapPrice）。
+//     与 Tie 合起来拼满整窗、假设正好相反（运动继续 vs 运动停住）; 它恒是 Spot 与 anchor
+//     的凸组合 ⇒ 必然落在实测线中间, 不像 Tie 那样需要量程照顾。
+type CurvePoint struct {
+	Ts     int64   `json:"ts"`  // 采样时刻（unix 毫秒）
+	Rem    int     `json:"rem"` // 窗口剩余秒（ts 缺失时的兜底横坐标）
+	Anchor float64 `json:"anchor"`
+	Twap   float64 `json:"twap"`
+	Spot   float64 `json:"spot"`
+	Tie    float64 `json:"tie"`
+	Extrap float64 `json:"extrap"`
+}
+
+// Curve 是 /api/curve 的响应体: 当前窗口的逐 tick 采样序列（前端画三线同轴曲线）。
+//
+// 换窗语义（前端据此决定擦不擦画布）: EventStart 变化即代表曲线换装到新窗口——
+// **新窗还没有任何采样时返回的是上一窗的 EventStart 与 Points**（不是空数组），
+// 前端保留上一窗的曲线不擦, 直到新窗第一个采样到来才整体重画。
+type Curve struct {
+	EventStart int64        `json:"event_start"` // 采样所属窗口起点（unix 秒; 0 = 尚无窗口）
+	Slug       string       `json:"slug,omitempty"`
+	WindowSec  int          `json:"window_sec"` // 窗口长度（秒）: 前端 x 轴量程
+	Points     []CurvePoint `json:"points"`
+}
+
+// Snapshotter 由 cmd/tail main 的 runtimeState 实现，返回当前运行快照与动态曲线
+// （dashboard handler 分别按 5s / 1s 轮询——口径说明见各自的类型注释）。
 type Snapshotter interface {
 	Snapshot() LiveSnapshot
+	Curve() Curve
 }

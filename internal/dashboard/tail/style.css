@@ -15,6 +15,23 @@
   --neg: #f85149;
   --up: #3fb950;
   --down: #d29922;
+  /* 本窗曲线三线（分类槽 1/2/3: 蓝/橙/水绿）与发丝网格。
+     ⚠️ 这三色是**成套校验过的**: 在 #161b22 暗面上经 dataviz 校验器（亮度带/彩度下限/
+     色盲分离度/常视觉分离度/对比度）全项通过。换色或换表面色前必须重跑
+     scripts/validate_palette.js —— 直接借用页面其它颜色（accent green/yellow 那对
+     绿↔黄的 CVD ΔE 只有 5.1）会把三条紧贴的线画成两条。 */
+  --c-anchor: #3987e5;
+  --c-twap: #199e70;
+  --c-spot: #d95926;
+  /* 第 4/5 条「临界价 / 外推临界价」**不占分类槽**: 它们是派生阈值（现货得走到哪才
+     结算 Up）, 不是实测读数。分类槽 4（黄 #c98500）在这个表面上跟橙色的色盲分离度只有
+     ΔE 4.8（低于 6.0 下限）, 换成洋红更差（与水绿 1.6）—— 换色换不出来, 也不该换:
+     阈值本来就该用「非序列」的画法。故**两条共用**这支中性墨色 + 虚线, 互靠**虚线节奏**
+     区分（app.js 的 SERIES: 临界价 [5,4] 长划 / 外推临界价 [1.5,3.5] 点线）, 与实测线
+     在**形状**上区分（对比度 5.62:1, 只在读数行与图例里当色块用, 不承担曲线上的辨识）。 */
+  --c-tie: #8b949e;
+  --c-extrap: #8b949e;
+  --grid: #21262d;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -159,6 +176,49 @@ main {
 .src-age { font-size: 12px; }
 .src-age.stale { color: var(--neg); }
 
+/* ── 本窗动态曲线（anchor / twap / spot 三线同轴, 美元）──
+   位置: book_lat 行与 ticks 行之间。每窗从边界起逐秒画, 窗末保留到下一窗第一个采样。
+   图例 + 悬停读数就是「身份不靠颜色单独承载」的那一层（色块 + 中文名 + 数值）。 */
+.curve {
+  margin-top: 10px; padding-top: 8px;
+  border-top: 1px solid var(--border);
+}
+.curve-head {
+  display: flex; justify-content: space-between; align-items: baseline;
+  gap: 8px; font-size: 12px; color: var(--muted);
+  flex-wrap: wrap; /* 5 项图例与标题同排挤不下 ⇒ 图例整块落到第二行 */
+}
+/* ⚠️ nowrap 只加在**每个条目**上（条目内部不折行）, **不能**加在容器上:
+   容器 nowrap ⇒ 图例的最小宽度 = 它的整宽 ⇒ flex 只能去挤标题, 标题被压成一列三行
+   （2026-09-30 加第 5 条线时 390px 下实测: 「本窗曲线 · 22:50:00 起 · 289 点」折成三行）。
+   容器负责换行, 条目负责不折。 */
+.curve-legend { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.curve-legend .lg { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; }
+/* 色块（图例与悬停读数共用）——颜色只在 CSS 定义一次, canvas 从 :root 的变量读 */
+.sw { display: inline-block; width: 8px; height: 8px; border-radius: 2px; }
+.sw.anchor { background: var(--c-anchor); }
+.sw.twap { background: var(--c-twap); }
+.sw.spot { background: var(--c-spot); }
+/* 两条派生线的色块画成**虚线条**（不是实心块）: 图例/读数行里也一眼看出「它不是读数」。
+   两条的节奏与线上一致（长划 vs 点线）——8px 宽只能出两个周期, 但配合旁边的文字足够分开 */
+.sw.tie { background: repeating-linear-gradient(90deg, var(--c-tie) 0 3px, transparent 3px 5px); }
+.sw.extrap { background: repeating-linear-gradient(90deg, var(--c-extrap) 0 1.5px, transparent 1.5px 3.5px); }
+.curve-wrap { height: 168px; margin-top: 4px; }
+/* 类选择器不是 id: 主图与弹窗图两张画布共用（弹窗那张在 .modal 里, 尺寸另给） */
+.curve-wrap > canvas { display: block; width: 100%; height: 100%; touch-action: pan-y; }
+.curve-readout {
+  margin-top: 2px; font-size: 12px; color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  min-height: 17px; /* 无悬停与有悬停同一行高, 切换时不跳 */
+}
+.curve-readout b { color: var(--text); }
+.curve-readout .sw { margin-right: 3px; }
+/* 悬停读数: 5 项在手机上放不下 ⇒ 允许折行, 但只在**项与项之间**折——
+   每项 nowrap（「现货」与它后面那个数不能分家）, 分隔符用 ::before 挂在后一项上,
+   于是它永远跟着自己的项走, 不会孤零零留在行尾。 */
+.curve-readout .bit { white-space: nowrap; }
+.curve-readout .bit + .bit::before { content: '\00a0· '; }
+
 /* 本窗 tick 健康度（图表/阈值标红之外的诊断行） */
 .win-health {
   display: flex; flex-wrap: wrap; gap: 14px;
@@ -277,6 +337,9 @@ tbody tr:last-child td { border-bottom: none; }
   .win-grid { grid-template-columns: 1fr 80px 1fr; }
   .win-mid { font-size: 16px; }
   table { font-size: 13px; }
+  /* 悬停读数在窄屏是**两行**（5 项放不进 390px）: 常态就把两行的高度占住,
+     否则一指头按上去, 卡片下面的内容会整个往下跳一行——这是触摸设备, 不是鼠标划过。 */
+  .curve-readout { min-height: 34px; }
   /* 窄屏不隐藏任何列：两表都保持全列, 靠 .table-wrap 的 overflow-x 横向滑动看全。
      2026-09-24: 整合改造换过两表的 id 与列序, 而旧的 nth-child 隐藏规则未同步——
      #framesTable 已不存在（死规则）, 剩下那组落在新 #snapsTable 上正好藏掉
@@ -353,10 +416,23 @@ tbody tr:last-child td { border-bottom: none; }
 #dailyTable tbody tr:hover { background: rgba(255, 255, 255, 0.03); }
 #dailyTable tbody td, #dailyTable tfoot td { padding: 6px 10px; }
 
+/* ── 窗口曲线弹窗（点信号表 / 决策表任意一行打开, 决策 #31）── */
+/* 行可点: 列表行本身没有边框/底色, 不给反馈就看不出能点。底色与 #dailyTable 的行悬停同款 */
+.row-click { cursor: pointer; }
+.row-click:hover { background: rgba(255, 255, 255, 0.03); }
+/* 弹窗里的曲线块复用主图那套（.curve / .curve-head / .curve-wrap / .curve-readout）,
+   只去掉它作为「卡片里的一段」时的顶边（弹窗已有自己的分隔）, 并给画布更高的画幅 */
+.curve-modal .modal-body { padding: 12px 14px 16px; }
+.curve-modal .curve { margin-top: 0; padding-top: 0; border-top: none; }
+.curve-modal .curve-wrap { height: 260px; }
+.curve-modal .note { margin-top: 12px; }
+
 /* 窄屏（手机）: 全屏面板, 表头少占位 */
 @media (max-width: 480px) {
   .modal-mask { padding: 0; }
   .modal { max-width: none; max-height: 100vh; height: 100%; border-radius: 0; border: none; }
+  /* 全屏面板里曲线压到 190px: 还要留出图例（窄屏两行）+ 两行读数 + 说明 */
+  .curve-modal .curve-wrap { height: 190px; }
 }
 
 /* ══════════════════ 以下为 tail 专属 ══════════════════ */

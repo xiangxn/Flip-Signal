@@ -20,6 +20,7 @@ var tailStatic, _ = fs.Sub(tailFiles, "tail")
 //	/                 单页前端（手机浏览器兼容）
 //	/static/*         静态资源
 //	/api/state        运行状态（含本窗热门侧读数与三段链的四个闩锁）
+//	/api/curve        本窗动态曲线（anchor / twap / spot 逐 tick 采样; 前端 1s 轮询）
 //	/api/snaps        决策行（判定 + 信号, 时间倒序分页 ?page=&limit=）
 //	/api/signals      信号行（ok=true, 时间倒序分页）
 //	/api/daily        逐日明细（UTC 日, 含段分布与未成交）
@@ -57,6 +58,7 @@ func (s *TailState) routes() *http.ServeMux {
 
 	// JSON API
 	mux.HandleFunc("/api/state", s.handleState)
+	mux.HandleFunc("/api/curve", s.handleCurve)
 	mux.HandleFunc("/api/snaps", s.handleSnaps)
 	mux.HandleFunc("/api/signals", s.handleSignals)
 	mux.HandleFunc("/api/daily", s.handleDaily)

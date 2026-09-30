@@ -117,8 +117,9 @@ FlipSignal/
 ├── cmd/flip/                         # 狗@0.2 引擎主入口（纸面/实盘同源, -mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
 ├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
-│   ├── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市 + 窗口运行时载体（采集器 4 处接线）
-│   └── events.go                     # **兼作数据采集器**: 每秒原始采样落 events_*（数据格式 v2, 决策 #27）+ events_test.go
+│   ├── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市 + 窗口运行时载体（采集器 4 处接线 + 曲线采样 1 处）
+│   ├── events.go                     # **兼作数据采集器**: 每秒原始采样落 events_*（数据格式 v2, 决策 #27）+ events_test.go
+│   └── curve.go                      # **页面曲线缓冲**: 本窗 anchor/twap/spot 逐秒点 + 两条派生阈值线（rem≤60 的临界价 / rem∈[60,150] 的外推临界价; 旁路, 决策 #30）——两个公式本体已搬到 internal/tail, 这里只剩缓冲与换窗 + curve_test.go
 ├── cmd/collect/                      # 数据格式 v2 高频采集器（**任意标的**）
 │   └── main.go                       # 6 flag: -config/-asset/-slug/-symbol/-output/-custom-feature；资产由 feed.Asset 派生
 ├── cmd/compact/                      # 采集数据的合并修正（把 settlement_correction 行并回事件行; 与标的无关）
@@ -147,11 +148,12 @@ FlipSignal/
 │   │   ├── flip_server.go            # go:embed flip + 路由装配（/api/state, /api/observations, /api/signals, /api/daily, /api/config）
 │   │   ├── flip_handlers.go          # 上述 flip API 的 handler + 映射
 │   │   ├── flip_state.go             # FlipState + NewFlipState（运行时组件引用）
-│   │   ├── tail_server.go            # go:embed tail + 路由装配（/api/state, /api/snaps, /api/signals, /api/daily, /api/config）
-│   │   ├── tail_handlers.go          # 上述 tail API 的 handler + 映射
-│   │   ├── tail_state.go             # TailState + NewTailState
+│   │   ├── tail_server.go            # go:embed tail + 路由装配（/api/state, /api/curve, /api/snaps, /api/signals, /api/daily, /api/config）
+│   │   ├── tail_handlers.go          # 上述 tail API 的 handler + 映射（除 /api/curve 外）
+│   │   ├── tail_curve.go             # /api/curve 全部逻辑: 无参数 = 实况缓冲; ?event_start=N = 该窗曲线（实况命中优先, 否则 events 重建; 决策 #31）
+│   │   ├── tail_state.go             # TailState + NewTailState（含**只读**的 eventsDir）
 │   │   ├── flip/                     # flip 前端三件套 index.html, app.js, style.css（手机优先）
-│   │   └── tail/                     # tail 前端三件套（统计九卡 + 信号表 + 决策表 + 逐日弹窗）
+│   │   └── tail/                     # tail 前端三件套（统计九卡 + 信号表 + 决策表 + 逐日弹窗 + 点行看曲线弹窗）
 │   ├── feed/
 │   │   ├── asset.go                  # 资产参数（btc → slug/Binance 交易对/Chainlink 符号/目录; 消除硬编码）
 │   │   ├── anchor_recover.go         # 取锚通道（精确命中边界那一秒的推送, 500ms×40 重试；官方 open HTTP 段保留但休眠）
@@ -165,6 +167,7 @@ FlipSignal/
 │   │   ├── trade_bucketer.go         # PM last_trade_price 按 token×秒聚合（OFI/max单/vwap）
 │   │   ├── dedupe.go                 # transaction_hash 窗口内去重（防 WS 重连重放）
 │   │   ├── compact.go                # 修正行合并进事件行（cmd/compact 的逻辑）
+│   │   ├── query.go                  # **按窗口起点回读事件行**: LoadEventByStart（页面「点行看曲线」用, 决策 #31）+ 文件命名唯一来源 eventPath/DayForStart
 │   │   └── book_utils.go / market_utils.go / *_test.go
 │   ├── settle/                       # 结算编排（零外部依赖, 不 import flip; 两族共用）
 │   │   ├── settle.go                 # Outcome/Anchors（按边界秒存推送）+ Resolver 三层回退
@@ -179,7 +182,8 @@ FlipSignal/
 │   │   ├── hold.go                   # 持仓监察（纯函数 HoldWatchRow + HoldRow）: 信号成交后逐 tick 记持仓侧盘口, **只记录不判定**
 │   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像; HandleDecision 单入口）
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
-│   │   └── *_test.go                 # decide（含 HotBook/PriceLeg）/engine/recorder/exec_state/hold/parity（opt-in, 钉 23 的 oracle）
+│   │   ├── curve.go                  # 曲线派生量的**唯一公式来源**: RequiredPrice/ExtrapPrice/TieAt + WindowSec/TwapLookbackSeconds（实况与「点行看曲线」的重建共用, 决策 #31）
+│   │   └── *_test.go                 # decide（含 HotBook/PriceLeg）/engine/recorder/exec_state/hold/curve/parity（opt-in, 钉 23 的 oracle）
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 与 cmd/tail 各自构造注入）
 │       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
 │       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin（flip）/ 闭市（tail）撤单 + 查 size_matched 定稿回调
@@ -218,6 +222,9 @@ FlipSignal/
 | `tail_stoploss_timing_2026-09-29.md` | 止损优势重审：触发时 `dev_bin −28` 而 `dev_feed +33` ⇒ **赚的是 feed 滞后不是预测**（换结算线坐标优势归零） |
 | `tail_dev_decomp_2026-09-29.md` | `dev = basis + walk` 精确分解；walk 当止损腿否掉、当入场闸留 ≈2pp 残差（不稳） |
 | `tail_walk_gate_2026-09-29.md` | **T=150 段入场闸 `walk ≥ 43 美元`**：三种语义对照（只闸段 1 = +28.93U）、稳健性、落地清单与偏差（决策 #29） |
+| `tail_dashboard_note_2026-09-30.md` | **tail 页面三件事**：撤下的「标定参数」段原文存档 + 本窗曲线图（决策 #30）+ 点行看曲线（决策 #31） |
+| `tail_stoploss_crossing_2026-09-30.md` | **止损第四问（下穿/上穿/停留时长）全否**：100 个 τ 格 + 30 个 k 格无一站住；停留携带信息但市场报得更快；闸与止损是替代品 |
+| `Price_required.md` | 「外推临界价」（曲线第 5 条）的**用户口径与推导**：假设现货保持当前速度，进入最后 60s 时得站上哪儿 |
 
 ### 脚本地图（`python/v4/`）
 
@@ -238,6 +245,7 @@ FlipSignal/
 | `36_tail_stoploss_timing.py` | 止损优势的坐标归因（feed 滞后 vs binance 口径） |
 | `37_tail_dev_decomp.py` | `dev = basis + walk` 分解 + 两个用途的残差检验 |
 | `38_tail_walk_gate.py` | **入场闸三种语义 × 阈值扫描 + 稳健性**（§0 自检钉闸前基线；§8 搜索校正置换）——落地依据，`docs/tail_walk_gate_2026-09-29.md` |
+| `39_tail_stoploss_crossing.py` | **止损第四问**：持仓价下穿的**停留时长 τ**（100 格）与**穿越次数 k**（30 格）全扫 + 可成交性折算；§0 自检钉现 pin、§0b 闸前/闸后对照（读 36 的缓存）——**全否**，`docs/tail_stoploss_crossing_2026-09-30.md` |
 
 ---
 
@@ -365,6 +373,12 @@ Listening ──此后**每秒**: 有效 tick ∧ ② 达标──▶ 落信号�
 - Dashboard（`runtime.tail_dashboard_addr`）**只读**这条流水线：四个闩锁
   （T150/T60/监听/信号）+ 锚冻结标记、热门侧读数（含 `hot_src`）、锚/σ 就绪、今日健康度
   （读当日 `tailstats_*`）都是现算——不参与判定、不写任何文件。
+  **本窗曲线**（anchor/twap/spot 三线 + 两条派生阈值线：`rem ≤ 60` 的「临界价」与
+  `rem ∈ [60, 150]` 的「外推临界价」，`/api/curve`）是**同一性质的第 5 项读数**：
+  缓冲在主循环里每秒采一点（`cmd/tail/curve.go`），窗末保留到下一窗首个采样到达才换装，
+  同样不参与判定（决策 #30）。
+  **点行看曲线**（点信号表/决策表任意一行 → 弹窗画那一窗; 决策 #31）是第 6 项：它**只读**
+  `runtime.events_dir` 里的原始采集（不新落任何盘），实况命中就还是那条内存缓冲。
 
 ---
 
@@ -684,7 +698,7 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
       行内分辨不出瞬态错位。实测 BTC 3753 窗合计 0.126%、逐窗 p99 1.0% ⇒ 阈值定为两级
       （合计 > 1% / 单窗 > 5% 判失败）。下游同时读两侧的判定须知此瞬态存在。
 24. **持仓监察（只记录）+ 止损评估结论**（`docs/tail_stoploss_2026-09-25.md`，
-    脚本 `python/v4/{25,26,27}`）：
+    脚本 `python/v4/{25,26,27}`；后续三轮：`36`（坐标归因）/`37`（walk）/`39`（下穿结构与停留时长））：
     - **止损腿未落引擎**：离线支持加止损（触发 = 持仓侧 `bid < 0.30 ∧ dev < −20 美元`，
       出场按持仓侧 bid）——14 天基线 **+35.67U → +46.11U**（Δ **+10.44U**，
       **配对** bootstrap 95% CI `[+2.24, +19.59]`；杀赢 5 / 救输 63 = 12.6:1 vs 临界 6.2:1）。
@@ -708,6 +722,26 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
     - ❌ **成交量维度已否**：「砸盘那一刻量比」方向对、强度不够，且判别力恰好在止损那一档衰减到
       噪声（跌破 0.60 处 AUC 0.574 → 0.30 处 0.482）；整窗成交量对入场无预测力
       （ρ = −0.023）且与 σ 腿半冗余（ρ = +0.579）。
+    - ❌ **下穿 / 停留时长维度已否（09-30 第四轮，`docs/tail_stoploss_crossing_2026-09-30.md`，
+      脚本 `python/v4/39_tail_stoploss_crossing.py`）**：把「持仓侧 bid 跌破 L 后**连续停留
+      ≥ τ 秒**」在 10 档价位 × 10 个 τ 上全扫（100 格），再换「**第 k 次**下穿才卖」扫 30 格——
+      **无一格能站住**。最好三格 `L=0.20 τ=3s` +5.67U [−1.33,+12.64] / `L=0.40 τ=8s`
+      +5.34U [−3.13,+13.73] / `L=0.70 k=3` +4.87U [−10.26,+20.29] **全部含零**；
+      全表 **CI 下界 > 0 的只有一格**（`L=0.20 τ=30s` +1.04U，触发 32 笔、**出场价均值
+      0.015 美元**、胜率 0% = 卖的是已经归零的仓位）。折算后最好 +2.33U。
+      - **为什么停留时长没用**：输率**确实**随 τ 单调上行（0.60 档 `τ≥0s` 41.7% → `τ≥30s`
+        91.5%），但那正是**报价同步下行**所预示的那件事。按 36 §3 的判据（出场优于持有 ⟺
+        `bid > P(win)`）把「实际输率」与「市场隐含输率 `1 − 出场中位 bid`」相减，100 格里
+        中位数 **−2.0pp**、正值仅 20 格 ⇒ **市场报得比实际更快**。`k` 越大越好是同一件事
+        （第一次跌破绝大多数是假摔），上限也一样。
+      - ⚠️ **入场闸与止损是替代品**（本轮 §0b，最要紧的一条）：同一个参照规则
+        `bid<.30 ∧ dev<−20` 在**闸前** n=2133 上 +9.54U [+1.41,+18.47]、在**闸后** n=2080 上
+        只剩 +4.99U [−2.25,+12.37]。两者吃的是**同一个结构**（报价先塌、结算线位移后到）——
+        #29 的 `walk` 闸问的正是「滞后之外还剩多少真写进账本」⇒ 止损的增量价值已被闸拿走。
+        再次落地止损前**必须先看它在现行宇宙里的 Δ**，不能用 09-25 的 +10.44U。
+      - ⚠️ **口径坑**：「下穿之后有没有回到 L 之上」**不能当判据**——亏损窗最终必然跌回任何
+        L 之下，`回来过又输` 的窗 100% 会再次跌破（构造性恒等式，脚本 §6 存档）。
+        要问必须用固定时间窗（τ）或穿越次数（k）。
 25. **ETH：撤空复现 + 扫尾盘门槛不可跨标**（`docs/eth_data_review_2026-09-25.md`）：
     - ✅ **尾盘整侧撤空在**服务器**数据上复现**（23 窗里 30 段 / 21.5% 的 tick，镜像 100%，
       30 段里 29 段起点热门侧已 ≥0.96 ⇒ 与市场定局精确耦合，**本机网络假设排除**）。
@@ -840,6 +874,148 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
       三条同时满足才扩实盘；任一不满足 ⇒ 撤回（保留记录行，关掉闸）。
     - ✅ **flip 侧不动**：本闸建立在 tail 的入场结构上（尾盘买已经赢定的热门侧，walk 就是
       「赢定了多少」），flip 是逆向买冷门侧，没有对应的量。
+30. **tail 页面加本窗曲线图（anchor / twap / spot 三线同轴 + 两条派生阈值线）+
+    页面撤下「标定参数」段**
+    （2026-09-30 用户需求；文档 `docs/tail_dashboard_note_2026-09-30.md`）。**只动 Dashboard
+    侧，引擎判定链一字未改**。
+    - **撤下的那段**（窗口卡底部的「三段链（不可调，仅纸面登记）…」整块 + 前端
+      `renderConfig()`）**原文存档**在文档 §1——理由：它把「规则 / 标定值 / 执行口径」混在
+      一行里，数字又会随配置键变（`stake` 已从 2U 到 10U），**同一句话在页面与文档两处维护
+      必然漂移**。页面只留实时读数，规则去文档看。`/api/config` 接口**照旧保留**（闩锁标签、
+      逐日明细等处仍在用），删的只是那段说明文字。
+    - **采样在服务端主循环**（`cmd/tail/curve.go` 的 `curveBuf`，主循环每秒 tick 后
+      `sampleCurve` 一点）：前端按 `/api/state` 的 **5s** 轮询攒点的话，300s 窗口只剩 60 点
+      ⇒ **漏掉 4/5 的采样**。曲线因此走**独立路由 `/api/curve` + 独立 1s 轮询**，
+      与 `/api/state` 的节奏解耦。
+    - **红线：曲线是纯旁路**。三个值取自与判定同源的读数（`flip.Tick.BinPrice/TwapPrice`
+      + `engine.WindowAnchor()`），但**不参与任何判定**、不写任何文件、缓冲丢了只影响页面上
+      那条线——与持仓监察（#24）同一性质，分开前缀/分开路由，不碰引擎状态。
+    - **换窗语义在服务端**：`curveBuf.add` 见 `eventStart` 变化即整条换装；新窗第一个采样
+      到达**之前** `/api/curve` 返回的**仍是上一窗**（`event_start` 与 `points` 都不变）
+      ⇒ 前端「保留旧曲线到下一窗数据到达」是数据流的自然结果，不是前端的定时擦除。
+      `cmd/tail/curve_test.go` 钉住这条（含 `Anchor=0`/`Spot=0` 原样下发、前端断线不画）。
+    - **实现面**：`internal/tail.Curve/CurvePoint` 类型 + `Snapshotter` 接口加 `Curve()`
+      （**两族接口各自的 `fakeTailSnap` 同步加方法**）；前端 Canvas 2D 手绘（无库，
+      devicePixelRatio 缩放，y 量程按数据自适应取整到 1/2/5×10ⁿ）+ 悬停准星读数行。
+    - ⚠️ **配色不走页面 accent 色**：`--accent/--pos/--down` 那套在暗面 `#161b22` 上跑
+      dataviz 校验器**不合格**（绿↔黄色盲分离度 ΔE 5.1 < 6.0 下限），改用分类槽
+      蓝 `#3987e5` / 水绿 `#199e70` / 橙 `#d95926`（全项通过）。**换色或换表面色前必须重跑
+      `scripts/validate_palette.js`**（用法写在 `style.css` 注释里）。
+    - 🆕 **第四条「临界价」是派生量不是读数**（`cmd/tail.RequiredPrice` + `curveBuf.tieFor`，
+      `rem ≤ 60` 起才有值）：
+
+      ```
+      P = (60 · TWAP_open − HistoricalSum) / rem
+      ```
+
+      `HistoricalSum` = 结算窗里**已经定局那 (60−rem) 秒**的价格之和（逐秒采样加总）；含义是
+      「现货从现在起一直守在 P 之上不动 ⇒ 闭市 TWAP-60 恰好压在 anchor 上 ⇒ 结算 Up」。
+      ⚠️ **不写成展开式** `anchor + (anchor − past)·(60−rem)/rem`（`past` = 已定局秒的均价）：
+      两者**恒等**（代入 `past = HistoricalSum/(60−rem)` 即得），但**部分和形式正好是手上攒着
+      的那个量**，少一次「先除成均价、再乘回秒数」的来回。边界：`rem = 60` ⇒ 和为空 ⇒
+      `P = 60·anchor/60 = anchor`；`rem → 0` ⇒ 发散（只剩几秒扳回整段偏差，是真的）；无定义
+      ⇒ 0（前端断线、读数行显「—」）。⚠️ **缺样本的秒必须补**（`sum/n × (60−rem)`）：只把手上
+      有的样本加起来会让 `(60·anchor − HistoricalSum)` **凭空少掉整秒的价格**；样本不足期望
+      一半（`2n < span+1`）则整个点返 0——宁可不画。三条口径让路：
+      - **近似不是口径**：`HistoricalSum` 取自**逐秒 Binance 现货**而结算走 Chainlink ⇒ 有已知
+        水平差（memory「spot − TWAP 水平差」）。**严格口径做不到**——上游只推 TWAP-60 本身，相邻
+        差分只给出 `x(t) − x(t−60)`，逐秒价反解不出。它**不参与判定、不进 P&L**，纯看图。
+      - **在 y 量程里限幅参与**（2026-09-30 当天修）：量程以三条实测线为基准，临界价**也
+        参与**，但取值**先夹到三线 span 的 ±`TIE_ROOM` 倍以内**再取 min/max（`app.js`
+        常量，默认 `0.5` ⇒ 量程最多涨到三线 span 的 2 倍 ⇒ 三线至少占约 1/3 图高）；超出
+        限幅的部分仍旧**裁到绘图矩形内**。⚠️ 原先「完全不进量程」是**错的**：它一涨出三线
+        范围就只剩一截断头线挂在画框下沿、之后什么都没有，**与「无数据」的断线长得一模
+        一样**（实测某窗 `rem=19` 时它已跌到 83204.63 而三线下沿 83532.47 ⇒ 整条线只可见
+        十几秒）；而**全额**放进量程同样不行——`rem→0` 发散（`rem=5` 放大 11 倍、`rem=1`
+        放大 59 倍）会把整窗的三线压成平线。夹取（而非「超了就退回三线量程」）是为了
+        **连续性**：量程平缓长大、到顶停住，画面不跳。⚠️ `TIE_ROOM` 取 `0.5` 是**扫出来的**：
+        `0.25~1.0` 在真实窗上给出同一个量程（`niceStep` 取整把各档吸到一起），而 `0.5→1.0`
+        可见秒数 41s→41s 一动不动、三线占高却 36%→26%。实测收益（真实窗）：量程
+        `83600–84000`→`83400–84000`，临界价可见 21s→**41s**（`rem 40`→`rem 20`），三线占高
+        54%→36%。代价 = 量程会随临界价变宽并**朝那一侧平移**（取全窗 min/max）；`rem < 20`
+        那段仍裁掉，那是限幅在起作用。线贴边消失 = 量程仍装不下它 =「现货离守住差得远」，
+        确切数字看读数行。
+      - **不占第 4 个分类色槽**：槽 4（黄 `#c98500`）在本表面与橙色的色盲分离度只有
+        ΔE 4.8（< 6.0），换洋红更差（与水绿 1.6）⇒ **第四个可区分的颜色不存在**。改走中性
+        墨色 `--c-tie #8b949e` + **虚线**（图例色块同款虚线条），与实测线在**形状**上区分。
+        三条实测线维持原样、原校验结论不变。
+      ⚠️ 「网格不用虚线」那条规矩**只管网格**：临界价是**真的**阈值，虚线正是它该有的编码。
+    - 🆕 **第五条「外推临界价」也是派生量**（同日稍后加，用户口径与推导
+      `docs/Price_required.md`；`cmd/tail.ExtrapPrice`，`rem ∈ [60, remMax]` 才有值，`remMax` 由调用点
+      传 `cfg.Tail.T150Rem`——**从策略第一个判定点起画**）：
+
+      ```
+      S = Spot·(1 − k) + TWAP_open·k      k = (rem − 60) / (rem − 30)
+      ```
+
+      **含义**：假设现货从此刻起保持当前速度 `v` 线性运行，最后 60s 的均值 = 它中心点
+      （距现在 `rem−30` 秒）处的价格 `S₀ + v·(rem−30)`；令其等于 `anchor` 解出临界速度
+      `v_critical = (anchor − S₀)/(rem−30)`，而**进入最后 60s 那一刻**（距现在 `rem−60` 秒）
+      的价格就是上式。等价说法：**当前速度必须 ≥ `v_critical`**。
+      - **两条派生线拼满整窗，而且正好对上三段链的两个检查点**：外推管
+        `rem ∈ [60, 150]`（T=150，假设运动**继续**）、临界价管 `rem ∈ (0, 60]`（T=60，假设
+        运动**停住、守住一个价**）。两者的假设正好相反 ⇒ **`rem = 60` 处二者不相等**
+        （外推 = `Spot`，因为只剩「现在」速度来不及起作用；临界价 = `anchor`）。画面上是
+        t=240s 处一上一下错开的两条线——**不是断线也不是 bug，是两个问题的答案本来就不同**。
+      - ⚠️ **它不需要任何量程照顾**：`k ∈ [0, 0.75]` ⇒ 它恒是 `Spot` 与 `anchor` 的**凸组合**，
+        而这两个值本身就在三线 min/max 里 ⇒ 永远落在实测线之间（真实窗实测外推范围
+        `[83706.40, 83820.74]` ⊂ 三线联合量程 `[83668.06, 83884.00]`）。前端仍让它过限幅那
+        一关，但那是**恒等变换**（只为「派生量统一处理」），不是它需要——对比临界价在
+        同一窗已跌到 `83006.38`、要靠 `TIE_ROOM` 才收得住。
+      - **编码**：与临界价**共用**那支中性墨色（第 5 条更没有新色可用），靠**虚线节奏**
+        区分——临界价长划 `[5,4]`、外推临界价点线 `[1.5,3.5]`（图例色块 `repeating-linear-
+        gradient` 同款两种节奏）。形状本来就是阈值该用的编码通道。
+      - ⚠️ **图例容器的 `white-space: nowrap` 只许加在每个条目上**：加在容器上会让图例的
+        最小宽度 = 整宽 ⇒ flex 去挤标题（390px 下实测标题被压成一列三行）。容器管换行
+        （`flex-wrap`）、条目管不折；`.curve-head` 同样要 `flex-wrap`（5 项在窄屏整体落到
+        标题下一行）。同理悬停读数行每项包 `.bit`（nowrap + `::before` 挂分隔符）：5 项在
+        390px 必然两行，折点只能在**项与项之间**，且窄屏常态就占住两行（`min-height: 34px`）
+        ——触摸设备上按一下就顶下去一行比多占 17px 难看得多。
+        ⚠️ 图例**自本条之后**改由 `app.js` 的 `SERIES` 生成（`renderLegend`）——主图与
+        §31 的弹窗图共用一份定义, `title` 提示也在 `hint` 字段里。
+31. **点行看曲线：信号表 / 决策表任意一行 → 弹窗画那一窗的完整曲线**（2026-10-01 用户需求；
+    文档 `docs/tail_dashboard_note_2026-09-30.md` §3）。**只动 Dashboard 侧, 判定链一字未改**。
+    - **动机 + 障碍**：`curveBuf` 只保**当前一窗**（见 #30 换窗语义），而本族一窗最多下一单
+      ⇒ 信号表 50 行里最多 1 行能画, 功能会退化成「只能看刚刚那一笔」。
+    - **解法 = 回读 `cmd/tail` 自己的原始采集（决策 #27），不新落任何盘** ⇒ #30 那条
+      「曲线不写文件」的红线**不碰**（新增的是**读**）。events 行内**逐秒**含曲线全部输入:
+      锚 = 顶层 `twap_open_price`、TWAP/现货 = `ticks[i].twap.price` / `.bin.price`、
+      横轴 = `ticks[i].ts`/`rem`。
+    - **两条路, 服务端定 `source`**：请求的那一窗**正是内存里这一窗** ⇒ `live`
+      （**它才是当时屏幕上那条**, 也含引擎的钳零口径, 比磁盘重建准）; 否则 `events` 重建;
+      拿不到 ⇒ `none` + `note`（**HTTP 仍 200**, `note` 是给用户看的原因, 不是错误）。
+    - ⚠️ **归日只认窗口起点**: events 文件按 `DayForStart(start_time)` 归日, 而行的 `date`
+      是**行 ts** 的 UTC 日——跨午夜的窗两者**差一天**。故 `/api/signals`、`/api/snaps`
+      下发 `event_start`（`Record.EventStart`, 本来就有）, 前端**只能**用它定位文件;
+      旧口径行（`kind=frame`/`scan`）没有它 ⇒ 弹窗说明「无法定位窗口」, 不猜。
+    - ⚠️ **`TieAt` 的契约 = 「`pts` 不含本点」**：实时路径那一刻缓冲里还没追加本点,
+      重建路径必须传 `pts[:i]`（传 `pts[:i+1]` 本点算两次）。`TestTieAtExcludesCurrentPoint` 钉住。
+    - **实现**（三处新文件 + 一份公式搬家）：`internal/tail/curve.go` 收 `RequiredPrice` /
+      `ExtrapPrice` / `TieAt` + `WindowSec` / `TwapLookbackSeconds`（`cmd/tail` 的常量改成
+      **别名**, **一份公式两处用**）; `internal/collect/query.go` 的 `LoadEventByStart`
+      （子串预筛 `"start_time":N,`——**必须带分隔符**, 否则 1000 命中 10001; scanner 缓冲
+      显式提到 16MB, **一行实测 ~210KB, 默认 64KB 直接 token too long**）;
+      `internal/dashboard/tail_curve.go` 收 `/api/curve` 的**全部**逻辑（无参数 = 主图那条,
+      行为一字未变）+ `TailState.eventsDir`（**只读**）。依赖方向
+      `dashboard → collect`（只用标准库, 无环）; **`tail.Snapshotter` 接口没动**（重建在
+      handler 层）。
+    - **成本实测**: 5.8MB 当日文件扫到目标行 **26ms**（整窗 300 点返回）, 满一天 288 窗
+      ≈ 62MB ⇒ 百毫秒级。**不做缓存**——用户点一下的代价, 不值一个索引。
+    - **前端**: 单击（**不用 `dblclick`**——双击的第一次 click 也会开, 而 iOS Safari 的双击是
+      缩放、`dblclick` 不可靠）; 行挂 `data-es`/`data-ts` + `row-click` 类; **委托**绑在两张表上
+      （表体每 15s 整块重渲染, 逐行绑定会全丢）; 弹窗图**不轮询**（冻结的历史窗）;
+      **先解锁遮罩再画**（`hidden` 时 `clientWidth === 0`, `drawChart` 直接 return）;
+      `Esc` 与遮罩空白点击**两个弹窗都关**。
+    - **一条绘制代码两张图**: `makeChart(cvId, roId)` 出实例（`data`/`hover`/`geom`/`mark`/
+      `empty`）, `drawChart(ch)` 不再认 `#curveCanvas`——原来是模块级单例
+      （`CURVE`/`hoverIdx`/`geom`）, 两张图并存时**悬停下标会串台**。
+    - **标记线（`ch.mark`）画在网格之上、五条线之下**（它是**注释**不是序列, 压上去会盖住
+      「那一刻价在哪」）, 与悬停准星**同色**、靠**顶部小标签** `t=239s` 区分（准星无标签）,
+      **不占第 4 个分类色槽**。
+    - **口径差异（弹窗以 `note` 明示）**：重建取**原始值**（events 落 `LatestData()`, 不套引擎
+      的陈旧钳零）⇒ 重建线**更完整、锚从第一秒就有**, 看图形足够, **不等于**当时页面上那条。
+    - **无数据的四类**（页面长得一样, 一行 `note` 说清是「没采集」而不是「采了画不出」）：
+      `events_dir` 为空串 / 那天没文件 / 该窗没被采到（跳窗路径从不产出行）/ 被落盘红线丢弃。
 
 ---
 
