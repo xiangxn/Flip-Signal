@@ -79,13 +79,15 @@ type LiveSnapshot struct {
 //   - Twap = Chainlink TWAP-60 流值（0 = 尚无推送）;
 //   - Spot = Binance 现货最新价（0 = 无推送/超龄——与引擎判现货缺失同口径,
 //     不把陈旧价画进曲线）;
+//   - YesBid/YesAsk/NoBid/NoAsk = 该秒 PM 两侧盘口（0 = 该侧无报价）——曲线图上**不画
+//     成线**（图里塞四条 0~1 的价格会把三条美元线压成平线）, 只喂图下那条盘口读数行;
 //   - Tie = **结算线**（只在 rem ≤ 60 有值, 其余恒 0）: 从此刻起现货保持在该水平、
 //     到闭市一直不动, 闭市那一刻的 TWAP-60 恰好等于 anchor 的**临界价**——
 //     现货在它之上 ⇒ 结算 Up, 之下 ⇒ Down。推导与口径见 cmd/tail/curve.go 的
 //     RequiredPrice（它是**派生量**不是读数: 前端画成虚线阈值, 与三条实测线区分）。
 //   - Extrap = **速度外推临界价**（只在 rem ∈ [60, 150] 有值, 其余恒 0）: 假设现货
 //     从此刻起保持当前速度线性运行, 进入最后 60s 那一刻的价格须达到此值, 闭市 TWAP-60
-//     才刚好等于 anchor（用户口径, 推导见 docs/l.md 与 cmd/tail/curve.go 的 ExtrapPrice）。
+//     才刚好等于 anchor（用户口径, 推导见 docs/Price_required.md 与 internal/tail/curve.go）。
 //     与 Tie 合起来拼满整窗、假设正好相反（运动继续 vs 运动停住）; 它恒是 Spot 与 anchor
 //     的凸组合 ⇒ 必然落在实测线中间, 不像 Tie 那样需要量程照顾。
 type CurvePoint struct {
@@ -94,6 +96,15 @@ type CurvePoint struct {
 	Anchor float64 `json:"anchor"`
 	Twap   float64 `json:"twap"`
 	Spot   float64 `json:"spot"`
+	// 该秒的 PM 盘口两侧最优价（读数, 不画成线——只喂悬停时图下的盘口读数行）。
+	// 0 = 该侧无报价：尾盘「押最终输家」那条腿被整侧撤空是常态（决策 #21）, 前端按
+	// 「—」显示。四个全 0 = 那一刻整簿都没有（窗首快照未到, 决策 #25 的窗首瞬态）。
+	// ⚠️ 与判定路径的差别: 这里是**纯读数**, 不过延迟闸、不判有效 tick（延迟闸管的是
+	// 「这一 tick 能不能用来判定」, 而看图上某一秒的盘口是另一件事）。
+	YesBid float64 `json:"yes_bid"`
+	YesAsk float64 `json:"yes_ask"`
+	NoBid  float64 `json:"no_bid"`
+	NoAsk  float64 `json:"no_ask"`
 	Tie    float64 `json:"tie"`
 	Extrap float64 `json:"extrap"`
 }

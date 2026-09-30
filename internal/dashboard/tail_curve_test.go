@@ -77,11 +77,18 @@ func TestTailCurveRebuildFromEvents(t *testing.T) {
 	}
 	// 300 个 tick（rem 299→0）, 现货逐秒 +1 美元 —— 顺带把「单行 > 64KB」那条路也走一遍
 	for i := 0; i < 300; i++ {
+		// 盘口四档（图下盘口读数行的数据源）: 首点故意只留 NO 一侧 —— 空侧必须原样
+		// 保留 0（决策 #21）, 不能补默认值或被 omitempty 吃掉
+		pm := collect.PMTick{YesBid: 0.94, YesAsk: 0.95, NoBid: 0.05, NoAsk: 0.06}
+		if i == 0 {
+			pm = collect.PMTick{NoBid: 0.01, NoAsk: 0.02}
+		}
 		ev.Ticks = append(ev.Ticks, collect.HFTick{
 			Ts:   (start + int64(i)) * 1000,
 			Rem:  299 - i,
 			Bin:  collect.BinTick{Price: anchor + float64(i)},
 			Twap: collect.TwapTick{Price: anchor},
+			PM:   pm,
 		})
 	}
 	if written, err := collect.WriteUniqueEvent(dir, ev); err != nil || !written {
@@ -101,6 +108,13 @@ func TestTailCurveRebuildFromEvents(t *testing.T) {
 	p0 := got.Points[0]
 	if p0.Ts != start*1000 || p0.Rem != 299 || p0.Anchor != anchor || p0.Twap != anchor || p0.Spot != anchor {
 		t.Fatalf("首点 = %+v", p0)
+	}
+	// 盘口四档: 空侧（首点 UP 侧）0 原样保留, 有报价的照抄
+	if p0.YesBid != 0 || p0.YesAsk != 0 || p0.NoBid != 0.01 || p0.NoAsk != 0.02 {
+		t.Fatalf("首点空侧盘口未原样保留: %+v", p0)
+	}
+	if p := got.Points[1]; p.YesBid != 0.94 || p.YesAsk != 0.95 || p.NoBid != 0.05 || p.NoAsk != 0.06 {
+		t.Fatalf("盘口四档映射 = %+v, 期望 0.94/0.95/0.05/0.06", p)
 	}
 	for i, p := range got.Points {
 		if p.Anchor != anchor {

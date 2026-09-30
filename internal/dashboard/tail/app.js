@@ -364,11 +364,15 @@
   // 换算参数必须**按实例分开**——原来是模块级单例（CURVE/hoverIdx/geom）, 两张图并存时
   // 弹窗一开会把主图的悬停下标套到弹窗的数据上（下标错位 ⇒ 准星乱跳）。
   // mark = 要标注的竖线时刻（ms; 0 = 不画）——弹窗用来标「那一行发生在第几秒」。
-  function makeChart(cvId, roId) {
-    return { cv: $(cvId), ro: $(roId), data: null, hover: -1, geom: null, mark: 0, empty: '等待本窗数据…' };
+  // bk = 图下第二条读数行（那一秒的 PM 盘口, 见 setBook）。
+  function makeChart(cvId, roId, bkId) {
+    return {
+      cv: $(cvId), ro: $(roId), bk: $(bkId),
+      data: null, hover: -1, geom: null, mark: 0, empty: '等待本窗数据…'
+    };
   }
-  var mainChart = makeChart('curveCanvas', 'curveReadout');       // 本窗曲线（1s 轮询 /api/curve）
-  var winChart = makeChart('winCurveCanvas', 'winCurveReadout');  // 点行弹窗（冻结的历史窗）
+  var mainChart = makeChart('curveCanvas', 'curveReadout', 'curveBook');             // 本窗曲线（1s 轮询 /api/curve）
+  var winChart = makeChart('winCurveCanvas', 'winCurveReadout', 'winCurveBook');     // 点行弹窗（冻结的历史窗）
   var COLORS = null;   // 各线颜色（从 CSS 变量读一次后缓存; 两图共一份）
 
   // ⚠️ 后两条（tie / extrap）是**派生量**（所谓「临界价」——现货得走到哪才结算 Up）,
@@ -435,6 +439,50 @@
     return start > 0 ? p.ts / 1000 - start : winSec - p.rem;
   }
 
+  // 盘口读数行: 那一秒的 PM 两侧最优价（UP=YES / DOWN=NO; bid / ask）。
+  //
+  // 为什么单独一行而不是塞进上面那行: 上面那行是**曲线上的序列**（每条线一个值, 带色块）,
+  // 盘口是**市场读数**、不是图里的线（四条 0~1 的价格线塞进美元量程会把三线压平）——
+  // 混在一行里读者分不清哪个值属于哪条线。
+  //
+  // 0 = 该侧无报价 ⇒ 「—」: 尾盘「押最终输家」那条腿被整侧撤空是常态（决策 #21）,
+  // 而**看它什么时候被撤空**恰恰是这张图的一个用处。四个全 0 = 那一刻整簿都没有
+  // （窗首首份快照未到, 决策 #25 的窗首瞬态）⇒ 直说「无盘口」, 不和「某侧空」混同。
+  function bookHTML(p, sec) {
+    if (!p) return '盘口 —';
+    var head = '<span class="bit"><b>盘口 t=' + Math.round(sec) + 's</b></span>';
+    if (!(p.yes_bid > 0 || p.yes_ask > 0 || p.no_bid > 0 || p.no_ask > 0)) {
+      return head + ' <span class="bit">无盘口</span>';
+    }
+    var q = function (v) { return v > 0 ? v.toFixed(2) : '—'; };
+    return head +
+      ' <span class="bit">UP ' + q(p.yes_bid) + ' / ' + q(p.yes_ask) + '</span>' +
+      ' <span class="bit">DOWN ' + q(p.no_bid) + ' / ' + q(p.no_ask) + '</span>';
+  }
+
+  // lastBooked 是没悬停时的默认点: 往前找**最后一个有报价**的采样点, 一个都没有才退回
+  // 最后一点。为什么不直接用最后一点: 采集行的收尾补采 tick（闭市那一刻精确补一次）
+  // 盘口四档**恒空**（本机三个采集文件的 63 窗里末 tick 全零 43 窗——构造性产物, 不是
+  // 市场读数）, 而弹窗是冻结的历史窗、默认就落在它上面 ⇒ 常驻状态会恒显「无盘口」,
+  // 看起来像这个功能坏了。标签自带 t=, 因此回退不冒充「最后一秒」。
+  function lastBooked(pts) {
+    for (var i = pts.length - 1; i >= 0; i--) {
+      var p = pts[i];
+      if (p.yes_bid > 0 || p.yes_ask > 0 || p.no_bid > 0 || p.no_ask > 0) return i;
+    }
+    return pts.length - 1;
+  }
+
+  // 写盘口读数行: 有悬停就看**悬停那一秒**, 否则看默认点（见 lastBooked）——两种情形都
+  // 带 t= 标签, 所以「现在」与「某一秒」不会被读混（主图上默认点 ≈ 当前, 弹窗上它是
+  // 那一窗最后一个有报价的时刻）。
+  function setBook(ch, pts, secs) {
+    if (!ch.bk) return;
+    if (!pts.length) { ch.bk.textContent = '盘口 —'; return; }
+    var i = (ch.hover >= 0 && ch.hover < pts.length) ? ch.hover : lastBooked(pts);
+    ch.bk.innerHTML = bookHTML(pts[i], secs[i]);
+  }
+
   // 画一张曲线图（ch = makeChart 出来的实例）。主图与弹窗图都走这里, 区别只有数据源与
   // ch.mark（弹窗才标竖线）。
   function drawChart(ch) {
@@ -492,6 +540,7 @@
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
       ctx.fillText(ch.empty, W / 2, H / 2);
+      if (ch.bk) ch.bk.textContent = '盘口 —'; // 一条线都没有时不谈盘口（本窗无数据）
       return;
     }
     if (hi - lo < 0.5) { var mid = (lo + hi) / 2; lo = mid - 0.5; hi = mid + 0.5; } // 单点/极窄
@@ -648,6 +697,7 @@
     } else {
       ro.textContent = '窗口内秒 0 → ' + winSec + '（0 = 边界）· 点按曲线查看某秒读数';
     }
+    setBook(ch, pts, secs); // 图下第二条读数行: 盘口（悬停跟随光标, 否则默认点见 lastBooked）
   }
 
   // 悬停/触摸 → 最近采样点（1s 一个点, 命中区就是整列, 不必精确对准）

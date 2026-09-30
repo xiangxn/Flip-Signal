@@ -83,6 +83,12 @@ func (rt *runtimeState) sampleCurve(tick flip.Tick, remMax int) {
 		Anchor: anchor,
 		Twap:   tick.TwapPrice,
 		Spot:   tick.BinPrice,
+		// 盘口四档**原样**落（该侧空就是 0, 决策 #21）: 它是图下的读数行, 不过判定路径
+		// 的延迟闸、不判有效 tick——与 /api/state 的现窗口读数同源同口径。
+		YesBid: tick.UpBid,
+		YesAsk: tick.UpAsk,
+		NoBid:  tick.DownBid,
+		NoAsk:  tick.DownAsk,
 	}
 	p.Tie = rt.curve.tieFor(anchor, tick)
 	p.Extrap = tail.ExtrapPrice(anchor, tick.BinPrice, tick.Rem, remMax)

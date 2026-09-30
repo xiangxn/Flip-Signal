@@ -107,6 +107,11 @@ func (s *TailState) eventCurve(eventStart int64) (tail.Curve, bool, string) {
 			Anchor: anchor,
 			Twap:   tk.Twap.Price,
 			Spot:   tk.Bin.Price,
+			// 盘口四档照抄采集行（与实况路径同字段同含义; 采集侧空侧照存 0, 决策 #21）。
+			YesBid: tk.PM.YesBid,
+			YesAsk: tk.PM.YesAsk,
+			NoBid:  tk.PM.NoBid,
+			NoAsk:  tk.PM.NoAsk,
 		}
 		p.Extrap = tail.ExtrapPrice(anchor, p.Spot, p.Rem, s.cfg.T150Rem)
 		pts = append(pts, p)

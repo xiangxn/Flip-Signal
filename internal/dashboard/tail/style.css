@@ -218,6 +218,10 @@ main {
    于是它永远跟着自己的项走, 不会孤零零留在行尾。 */
 .curve-readout .bit { white-space: nowrap; }
 .curve-readout .bit + .bit::before { content: '\00a0· '; }
+/* 盘口读数行 = 图下第二条 .curve-readout（主图与弹窗各一条）: 折行规则与上一行共用,
+   只是贴紧一点——两行是**一组读数**（同一秒的价格与盘口）, 不是两块内容。
+   它是市场读数, 不是曲线上的线: 没有色块、数字与上一行的读数同为 muted 色。 */
+#curveBook, #winCurveBook { margin-top: 0; }
 
 /* 本窗 tick 健康度（图表/阈值标红之外的诊断行） */
 .win-health {

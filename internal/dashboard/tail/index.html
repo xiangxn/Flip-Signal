@@ -99,6 +99,10 @@
         </div>
         <div class="curve-wrap"><canvas id="curveCanvas">本窗曲线</canvas></div>
         <div class="curve-readout" id="curveReadout">窗口内秒 0 → 300（0 = 边界）</div>
+        <!-- 盘口读数行（PM 最优价, 不是曲线上的线）: 光标停在哪一秒就看那一秒的
+             UP / DOWN 两侧 bid/ask; 没悬停时给最后一个采样点。0 显「—」= 该侧无报价 -->
+        <div class="curve-readout" id="curveBook"
+             title="那一秒的 PM 最优价: UP(=YES) 的 bid / ask · DOWN(=NO) 的 bid / ask。「—」= 该侧没有报价（尾盘赢家侧卖单被整侧撤空是常态）">盘口 —</div>
       </div>
       <!-- 本窗 tick 健康度（延迟闸挡掉的 tick 在此可见; 窗口间隐藏） -->
       <div class="win-health" id="winHealth" hidden>
@@ -214,6 +218,9 @@
           </div>
           <div class="curve-wrap"><canvas id="winCurveCanvas">窗口曲线</canvas></div>
           <div class="curve-readout" id="winCurveReadout">窗口内秒 0 → 300（0 = 边界）</div>
+          <!-- 该行所属窗口在光标那一秒的 PM 盘口（与实况路径同字段同口径） -->
+          <div class="curve-readout" id="winCurveBook"
+               title="那一秒的 PM 最优价: UP(=YES) 的 bid / ask · DOWN(=NO) 的 bid / ask。「—」= 该侧没有报价（尾盘赢家侧卖单被整侧撤空是常态）">盘口 —</div>
         </div>
         <div class="note" id="winCurveNote" hidden>—</div>
       </div>

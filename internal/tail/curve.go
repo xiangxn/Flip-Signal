@@ -47,7 +47,7 @@ func RequiredPrice(anchor float64, rem int, histSum float64) float64 {
 	return (float64(TwapLookbackSeconds)*anchor - histSum) / float64(rem)
 }
 
-// ExtrapPrice 是**按当前速度外推**的临界价（用户口径, 推导见 `docs/l.md`）:
+// ExtrapPrice 是**按当前速度外推**的临界价（用户口径, 推导见 `docs/Price_required.md`）:
 // rem ∈ [60, remMax] 之外无定义返 0。
 //
 //	S_required = Spot + (rem−60)/(rem−30) · (anchor − Spot)

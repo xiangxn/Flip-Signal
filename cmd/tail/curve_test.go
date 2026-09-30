@@ -92,6 +92,38 @@ func TestSampleCurveWithoutEngine(t *testing.T) {
 	}
 }
 
+// TestSampleCurveCarriesBook 钉住采样接线: 盘口四档**原样**进曲线点（图下盘口读数行
+// 的数据源）。它是纯读数: 不过判定路径的延迟闸、不判有效 tick——空侧（决策 #21 的
+// 整侧撤空）就是 0, 不补不丢; 四个全 0（窗首快照未到, 决策 #25）也照落。
+func TestSampleCurveCarriesBook(t *testing.T) {
+	rt := &runtimeState{}
+	eng := tail.NewEngine(tail.DefaultConfig())
+	eng.BeginWindow(100000, 20) // 测试路径直接注入锚（生产走 UpgradeAnchor 精确命中）
+	rt.Engine, rt.EventStart, rt.Slug = eng, 1000, "w1"
+
+	rt.sampleCurve(flip.Tick{
+		Ts: 1000*1000 + 1000, Rem: 299, TwapPrice: 100000, BinPrice: 100010,
+		UpBid: 0.94, UpAsk: 0.95, DownBid: 0.05, DownAsk: 0.06,
+	}, 150)
+	rt.sampleCurve(flip.Tick{ // 尾盘赢家侧整侧撤空 + 窗首瞬态式的全零
+		Ts: 1000*1000 + 2000, Rem: 298, TwapPrice: 100000, BinPrice: 100010,
+		UpBid: 0.99, UpAsk: 0,
+	}, 150)
+
+	got := rt.Curve()
+	if len(got.Points) != 2 {
+		t.Fatalf("点数 = %d, 期望 2", len(got.Points))
+	}
+	p := got.Points[0]
+	if p.YesBid != 0.94 || p.YesAsk != 0.95 || p.NoBid != 0.05 || p.NoAsk != 0.06 {
+		t.Fatalf("盘口四档 = %+v, 期望 0.94/0.95/0.05/0.06", p)
+	}
+	p2 := got.Points[1]
+	if p2.YesBid != 0.99 || p2.YesAsk != 0 || p2.NoBid != 0 || p2.NoAsk != 0 {
+		t.Fatalf("空侧应原样保留 0: %+v", p2)
+	}
+}
+
 // TestCurveTieForReadsBuffer 钉住接线: tieFor 把**当前缓冲**喂给 tail.TieAt, 本 tick
 // 不在缓冲里（sampleCurve 是先算 tie 再 add）——缓冲 + 本 tick 各自只算一次。
 // 区间/闸门/补样本的细节在 `internal/tail` 的 TestTieAt, 这里只要走到量上。
