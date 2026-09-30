@@ -22,7 +22,8 @@
     no_hist: 'σ 窗口不足',
     price_low: '价格腿不过',
     leg_out: '两腿都不过',
-    walk_low: '入场闸不过' // T=150 段: ⑤ 达标但 walk < 43 美元（决策 #29, 链继续）
+    walk_low: '入场闸不过', // T=150 段: ⑤ 达标但 walk < 43 美元（决策 #29, 链继续）
+    floor_low: '监听段地板不过' // 监听段: ② 达标但有效价 ≤ 0.83（决策 #32, 影子行, 链继续）
   };
   // 整窗跳过原因（tailstats_*.jsonl 的 skip 字段 = cmd/tail 主循环里的字面量）
   var SKIP_CN = {

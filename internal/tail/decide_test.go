@@ -221,6 +221,44 @@ func TestWalkLegStageAndFailOpen(t *testing.T) {
 	}
 }
 
+// TestListenFloorLegStageAndStrict 钉住监听段价格地板（2026-10-01 决策 #32）:
+//
+//  1. **只对监听段生效**——段 1/2 无论价多低都放行（否则就不是「只加在最后一段」了）;
+//  2. 阈值取 `cfg.ListenMinPrice`（默认 0.83）且是**严格大于**（0.83 本身拦下,
+//     0.84 放行）——报价在 0.01 网格上, 0.83/0.84 都是确定的整数格;
+//  3. 键一变判定立刻跟着变（键不能是摆设）。
+func TestListenFloorLegStageAndStrict(t *testing.T) {
+	cfg := DefaultConfig() // 0.83
+	cases := []struct {
+		name  string
+		stage string
+		px    float64
+		want  bool
+	}{
+		{"监听段 px=0.84 放行", StageListen, 0.84, true},
+		{"监听段 px=0.83 拦下（严格大于）", StageListen, 0.83, false},
+		{"监听段 px=0.80 拦下", StageListen, 0.80, false},
+		{"监听段 px=1.00 放行", StageListen, 1.00, true},
+		{"T150 段不受地板约束", StageT150, 0.80, true},
+		{"T60 段不受地板约束", StageT60, 0.80, true},
+	}
+	for _, c := range cases {
+		if got := ListenFloorLeg(cfg, c.stage, c.px); got != c.want {
+			t.Errorf("%s: ListenFloorLeg(%s, %.2f) = %v, 期望 %v", c.name, c.stage, c.px, got, c.want)
+		}
+	}
+	// 阈值**由配置驱动**（键存在是为了其他标的各带一份自己的标定值, 见决策 #25/#32）。
+	tuned := cfg
+	tuned.ListenMinPrice = 0.90
+	if !ListenFloorLeg(tuned, StageListen, 0.91) || ListenFloorLeg(tuned, StageListen, 0.90) {
+		t.Errorf("阈值 0.90 时应 0.91 放行、0.90 拦下")
+	}
+	tuned.ListenMinPrice = 0 // 合法弱闸: 价格恒 > 0 ⇒ 形同虚设（退回加地板之前）
+	if !ListenFloorLeg(tuned, StageListen, 0.80) {
+		t.Errorf("地板 0 时监听段该一字不拦")
+	}
+}
+
 // TestRule5IsTheEngineRule 钉住「引擎只下单 ⑤」这一条: ⑤ 是 ④ 的**真子集**
 // （σ 腿多了 sd ≥ 40 的门），且 ④∖⑤ 的样本正是文档 §4.3 里被砍掉的那批。
 func TestRule5IsTheEngineRule(t *testing.T) {

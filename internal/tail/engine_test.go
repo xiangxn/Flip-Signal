@@ -522,6 +522,84 @@ func TestEngineWalkGateThresholdFromConfig(t *testing.T) {
 	}
 }
 
+// TestEngineListenFloorShadowAndContinue 监听段**价格地板**（决策 #32）:
+// ② 达标但有效价 ≤ listen_min_price（默认 0.83）⇒ 落一行**影子行**
+//（ok=false, reject_reason=floor_low）且**链继续**（同段等更贵的 tick）;
+// 影子行**每窗至多一条**（无地板世界里只有第一个 ② 达标的 tick 会成交）。
+func TestEngineListenFloorShadowAndContinue(t *testing.T) {
+	e := newTestEngine(t, 10) // sd = 100 美元
+	// 前两段各落一条 leg_out（quietRow: dev=+10 两条腿都不过）⇒ 进监听段。
+	if o := row(t, e, 149, quietRow); o.OK {
+		t.Fatalf("第一段应被拒, 得到 %+v", o)
+	}
+	if o := row(t, e, 59, quietRow); o.OK {
+		t.Fatalf("第二段应被拒, 得到 %+v", o)
+	}
+
+	// rem=41, 有效价 0.81（② 达标: 价格腿 ≥0.80 ∧ dev=+100 ≥ 63）但过不了地板
+	// ⇒ 影子行: ok=false、reason=floor_low、stage=listen、本 tick 本就是一笔信号。
+	o := row(t, e, 41, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.81, 0.80 })
+	if o.OK {
+		t.Fatalf("被地板拦下的 tick 不该是信号行: %+v", o)
+	}
+	if o.Stage != StageListen || o.RejectReason != RejectFloorLow {
+		t.Fatalf("影子行应为 listen/%s, 得到 %s/%q", RejectFloorLow, o.Stage, o.RejectReason)
+	}
+	if !o.Rules.Rule2() {
+		t.Fatalf("floor_low 行必须 ② 达标（否则该零产出）: %+v", o.Rules)
+	}
+	// 影子行**不是信号**: 闩锁的 Signal 为假（防双单/结算都看这个）。
+	if l := e.Latches(); l.Signal || !l.Listening {
+		t.Fatalf("影子行不该点亮 Signal 闩锁, 得到 %+v", l)
+	}
+
+	// rem=40 有效价 0.82: 同样过不了地板, 但影子行只落一条 ⇒ 零产出（否则每窗会
+	// 被廉价 tick 刷屏）。链没有停在影子行上——它还在监听。
+	noRow(t, e, 40, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.82, 0.81 })
+
+	// rem=39 有效价 0.90 过了地板 ⇒ 本窗唯一的信号行, 股数按**有效价**算。
+	sig := row(t, e, 39, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.90, 0.89 })
+	if !sig.OK || sig.Stage != StageListen || sig.RejectReason != "" {
+		t.Fatalf("过地板的 tick 应出信号行, 得到 ok=%v stage=%s reason=%q",
+			sig.OK, sig.Stage, sig.RejectReason)
+	}
+	if want := 2 / 0.90; sig.Shares != want {
+		t.Fatalf("股数 = stake/有效价 = %.6f, 得到 %.6f", want, sig.Shares)
+	}
+	noRow(t, e, 38) // 出信号即 Done
+}
+
+// TestEngineListenFloorOnlyListenAndFromConfig 两件事: ① 地板**只管监听段**
+//（T=60 段的 0.82 照常成信号, 与决策 #26「段相关腿只此一条」的纪律同型）;
+// ② 阈值取自**引擎持有的 cfg**（配置键 `tail.listen_min_price` 是给其他标的重标定
+// 用的, 不能是摆设）。
+func TestEngineListenFloorOnlyListenAndFromConfig(t *testing.T) {
+	// ① 迟到接入 ⇒ 首个可判定 tick 直接进 T=60 段: 0.82 在**段 2**该出信号。
+	e := newTestEngine(t, 10)
+	if o := row(t, e, 59, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.82, 0.81 }); !o.OK || o.Stage != StageT60 {
+		t.Fatalf("段 2 不受监听段地板约束（0.82 应出信号）, 得到 ok=%v stage=%s reason=%q",
+			o.OK, o.Stage, o.RejectReason)
+	}
+
+	// ② 同一批 tick、阈值抬到 0.95: 0.90 被拦成影子行、0.96 才过。
+	cfg := DefaultConfig()
+	cfg.ListenMinPrice = 0.95
+	e2 := NewEngine(cfg)
+	e2.BeginWindow(0, 0)
+	if !e2.UpgradeAnchor(testAnchor, 10) {
+		t.Fatal("窗口开局注入锚被拒")
+	}
+	row(t, e2, 149, quietRow)
+	row(t, e2, 59, quietRow)
+	o := row(t, e2, 41, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.90, 0.89 })
+	if o.OK || o.RejectReason != RejectFloorLow {
+		t.Fatalf("阈值 0.95 下 0.90 该落 %s, 得到 ok=%v reason=%q", RejectFloorLow, o.OK, o.RejectReason)
+	}
+	if sig := row(t, e2, 40, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.96, 0.95 }); !sig.OK {
+		t.Fatalf("阈值 0.95 下 0.96 该出信号, 得到 ok=%v reason=%q", sig.OK, sig.RejectReason)
+	}
+}
+
 // TestEngineSdScalesWithAnchor 钉住 sd = hist_bps·anchor/1e4（美元）这一口径
 // ——把 bps 当美元用是这条策略最容易出现的量级错误（文档 §4 的 n=17 事故）。
 func TestEngineSdScalesWithAnchor(t *testing.T) {

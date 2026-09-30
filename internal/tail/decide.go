@@ -34,8 +34,8 @@ func EvalRules(cfg Config, stage string, hotAsk, dev, sd float64, hasSigma bool)
 	}
 }
 
-// PriceLeg 价格腿（纯函数）: 热门侧有效价是否过价格闸。除入场闸（WalkLeg）外
-// **本包唯一的段相关腿**——
+// PriceLeg 价格腿（纯函数）: 热门侧有效价是否过价格闸。本包的段相关腿之一
+//（另一个是入场闸 WalkLeg, 以及监听段地板 ListenFloorLeg）——
 //
 //	T=150 段（StageT150）: hotAsk >  PriceMin  （严格大于）
 //	其余段（T=60 / 监听）: hotAsk >= PriceMin
@@ -95,6 +95,42 @@ func WalkLeg(cfg Config, stage, side string, twap, anchor float64) bool {
 		return true
 	}
 	return WalkUSD(side, twap, anchor) >= cfg.WalkMinUSD
+}
+
+// ── 监听段价格地板（2026-10-01 决策 #32）──
+
+// ListenFloorLeg 价格地板（纯函数）: **仅监听段生效**——该段要热门侧有效价
+// **严格大于** `cfg.ListenMinPrice`（默认 0.83）才放行。
+//
+// 为什么只加在监听段（2026-10-01 用户决定, 决策 #32）: 监听段是**最后几十秒**
+// 才可能触发的第三段, 定价 p 的盈亏平衡胜率就是 p——`fill ≤ 0.83` 的口袋意味着
+// 「去赌 17% 以上的不确定性」, 而它在两个样本里都偏向输:
+//
+//   - 14 天回测: 监听段 fill ≤0.82 的一格 n=15 输率 33.3%（−5.40U）, 同段 0.83~0.90
+//     一格 0 输、0.98~1.00 一格输率 0.3%; 加地板 >0.83 后合计 Δ +8.55U（区间含零,
+//     不显著——故有前向复验判据, 见 docs/tail_listen_floor_2026-10-01.md）;
+//   - 实盘（data/tail-live 09-24~09-30, 10U/注）: 监听段成交换手 34 笔里恰好 3 笔
+//     落在该口袋（0.80/0.81/0.82）, 净 −17.49U——其中 0.81 与 0.82 这两笔正是监听段
+//     实盘样本里**仅有的两笔输单**（0.80 那笔赢 +2.5U, 口袋本身不是「全输」）;
+//     其余 31 笔（>0.83）零输（+11.07U）——监听段的净亏损 100% 来自这个口袋。
+//
+// ⚠️ **不是** walk 闸往监听段的延伸（那条路 2026-10-01 已否, 见
+// docs/tail_walk_gate_extension_2026-10-01.md）: 监听段的 walk 与 fill 高度同向
+// （ρ=+0.31）, walk 闸在那里只是价格腿的伪装且砍掉 16 倍的笔——要拦廉价角就用
+// 价格本身, 一条更直接、可解释、样本可累加的腿。
+//
+// ⚠️ **阈值取 `cfg.ListenMinPrice`（默认 0.83）, 不是硬编码常量**: 与 WalkMinUSD
+// 同性质, 键的存在是为其他标的各带一份自己的标定值（决策 #25）; **在 BTC 上不该调**
+// （0.83 是那批数据的选点）。比较符**故意不做成配置键**（沿 PriceLeg 的口径:
+// 做成键会让人按行情调算子）——本腿恒为**严格大于**, 因为设计语义就是
+// 「跳过 fill ≤ X 的 tick」。
+//
+// ⚠️ 只在监听段用（engine 的 stateListening 分支）——段 1/2 一字不动。
+func ListenFloorLeg(cfg Config, stage string, px float64) bool {
+	if stage != StageListen {
+		return true // 段 1/2 一字不动
+	}
+	return px > cfg.ListenMinPrice
 }
 
 // ── 派生量（纯函数）──

@@ -324,6 +324,18 @@ func TestValidate(t *testing.T) {
 			wantErr: "tail.walk_min_usd",
 		},
 		{
+			// 地板是**严格大于**、报价上界 1.00 ⇒ 1.0 时没有报价过得去（监听段
+			// 信号静默归零、策略少一段而不报错）。0 是合法弱闸, 故只挡 [1,∞)。
+			name:    "tail 监听段地板为 1",
+			mutate:  func(c *AppConfig) { c.Tail.ListenMinPrice = 1 },
+			wantErr: "tail.listen_min_price",
+		},
+		{
+			name:    "tail 监听段地板为负",
+			mutate:  func(c *AppConfig) { c.Tail.ListenMinPrice = -0.1 },
+			wantErr: "tail.listen_min_price",
+		},
+		{
 			name:    "tail stake 为零",
 			mutate:  func(c *AppConfig) { c.Tail.Stake = 0 },
 			wantErr: "tail.stake 必须 > 0",

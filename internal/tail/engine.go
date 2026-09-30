@@ -17,7 +17,8 @@ import (
 //	Await60   ──首个可判定 tick 且 rem ≤ t60_rem──▶ [判 ⑤]
 //	   ├─ 达标 → 落信号行（下单）→ Done
 //	   └─ 不达标 → Listening
-//	Listening ──此后**每秒**: 可判定 tick ∧ ② 达标──▶ 落信号行（下单）→ Done
+//	Listening ──此后**每秒**: 可判定 tick ∧ ② 达标 ∧ 有效价 > listen_min_price──▶ 落信号行（下单）→ Done
+//	   ├─ ② 达标但有效价 ≤ listen_min_price（决策 #32）→ 落一行 floor_low 影子行, 继续听
 //	   └─ rem == 0 → Done
 //
 // 本包零第三方依赖、无 I/O, 判定输入全部经 Tick / BeginWindow 注入, 可独立测试：
@@ -56,6 +57,12 @@ type Engine struct {
 	// 「整窗只下一单」就靠它, 也是 ProcessTick 唯一的幂等守卫。
 	signal  bool
 	emitted bool // 本窗已产出过任何行 → 锚冻结（UpgradeAnchor 拒收）
+	// floorShadowed 本窗已落过监听段地板的影子行（决策 #32）——每窗至多一条:
+	// 影子行的用途是「不放地板会成交的那一笔」的离线反事实, 无地板时链在首个
+	// ② 达标 tick 就结束, 之后每个廉价 tick 都再落一行只会把反事实读脏。
+	// ⚠️ 不上 Resume: 崩溃重启重入同一窗时可能重落一条（无害——影子行不进信号/
+	// 结算/熔断, 至多让离线脚本按窗去重）。
+	floorShadowed bool
 
 	stats WindowStats // 本窗 tick 健康度（纯计数, 不参与判定; 每窗重置）
 }
@@ -93,6 +100,7 @@ func (e *Engine) BeginWindow(anchor, histBps float64) {
 	e.listenEntered = false
 	e.signal = false
 	e.emitted = false
+	e.floorShadowed = false
 	e.stats = WindowStats{}
 }
 
@@ -171,9 +179,11 @@ func (e *Engine) Config() Config {
 
 // ProcessTick 处理一个 1s tick, 返回本 tick 产出的行（至多一行, nil = 无产出）。
 //
-// 三段递进的分支走向见 Engine 类型注释。返回的行**只有两种形态**:
+// 三段递进的分支走向见 Engine 类型注释。返回的行**只有三种形态**:
 //   - 判定行（stage = t150/t60）: 成功与否都产出（OK=false 带 RejectReason）;
-//   - 信号行（stage = listen）: 只在 ② 达标时产出。
+//   - 信号行（stage = listen）: 只在 ② 达标（∧ 过价格地板）时产出;
+//   - 影子行（stage = listen, reject_reason = floor_low, 每窗至多一条）: ② 达标
+//     但被价格地板拦下——本会是信号的那一笔, 落盘供离线反事实（决策 #32）。
 //
 // 无论哪种, **只有 OK=true 的行会被执行编排下单**（cmd/tail 单点 dispatch）。
 func (e *Engine) ProcessTick(t flip.Tick) *Observation {
@@ -244,6 +254,21 @@ func (e *Engine) ProcessTick(t flip.Tick) *Observation {
 		cand := e.snapshot(t, side, px, src, StageListen, e.cfg.T60Rem)
 		if !cand.Rules.Rule2() {
 			return nil
+		}
+		// 价格地板（决策 #32）: ② 达标但有效价 ≤ listen_min_price（默认 0.83）⇒
+		// 本 tick 本会是一笔信号, 被廉价角拦下——落一行**影子行**（ok=false,
+		// reject_reason=floor_low）供离线反事实, 且**链继续**（继续监听更贵的 tick）。
+		// 影子行每窗至多一条: 反事实只认「无地板时成交的那一笔」（即首个 ② 达标
+		// tick）; 之后的廉价 tick 在无地板世界里根本不会成为信号。
+		if !ListenFloorLeg(e.cfg, StageListen, px) {
+			if e.floorShadowed {
+				return nil
+			}
+			e.floorShadowed = true
+			cand.RejectReason = RejectFloorLow
+			o = cand
+			advance = true
+			break
 		}
 		cand.OK = true
 		cand.Shares = e.cfg.Stake / px

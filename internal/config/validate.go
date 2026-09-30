@@ -84,6 +84,13 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 		return nil, fmt.Errorf("tail.walk_min_usd 必须 ≥ 0（现值 %.3f）——负值会让入场闸形同虚设",
 			cfg.Tail.WalkMinUSD)
 	}
+	// 监听段价格地板（决策 #32）: 地板是**严格大于**、报价上界 1.00 ⇒ ≥1 时没有任何
+	// 报价过得去（监听段信号静默归零、策略少一段而不报错）; 负值无意义。0 是合法弱闸
+	//（地板形同虚设, 退回 2026-10-01 之前的行为）。同样只做**结构性**校验。
+	if cfg.Tail.ListenMinPrice < 0 || cfg.Tail.ListenMinPrice >= 1 {
+		return nil, fmt.Errorf("tail.listen_min_price 必须在 [0,1) 内（现值 %.3f）——≥1 会让监听段信号永远为空（地板是严格大于）",
+			cfg.Tail.ListenMinPrice)
+	}
 
 	return warnings, nil
 }

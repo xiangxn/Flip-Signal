@@ -40,12 +40,17 @@ import (
 //     **段相关**的: 段 2/3 一字不动; twap 缺失 ⇒ 两边都放行（fail-open）。
 //     ⚠️ 下面这组 pin **只在 `cfg.WalkMinUSD = 43`（默认值）下成立**——本测试用的是
 //     `DefaultConfig()`（配置键是为其他标的各带一份自己的标定值而存在, 见决策 #25）。
+//   - **监听段价格地板** = `有效价 > cfg.ListenMinPrice`（2026-10-01 决策 #32, 见
+//     decide.ListenFloorLeg）——oracle 的 `fill <= LISTEN_MIN_PRICE` 分支是它的孪生。
+//     ⚠️ 只在监听段: ② 达标但被拦的 tick 落**影子行**（reject_reason = floor_low,
+//     每窗至多一条）且**链继续**; 同样只在默认值（0.83）下 pin 成立。
 //
 // 行 ↔ oracle 的对应关系（stage 字段直接可比, 不再需要按 kind 反推）:
 //
 //	t150 行（首个 rem ≤ 150 的可判定 tick）⇔ oracle chain() 的第一段
 //	t60  行（t150 被拒后首个 rem ≤ 60 的可判定 tick）⇔ 第二段
-//	listen 行（前两段都没信号后, 首个 ② 达标的 tick）⇔ 第三段（只在达标时落行）
+//	listen 行（前两段都没信号后, 首个 ② 达标 ∧ 过地板的 tick）⇔ 第三段（只在达标时落行）
+//	listen floor_low 影子行（② 达标但被地板拦下, 每窗至多一条）⇔ 同段同一分支
 //
 // ⚠️ 需要 audited、但不需断言的已知事实（oracle 第五节实测, 2026-09-24 数据）:
 // rem ≤ 150 的 542800 个 tick 里「**四档部分缺**」= 0（单侧空簿一次都没有）⇒ Go 的
@@ -61,28 +66,29 @@ var parityStages = []struct {
 }{
 	{StageT150, 3638, 958, 96.242171, 42.173827},
 	{StageT60, 2676, 750, 99.200000, 19.067819},
-	{StageListen, 372, 372, 97.849462, 2.784708},
+	{StageListen, 383, 368, 99.184783, 11.336827},
 }
 
 // parityTotals = 三段合计（oracle 第六节末行）。
 //
-// ⚠️ 这组数字是 **2026-09-29 T=150 段加入场闸 `walk ≥ 43 美元`之后**的值
-// （oracle 同日更新, 决策 #29）。改前（= 决策 #26 之后）的对应值: t150 3638 / 1208 /
-// 94.039735 / 15.022637、t60 2426 / 577 / 99.133449 / 16.153977、listen 348 / 348 /
-// 97.988506 / 3.916134、合计 6412 / 2133 / 96.061885 / 35.092748，见 git 历史。
+// ⚠️ 这组数字是 **2026-10-01 监听段加价格地板 `有效价 > 0.83`之后**的值
+// （oracle 同日更新, 决策 #32）。改前（= 决策 #29 之后）的对应值: listen 372 / 372 /
+// 97.849462 / 2.784708、合计 6686 / 2080 / 97.596154 / 64.026354，见 git 历史。
+// 再往前（= 决策 #26 之后的闸前）: 合计 6412 / 2133 / 96.061885 / 35.092748。
 //
-// 变动 = 250 个 t150 信号被入场闸拦下（walk < 43 美元）, 其中 **197 个改道**到 t60/
-// 监听段（重入价更高 ⇒ 该批 P&L 从 +18.99U 压到 +1.78U）、**53 个整窗死亡**（基线里
-// 那批输率 49.1%、P&L −46.14U）⇒ 行数 +274、信号 −53、合计 P&L **+28.93U**。
-// 相对 pin: 行 6412→6686、信号 2133→2080、WR 96.061885→97.596154、P&L 35.092748→64.026354。
+// 变动 = 监听段 15 个 `fill ≤ 0.83` 的信号被地板拦下（各落一行 floor_low 影子行）:
+// **4 个整窗死亡**（信号行被影子行**替换**, 行数净 0）＋ **11 个在同段改道**到更贵的
+// tick（影子行 + 新信号行, 每窗 +1 行）⇒ 合计行 6686 + 11 = 6697、信号 2080 − 4 =
+// 2076、P&L **+8.55U**（那 4 个整窗死亡的都是输单）。
 const (
-	parityAllRows   = 6686
-	parityAllSig    = 2080
-	parityAllWR     = 97.596154
-	parityAllPL     = 64.026354
+	parityAllRows   = 6697
+	parityAllSig    = 2076
+	parityAllWR     = 97.832370
+	parityAllPL     = 72.578473
 	parityWindows   = 3640 // 参与的窗数（有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ）——闸不改窗数
 	parityNoSigma   = 3    // σ 未就绪整窗跳过（决策 #13 的前置闸）
 	parityWalkLow   = 250  // T=150 段被入场闸拦下的行数（⑤ 达标 ∧ walk < 43; 决策 #29）
+	parityFloorLow  = 15   // 监听段被价格地板拦下的影子行数（② 达标 ∧ 价 ≤ 0.83; 决策 #32）
 	parityTolerance = 5e-5 // oracle 打印 6 位小数 ⇒ 容差取其末位之半; 实测两边差 <1e-9
 )
 
@@ -109,7 +115,8 @@ func TestParityBacktest(t *testing.T) {
 	rows := map[string]int{}             // 各段全部行数
 	universe := map[string][]parityRow{} // 各段信号行（ok=true）
 	windows, noSigma, bidFallback := 0, 0, 0
-	walkLow := 0 // T=150 段被入场闸拦下的行数（决策 #29）
+	walkLow := 0  // T=150 段被入场闸拦下的行数（决策 #29）
+	floorLow := 0 // 监听段被价格地板拦下的影子行数（决策 #32）
 
 	for i := range events {
 		ev := &events[i]
@@ -144,7 +151,8 @@ func TestParityBacktest(t *testing.T) {
 			if !(o.Spot > 0) || !(o.Anchor > 0) {
 				t.Fatalf("窗 %d: 行 spot=%.4f anchor=%.4f（都须 >0）", ev.StartTime, o.Spot, o.Anchor)
 			}
-			// 判定行内部一致性 + 拒绝原因只能是这两条（missing_spot/no_hist 是纯函数
+			// 信号行/判定行/影子行各自的一致性: 信号行须满足本段规则且不带拒绝原因;
+			// 非 OK 行的拒绝原因只能是下面四条之一（missing_spot/no_hist 是纯函数
 			// 防线, 现网到不了——若出现说明引擎的前置门控被绕过了）。
 			if o.OK {
 				if o.Stage == StageListen {
@@ -179,8 +187,20 @@ func TestParityBacktest(t *testing.T) {
 							ev.StartTime, o.Twap, o.Anchor)
 					}
 					walkLow++
+				case RejectFloorLow:
+					// 监听段地板**影子行**的判据语义（决策 #32）: ② 已达标才可能出
+					// 现（地板排在 ② 之后 ⇒ 它只覆盖「地板是唯一拦路者」的行）,
+					// 且只该出现在监听段——否则离线反事实会把别的段读成被拦。
+					if o.Stage != StageListen || !o.Rules.Rule2() {
+						t.Fatalf("窗 %d: floor_low 但 stage=%s / ② 未达标: %+v",
+							ev.StartTime, o.Stage, o.Rules)
+					}
+					if ListenFloorLeg(cfg, o.Stage, o.HotAsk) {
+						t.Fatalf("窗 %d: floor_low 但地板为真（有效价=%.4f）", ev.StartTime, o.HotAsk)
+					}
+					floorLow++
 				default:
-					t.Fatalf("窗 %d: %s 判定行的拒绝原因 = %q（只应是 price_low/leg_out/walk_low）",
+					t.Fatalf("窗 %d: %s 判定行的拒绝原因 = %q（只应是 price_low/leg_out/walk_low/floor_low）",
 						ev.StartTime, o.Stage, o.RejectReason)
 				}
 			}
@@ -212,6 +232,9 @@ func TestParityBacktest(t *testing.T) {
 	}
 	if walkLow != parityWalkLow {
 		t.Errorf("T=150 入场闸拦下 = %d 行, 期望 %d（oracle 第二节）", walkLow, parityWalkLow)
+	}
+	if floorLow != parityFloorLow {
+		t.Errorf("监听段价格地板拦下 = %d 行, 期望 %d（oracle 第二节）", floorLow, parityFloorLow)
 	}
 
 	// 各段行数 / 信号数（**精确整数**）+ 胜率 / P&L（容差 5e-5）——oracle 第六节。
