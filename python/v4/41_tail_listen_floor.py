@@ -44,7 +44,9 @@ s38 = load("s38", BASE / "38_tail_walk_gate.py")    # 宇宙/统计口径（复�
 STAKE = s23.STAKE
 T60 = s23.T60
 WALK_X = s23.WALK_MIN_USD          # 43：现行落地形态的 T150 入场闸（决策 #29）
-FLOOR_X = s23.LISTEN_MIN_PRICE     # 0.83：本脚本要论证的那个 X
+FLOOR_X = s23.FLOOR_MIN_PRICE      # 0.83：本脚本要论证的那个 X
+                                   # （oracle 的常量 2026-10-01 随决策 #33 由 LISTEN_MIN_PRICE 改名;
+                                   #  本脚本的链仍是**只拦监听段**的历史证据形态, 与那个名字无关）
 
 # 三把 pin（oracle 23 打印的值）
 PIN_PRE_SIG, PIN_PRE_PNL = 2133, 35.092748          # 闸前（无 walk 闸、无地板）

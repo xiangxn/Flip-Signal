@@ -622,8 +622,8 @@ func main() {
 		cfg.Tail.T150Rem, cfg.Tail.T60Rem, cfg.Tail.PriceMin, cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD, cfg.Tail.Stake)
 	log.Printf(" 入场闸: T=150 段 已结算位移 walk≥%.0f美元（tail.walk_min_usd; BTC 标定值, 换标的须重标定）",
 		cfg.Tail.WalkMinUSD)
-	log.Printf(" 价格地板: 监听段 有效价>%.2f（tail.listen_min_price; BTC 标定值, 换标的须重标定; 被拦落 floor_low 影子行且链继续）",
-		cfg.Tail.ListenMinPrice)
+	log.Printf(" 价格地板: T=60 段与监听段 有效价>%.2f（tail.floor_min_price; BTC 标定值, 换标的须重标定; 被拦落 floor_low 影子行且链继续）",
+		cfg.Tail.FloorMinPrice)
 	log.Printf(" 新鲜度闸: book_lat≤%dms + spot_age≤%dms + twap_age≤%dms（tail.max_book_lat_ms / feed.*）",
 		cfg.Tail.MaxBookLatMs, cfg.Feed.MaxSpotAgeMs, cfg.Feed.MaxTwapAgeMs)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 位移]")

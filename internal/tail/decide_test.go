@@ -221,13 +221,15 @@ func TestWalkLegStageAndFailOpen(t *testing.T) {
 	}
 }
 
-// TestListenFloorLegStageAndStrict 钉住监听段价格地板（2026-10-01 决策 #32）:
+// TestFloorLegStagesAndStrict 钉住价格地板（2026-10-01 决策 #32 监听段; 同日 #33
+// 下延到 T=60 段）:
 //
-//  1. **只对监听段生效**——段 1/2 无论价多低都放行（否则就不是「只加在最后一段」了）;
-//  2. 阈值取 `cfg.ListenMinPrice`（默认 0.83）且是**严格大于**（0.83 本身拦下,
+//  1. **只对 T=60 段与监听段生效**——段 1 无论价多低都放行（T=150 段的廉价角由
+//     PriceLeg 的严格大于与 walk 闸覆盖, 改它 = 改检查点族, 已全否）;
+//  2. 阈值取 `cfg.FloorMinPrice`（默认 0.83）且是**严格大于**（0.83 本身拦下,
 //     0.84 放行）——报价在 0.01 网格上, 0.83/0.84 都是确定的整数格;
 //  3. 键一变判定立刻跟着变（键不能是摆设）。
-func TestListenFloorLegStageAndStrict(t *testing.T) {
+func TestFloorLegStagesAndStrict(t *testing.T) {
 	cfg := DefaultConfig() // 0.83
 	cases := []struct {
 		name  string
@@ -235,27 +237,31 @@ func TestListenFloorLegStageAndStrict(t *testing.T) {
 		px    float64
 		want  bool
 	}{
+		{"T150 段不受地板约束", StageT150, 0.80, true},
+		{"T60 段 px=0.84 放行", StageT60, 0.84, true},
+		{"T60 段 px=0.83 拦下（严格大于）", StageT60, 0.83, false},
+		{"T60 段 px=0.80 拦下", StageT60, 0.80, false},
 		{"监听段 px=0.84 放行", StageListen, 0.84, true},
 		{"监听段 px=0.83 拦下（严格大于）", StageListen, 0.83, false},
 		{"监听段 px=0.80 拦下", StageListen, 0.80, false},
 		{"监听段 px=1.00 放行", StageListen, 1.00, true},
-		{"T150 段不受地板约束", StageT150, 0.80, true},
-		{"T60 段不受地板约束", StageT60, 0.80, true},
 	}
 	for _, c := range cases {
-		if got := ListenFloorLeg(cfg, c.stage, c.px); got != c.want {
-			t.Errorf("%s: ListenFloorLeg(%s, %.2f) = %v, 期望 %v", c.name, c.stage, c.px, got, c.want)
+		if got := FloorLeg(cfg, c.stage, c.px); got != c.want {
+			t.Errorf("%s: FloorLeg(%s, %.2f) = %v, 期望 %v", c.name, c.stage, c.px, got, c.want)
 		}
 	}
 	// 阈值**由配置驱动**（键存在是为了其他标的各带一份自己的标定值, 见决策 #25/#32）。
 	tuned := cfg
-	tuned.ListenMinPrice = 0.90
-	if !ListenFloorLeg(tuned, StageListen, 0.91) || ListenFloorLeg(tuned, StageListen, 0.90) {
-		t.Errorf("阈值 0.90 时应 0.91 放行、0.90 拦下")
+	tuned.FloorMinPrice = 0.90
+	for _, st := range []string{StageT60, StageListen} {
+		if !FloorLeg(tuned, st, 0.91) || FloorLeg(tuned, st, 0.90) {
+			t.Errorf("%s: 阈值 0.90 时应 0.91 放行、0.90 拦下", st)
+		}
 	}
-	tuned.ListenMinPrice = 0 // 合法弱闸: 价格恒 > 0 ⇒ 形同虚设（退回加地板之前）
-	if !ListenFloorLeg(tuned, StageListen, 0.80) {
-		t.Errorf("地板 0 时监听段该一字不拦")
+	tuned.FloorMinPrice = 0 // 合法弱闸: 价格恒 > 0 ⇒ 形同虚设（退回加地板之前）
+	if !FloorLeg(tuned, StageT60, 0.80) || !FloorLeg(tuned, StageListen, 0.80) {
+		t.Errorf("地板 0 时两段该一字不拦")
 	}
 }
 

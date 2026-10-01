@@ -523,7 +523,7 @@ func TestEngineWalkGateThresholdFromConfig(t *testing.T) {
 }
 
 // TestEngineListenFloorShadowAndContinue 监听段**价格地板**（决策 #32）:
-// ② 达标但有效价 ≤ listen_min_price（默认 0.83）⇒ 落一行**影子行**
+// ② 达标但有效价 ≤ floor_min_price（默认 0.83）⇒ 落一行**影子行**
 //（ok=false, reject_reason=floor_low）且**链继续**（同段等更贵的 tick）;
 // 影子行**每窗至多一条**（无地板世界里只有第一个 ② 达标的 tick 会成交）。
 func TestEngineListenFloorShadowAndContinue(t *testing.T) {
@@ -569,31 +569,54 @@ func TestEngineListenFloorShadowAndContinue(t *testing.T) {
 	noRow(t, e, 38) // 出信号即 Done
 }
 
-// TestEngineListenFloorOnlyListenAndFromConfig 两件事: ① 地板**只管监听段**
-//（T=60 段的 0.82 照常成信号, 与决策 #26「段相关腿只此一条」的纪律同型）;
-// ② 阈值取自**引擎持有的 cfg**（配置键 `tail.listen_min_price` 是给其他标的重标定
-// 用的, 不能是摆设）。
-func TestEngineListenFloorOnlyListenAndFromConfig(t *testing.T) {
-	// ① 迟到接入 ⇒ 首个可判定 tick 直接进 T=60 段: 0.82 在**段 2**该出信号。
-	e := newTestEngine(t, 10)
-	if o := row(t, e, 59, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.82, 0.81 }); !o.OK || o.Stage != StageT60 {
-		t.Fatalf("段 2 不受监听段地板约束（0.82 应出信号）, 得到 ok=%v stage=%s reason=%q",
-			o.OK, o.Stage, o.RejectReason)
+// TestEngineFloorCoversT60AndListen 价格地板下延到 T=60 段（2026-10-01 决策 #33）
+// 与**影子行闩锁跨段共享**三件事:
+//
+//	① 段 2（T=60 的 ⑤）达标但有效价 ≤ 地板 ⇒ 落一行 stage=t60 的 floor_low
+//	   **影子行**（ok=false, shares=0）, 且**链继续**到监听段（不设地板时那一 tick
+//	   本会成交——影子行就是它的离线反事实）;
+//	② 闩锁跨段共享: 段 2 已落过影子行 ⇒ 监听段的廉价 tick 再被拦时**零产出**
+//	  （否则无地板世界里「本会成交的那一笔」会有两条, 反事实读不出来）;
+//	③ 阈值取自**引擎持有的 cfg**（配置键 `tail.floor_min_price` 是给其他标的重标定
+//	   用的, 不能是摆设）。
+func TestEngineFloorCoversT60AndListen(t *testing.T) {
+	// ① 迟到接入 ⇒ 首个可判定 tick 直接进 T=60 段: 0.82 被地板拦成影子行。
+	e := newTestEngine(t, 10) // sd = 100 美元
+	o := row(t, e, 59, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.82, 0.81 })
+	if o.OK || o.Stage != StageT60 || o.RejectReason != RejectFloorLow {
+		t.Fatalf("段 2 的 0.82 应落 t60/%s 影子行, 得到 ok=%v stage=%s reason=%q",
+			RejectFloorLow, o.OK, o.Stage, o.RejectReason)
+	}
+	if !o.Rules.Rule5() {
+		t.Fatalf("floor_low 行必须 ⑤ 达标（否则该零产出）: %+v", o.Rules)
+	}
+	if o.Shares != 0 {
+		t.Fatalf("影子行不该带目标股数（本会是信号的是那一刻, 但没有仓位）: %.4f", o.Shares)
+	}
+	// 链继续: 已转入监听段、段闩锁为真, 但没有信号。
+	if l := e.Latches(); !l.T60 || !l.Listening || l.Signal {
+		t.Fatalf("段 2 被地板拦后该继续到监听段且无信号, 得到 %+v", l)
+	}
+	// ② 监听段 ② 达标但仍 ≤ 地板 ⇒ 再被拦, 但影子行已用过 ⇒ 零产出。
+	noRow(t, e, 41, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.81, 0.80 })
+	// 更贵的 tick 过地板 ⇒ 本窗唯一的信号行。
+	if sig := row(t, e, 40, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.90, 0.89 }); !sig.OK || sig.Stage != StageListen {
+		t.Fatalf("过地板的 tick 应出监听段信号, 得到 ok=%v stage=%s reason=%q",
+			sig.OK, sig.Stage, sig.RejectReason)
 	}
 
-	// ② 同一批 tick、阈值抬到 0.95: 0.90 被拦成影子行、0.96 才过。
+	// ③ 阈值来自 cfg: 抬到 0.95 后段 2 的 0.90 也被拦、0.96 才过。
 	cfg := DefaultConfig()
-	cfg.ListenMinPrice = 0.95
+	cfg.FloorMinPrice = 0.95
 	e2 := NewEngine(cfg)
 	e2.BeginWindow(0, 0)
 	if !e2.UpgradeAnchor(testAnchor, 10) {
 		t.Fatal("窗口开局注入锚被拒")
 	}
-	row(t, e2, 149, quietRow)
-	row(t, e2, 59, quietRow)
-	o := row(t, e2, 41, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.90, 0.89 })
-	if o.OK || o.RejectReason != RejectFloorLow {
-		t.Fatalf("阈值 0.95 下 0.90 该落 %s, 得到 ok=%v reason=%q", RejectFloorLow, o.OK, o.RejectReason)
+	o2 := row(t, e2, 59, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.90, 0.89 })
+	if o2.OK || o2.Stage != StageT60 || o2.RejectReason != RejectFloorLow {
+		t.Fatalf("阈值 0.95 下段 2 的 0.90 该落 t60/%s, 得到 ok=%v stage=%s reason=%q",
+			RejectFloorLow, o2.OK, o2.Stage, o2.RejectReason)
 	}
 	if sig := row(t, e2, 40, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.96, 0.95 }); !sig.OK {
 		t.Fatalf("阈值 0.95 下 0.96 该出信号, 得到 ok=%v reason=%q", sig.OK, sig.RejectReason)

@@ -65,18 +65,23 @@ type Config struct {
 	// 标定值（用户 2026-09-29 决定）；**在 BTC 上它同样不该调**——改它等于换一条
 	// 没在 14 天数据上验过的策略（43 是那批数据上的 argmax, 见文档 §4 风险 1）。
 	WalkMinUSD float64 `mapstructure:"walk_min_usd"`
-	// ListenMinPrice **监听段价格地板**（0.83, 2026-10-01 决策 #32）: 监听段的信号
-	// 还要热门侧有效价**严格大于**此值（`px > 0.83`）才放行——被拦的 tick 落一行
-	// 影子行（reject_reason = floor_low）且**链继续**（同段等下一个更贵的 tick）。
+	// FloorMinPrice **价格地板**（0.83, 2026-10-01 决策 #32 + #33）: **T=60 段与
+	// 监听段**的信号还要热门侧有效价**严格大于**此值（`px > 0.83`）才放行——被拦的
+	// tick 落一行影子行（reject_reason = floor_low, 每窗至多一条）且**链继续**
+	//（T=60 被拦 ⇒ 链走到监听段; 监听段被拦 ⇒ 同段等下一个更贵的 tick）。
 	//
-	// 拦的是「最后几十秒还在赌 20% 不确定性」的廉价角: 定价 p 的盈亏平衡胜率就是 p,
-	// 而 fill ≤ 0.83 的口袋在回测与实盘两个样本里都显著偏向输（详见
-	// docs/tail_listen_floor_2026-10-01.md）。只加在监听段——T=150/T=60 段一字不动
-	//（T=150 段的价格结构由 PriceLeg 的严格大于与 walk 闸覆盖）。
+	// 拦的是「还在赌 20% 不确定性」的廉价角: 定价 p 的盈亏平衡胜率就是 p, 而
+	// fill ≤ 0.83 的口袋在实盘里把这一族的盈利打穿（t60 段 6 笔 −11.38U;
+	// 监听段 34 笔成交里 3 笔 −17.49U）——详见 docs/tail_floor_from_t60_2026-10-01.md。
+	//
+	// ⚠️ **回测上这一条是负的**（Δ −2.26U, 日级配对 95% [−4.73,−0.29]）——落地的
+	// 依据是实盘口径 + 用户决定，**不是**回测增益；前向判据已写死在文档 §5。T=150 段
+	// **一字不动**（那一段的价格结构由 PriceLeg 的严格大于与 walk 闸覆盖）。
 	//
 	// ⚠️ 与 walk_min_usd 同性质: 键存在的理由就是让 ETH 等标的各自带一份**自己的**
 	// 标定值（0.83 是 BTC 的标定量, 用户 2026-10-01 决定）；**在 BTC 上不该调**。
-	ListenMinPrice float64 `mapstructure:"listen_min_price"`
+	//（原名 listen_min_price——同日下延到 T=60 段后改名, 因为地板不再只管监听段。）
+	FloorMinPrice float64 `mapstructure:"floor_min_price"`
 }
 
 // DefaultConfig 返回文档 §1.4 定稿的默认参数（全部不可调, 见 Config 注释）。
@@ -105,6 +110,6 @@ func DefaultConfig() Config {
 		MaxBookLatMs: 300,  // 盘口延迟闸（回测 MAX_LAT=300）
 		WalkMinUSD:   43,   // T=150 段入场闸（决策 #29; BTC 标定量——别在 BTC 上调）
 
-		ListenMinPrice: 0.83, // 监听段价格地板（决策 #32; BTC 标定量——别在 BTC 上调）
+		FloorMinPrice: 0.83, // 价格地板: T=60 + 监听段（决策 #32/#33; BTC 标定量——别在 BTC 上调）
 	}
 }

@@ -18,12 +18,13 @@
 // `dev = basis + walk`, basis 是还没写进去的缺口 = 领先量）。本段不达标 ⇒ 不出信号、
 // **链继续**; 段 2/3 一字不动。
 //
-// ⚠️ 2026-10-01 起 **监听段另有一道价格地板**（决策 #32）: ② 达标之外还要
-// 热门侧有效价 `> cfg.ListenMinPrice`（默认 0.83, 见 decide.ListenFloorLeg）。
-// 被拦的 tick 落一行**影子行**（reject_reason = floor_low）且**链继续**（同段等下
-// 一个更贵的 tick）; 段 1/2 一字不动。
+// ⚠️ 2026-10-01 起 **T=60 段与监听段另有一道价格地板**（决策 #32; 同日 #33 下延到
+// T=60 段）: 这两段除各自规则外还要热门侧有效价 `> cfg.FloorMinPrice`
+//（默认 0.83, 见 decide.FloorLeg）。被拦的 tick 落一行**影子行**
+//（reject_reason = floor_low）且**链继续**（T=60 被拦 ⇒ 走到监听段; 监听段被拦 ⇒
+// 同段等下一个更贵的 tick）; T=150 段一字不动。
 //
-// 以上三道是**全部**的段相关腿（价格腿 PriceLeg 的比较符 + 入场闸 walk + 监听段地板）,
+// 以上三道是**全部**的段相关腿（价格腿 PriceLeg 的比较符 + 入场闸 walk + 价格地板）,
 // 其余规则三段完全一致。
 //
 // 2026-09-24 起每窗走**三段递进判定链**（用户决定, docs/tail_integrated_2026-09-24.md §1）:
@@ -65,6 +66,9 @@ const (
 	// StageT150 第一段: rem ≤ t150_rem 的首个可判定 tick 上判 ⑤。
 	StageT150 = "t150"
 	// StageT60 第二段: 第一段没出信号, rem ≤ t60_rem 的首个可判定 tick 上再判 ⑤。
+	// 本段除了成功（信号行）与不达标（判定行）两种落行外, 还有第三种: ⑤ 达标但被
+	// **价格地板**拦下的 floor_low **影子行**（决策 #33, 每窗至多一条, 与监听段共用
+	// 闩锁）——那一 tick 在不放地板的世界里本会成交, 链继续到监听段。
 	StageT60 = "t60"
 	// StageListen 第三段（监听）: 前两段都没信号后, 此后**每秒**判 ②（不含 σ 腿）。
 	// 本段落行的只有两种 tick: ② 达标的（信号行）与 ② 达标但被**价格地板**拦下的
@@ -82,8 +86,8 @@ func isKnownKind(kind string) bool {
 //
 // 顺序即判定顺序（decide 内 switch 固定）:
 // missing_spot → no_hist → price_low → **leg_out → walk_low**。
-// ⚠️ floor_low（监听段价格地板）**不在**这条链里——它只出现在监听段的影子行
-//（判定行不走它, 见 RejectFloorLow）。
+// ⚠️ floor_low（价格地板）**不在**这条链里——它只出现在影子行（T=60/监听段,
+// 见 RejectFloorLow）, 判定行走不到它。
 // 前两条是**纯函数防线**（现网到不了）: 缺 spot 的 tick 根本不落行（引擎等下一个
 // 可判定的 tick）, σ 未就绪由 cmd/tail 整窗跳过（skip=no_sigma）。
 //
@@ -109,17 +113,19 @@ const (
 	// 反之 dev/σ 腿本来就不达标的行一律读 leg_out——**离线统计别按「walk < 43 的行数」
 	// 数它**, 那会把两种不同的行混在一起。
 	RejectWalkLow = "walk_low"
-	// RejectFloorLow **监听段价格地板**（2026-10-01 决策 #32）: ② 达标, 但热门侧
-	// 有效价 `≤ cfg.ListenMinPrice`（默认 0.83, 见 decide.ListenFloorLeg）。
-	// 本 tick **本会是一笔信号**（② 已达标）, 被廉价角拦下——落一行**影子行**、
-	// 本段**链继续**（等下一个更贵的 tick; 监听段是最后一段, 「继续」= 继续监听）。
+	// RejectFloorLow **价格地板**（2026-10-01 决策 #32 监听段; 同日 #33 下延到 T=60 段）:
+	// 该段规则达标（T=60 ⇒ ⑤ 达标; 监听 ⇒ ② 达标）, 但热门侧有效价
+	// `≤ cfg.FloorMinPrice`（默认 0.83, 见 decide.FloorLeg）。
+	// 本 tick **本会是一笔信号**, 被廉价角拦下——落一行**影子行**（ok=false）、
+	// 链**继续**（T=60 被拦 ⇒ 走到监听段; 监听段被拦 ⇒ 同段等下一个更贵的 tick）。
 	//
-	// ⚠️ 每窗至多一条: 影子行的用途是「**不放地板会成交的那一笔**长什么样」的
-	// 离线反事实——无地板时链在首个 ② 达标 tick 就结束, 之后的廉价 tick 根本不会
-	// 成为信号, 落它们只会把反事实读脏（并且每窗 ~60 个 tick 会淹没决策表）。
+	// ⚠️ 每窗至多一条（两段共用同一个闩锁）: 影子行的用途是「**不放地板会成交的
+	// 那一笔**长什么样」的离线反事实——无地板时链在首个达标的段就结束, 之后的廉价
+	// tick 根本不会成为信号, 落它们只会把反事实读脏（并且监听段每窗 ~60 个 tick
+	// 会淹没决策表）。
 	//
-	// ⚠️ 判据排在 ② 达标**之后** ⇒ 它只表示「**地板是唯一的拦路者**」: 去掉地板
-	// 这一行就会是信号。别按「`fill ≤ 0.83` 的 tick 数」数它——② 未达标的廉价
+	// ⚠️ 判据排在该段规则达标**之后** ⇒ 它只表示「**地板是唯一的拦路者**」: 去掉地板
+	// 这一行就会是信号。别按「`fill ≤ 0.83` 的 tick 数」数它——规则未达标的廉价
 	// tick 一条都不落。
 	RejectFloorLow = "floor_low"
 	// RejectMissingTwap **legacy-only**: 旧口径的快照宇宙要求 spot 与 twap 同时在场,
@@ -253,7 +259,7 @@ type Observation struct {
 	// ── 决策 ──
 	Rules        Rules   `json:"rules"`                   // 四条原始腿（①②③④⑤ 由 RuleN() 派生）
 	OK           bool    `json:"ok"`                      // 是否构成信号（t150/t60 = Rule5 ∧ 输入齐备; listen = Rule2 ∧ 地板）
-	RejectReason string  `json:"reject_reason,omitempty"` // 未构成信号的原因（监听段只落 floor_low 影子行）
+	RejectReason string  `json:"reject_reason,omitempty"` // 未构成信号的原因（影子行恒为 floor_low）
 	Shares       float64 `json:"shares,omitempty"`        // 目标股数 = Stake/HotAsk（仅 ok=true）
 }
 

@@ -26,6 +26,13 @@ basis = sgn·(spot − twap) 是还没写进去的缺口）。T=150 段上 `⑤ 
 `dev ≥ 63` 由缺口撑起来的单在这里最容易混进来（14 天 2U/注: 合计 +35.09 → **+64.03U**,
 只少 53 笔 = 2.5%, 被闸那批输率 49.1% vs 保留 3.98%）。见 walk_ok()。
 
+⚠️ 2026-10-01 起 **T=60 段与监听段加一道价格地板 `有效价 > 0.83`**（用户决定; 先落监听段
+= 决策 #32, 同日下延到 T=60 段 = 决策 #33）——该两段的信号还要过地板才放行, 被拦的 tick
+落一行 `floor_low` **影子行**（每窗至多一条）且**链继续**（T=60 被拦 ⇒ 链走到监听段）。
+T=150 段一字不动。⚠️ 回测里 t60 段的廉价角是**正的**（9 笔全赢 +3.98U）⇒ 下延在 14 天
+上是**显著为负**的 −2.26U（区间 [−4.73,−0.29]）, 落地理由见
+docs/tail_floor_from_t60_2026-10-01.md（结论交前向复验）。见 chain() 的段 2/段 3 分支。
+
 任一段出信号即**整窗只下一单**。三行的 stage 分别记 t150 / t60 / listen。
 
 本脚本是 `internal/tail/parity_test.go` 的 oracle（Go 引擎逐窗重放的对照真值）,
@@ -74,11 +81,14 @@ SD_MIN_USD = 40.0
 WALK_MIN_USD = 43.0        # T=150 段入场闸（决策 #29）。⚠️ 引擎侧已改成配置键 tail.walk_min_usd
                            # （默认 43, 为 ETH 等标的各带标定值）——本脚本**不读配置**, 恒定 43:
                            # 它是 parity 的对账口径, 与引擎 DefaultConfig() 逐位一致
-LISTEN_MIN_PRICE = 0.83    # 监听段**价格地板**（2026-10-01 决策 #32）: ② 达标之外还要热门侧
-                           # 有效价**严格大于**此值才出信号; 被拦的 tick 落一行 floor_low
-                           # **影子行**（每窗至多一条, 供离线反事实）且链继续。
-                           # ⚠️ 引擎侧 = 配置键 tail.listen_min_price（默认 0.83）——同 walk,
-                           # 本脚本恒定默认值, 是 parity 的对账口径。
+FLOOR_MIN_PRICE = 0.83     # **价格地板**（2026-10-01 决策 #32 落监听段, 同日决策 #33 下延到
+                           # T=60 段）: 段 2（T=60 的 ⑤）与段 3（监听段的 ②）的信号还要热门侧
+                           # 有效价**严格大于**此值才放行; 被拦的 tick 落一行 floor_low
+                           # **影子行**（每窗至多一条, 供离线反事实）且**链继续**
+                           #（段 2 继续到监听段, 监听段继续等更贵的 tick）。T=150 段一字不动。
+                           # ⚠️ 引擎侧 = 配置键 tail.floor_min_price（默认 0.83; 2026-10-01 由
+                           # listen_min_price 改名, 因为地板不再只管监听段）——同 walk, 本脚本
+                           # 恒定默认值, 是 parity 的对账口径。
 T150, T60 = 150, 60
 FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 
@@ -197,25 +207,34 @@ def chain(ticks, anchor, sd, date, outcome):
     else:
         # 迟到接入: 首个可判定 tick 已在 T=60 段 → 整段跳过, 不伪造 t150 行
         rest = ticks
+    shadowed = False     # 影子行闩锁（跨段共享: 段 2 拦过就不再在段 3 补第二条）
     if rest:
         # 段 2: 首个可判定 tick 且 rem ≤ 60
         t2 = rest[0]
         r2r = row(t2, anchor, sd, date, outcome, "t60")
         if r5(r2r):
-            r2r["ok"] = True
-            return rows + [r2r], rejects
-        rejects.append("t60")
-        rows.append(r2r)
+            # 价格地板（决策 #32, 同日 #33 下延到本段）: ⑤ 达标但 `fill ≤ FLOOR_MIN_PRICE`
+            # ⇒ 本 tick 本会是信号, 被拦下——落一行 floor_low **影子行**（stage=t60）
+            # 且**链继续**到监听段（不是整窗丢弃: 去掉地板这一笔就是信号）。
+            if r2r["fill"] <= FLOOR_MIN_PRICE:
+                r2r["reject_reason"] = "floor_low"
+                rows.append(r2r)
+                shadowed = True
+            else:
+                r2r["ok"] = True
+                return rows + [r2r], rejects
+        else:
+            rejects.append("t60")
+            rows.append(r2r)
         # 段 3: 监听 —— 此后每秒判 ②, 首个达标 tick 出信号（② 未达标的 tick 不落行）。
-        # 2026-10-01 决策 #32: ② 达标但 `fill ≤ LISTEN_MIN_PRICE` 的 tick 被**价格
+        # 2026-10-01 决策 #32: ② 达标但 `fill ≤ FLOOR_MIN_PRICE` 的 tick 被**价格
         # 地板**拦下——落一行 floor_low **影子行**（每窗至多一条: 无地板时链在首个
         # ② 达标 tick 就结束, 之后的廉价 tick 根本不会成为信号）且**链继续**。
-        shadowed = False
         for x in rest[1:]:
             rl = row(x, anchor, sd, date, outcome, "listen")
             if not r2(rl):
                 continue
-            if rl["fill"] <= LISTEN_MIN_PRICE:
+            if rl["fill"] <= FLOOR_MIN_PRICE:
                 if not shadowed:
                     rl["reject_reason"] = "floor_low"
                     rows.append(rl)
@@ -267,7 +286,7 @@ def main():
     signals = {s: [] for s in STAGES}      # **信号行**（ok=true, 按段）
     rows_n = collections.Counter()         # 全部行（判定行 + 信号行, 按段）
     walk_low = 0                           # T=150 段被入场闸拦下的行数（决策 #29）
-    floor_low = 0                          # 监听段被价格地板拦下的行数（决策 #32; 影子行）
+    floor_low = 0                          # 价格地板拦下的影子行数（段 2/3; 决策 #32/#33）
     skipped_no_sigma = 0                   # σ 未就绪整窗跳过（与 cmd/tail 前置闸同源）
     windows = 0                            # 参与统计的窗数（有可判定 tick 的）
     audit = collections.Counter()          # 空簿/twap/门控差集审计
@@ -369,12 +388,13 @@ def main():
           f"{sum(rows_n.values()) - len(allsig):>12}")
     print("  注: t150 判定行 = 「首个可判定 tick 且 rem ≤ 150」的窗数（迟到接入的窗没有它）;")
     print("      t60 判定行 = 走到第二段的窗数（迟到接入的窗只有 t60 一行）;")
-    print("      listen 段只在 ② 达标时落行 + 每窗至多一条 floor_low 影子行（决策 #32）, "
-          "故它没有被拒判定行——上面 listen 的「被拒」列数出来就是影子行。")
+    print("      listen 段只在 ② 达标时落行 + 每窗至多一条 floor_low 影子行（决策 #32/#33）, "
+          "故它没有被拒判定行——上面 listen 的「被拒」列数出来就是影子行;")
+    print("      t60 段的「被拒判定行」= leg_out/price_low 等 + floor_low 影子行（决策 #33 起）。")
     print(f"  T=150 入场闸拦下（reject = walk_low, 决策 #29）= {walk_low} 行"
           f"（= ⑤ 达标但 walk < {WALK_MIN_USD:g} 美元的那批; 链继续 ⇒ 其中多数改道到 t60/listen）")
-    print(f"  监听段价格地板拦下（reject = floor_low, 决策 #32）= {floor_low} 行"
-          f"（= ② 达标但有效价 ≤ {LISTEN_MIN_PRICE:g} 的那批, 每窗至多一条影子行; 链继续）")
+    print(f"  价格地板拦下（reject = floor_low, 段 2/3; 决策 #32/#33）= {floor_low} 行"
+          f"（= ⑤/② 达标但有效价 ≤ {FLOOR_MIN_PRICE:g} 的那批, 每窗至多一条影子行; 链继续）")
     print(f"  判定边界的最小余量（dev/σ 三条连续量腿的浮点安全垫, 应远大于 1e-9）: {margin:.3e}")
     print("      （价格腿不在内: 报价在 0.01 网格上, `fill == 0.80` 恰好边界放行是常态形态）")
 
@@ -416,7 +436,7 @@ def main():
     print(f"  // 参与判定的窗数 = {windows}（= 有 ≥1 个 rem ≤ 150 可判定 tick 且有 σ 的窗）")
     print(f"  // σ 未就绪整窗跳过 = {skipped_no_sigma} 窗（引擎前置闸同源, 决策 #13）")
     print(f"  // T=150 入场闸拦下 = {walk_low} 行（reject_reason = walk_low, 决策 #29）")
-    print(f"  // 监听段价格地板拦下 = {floor_low} 行（reject_reason = floor_low, 决策 #32; 影子行）")
+    print(f"  // 价格地板拦下 = {floor_low} 行（reject_reason = floor_low, 段 2/3; 决策 #32/#33; 影子行）")
     print("  // 兜底零命中: 全部行 HotSrc 恒 ask（14 天里没有一次单侧空簿, 见第五节）")
 
     print("\n" + "=" * 100)

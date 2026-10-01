@@ -309,8 +309,9 @@ func (s *TailState) handleConfig(w http.ResponseWriter, r *http.Request) {
 		"stake":           s.cfg.Stake,
 		"max_book_lat_ms": s.cfg.MaxBookLatMs,
 		"walk_min_usd":    s.cfg.WalkMinUSD,
-		// listen_min_price 监听段价格地板（决策 #32; 严格大于, 被拦落 floor_low 影子行）
-		"listen_min_price": s.cfg.ListenMinPrice,
+		// floor_min_price 价格地板（决策 #32 监听段 + #33 T=60 段; 严格大于,
+		// 被拦落 floor_low 影子行）
+		"floor_min_price": s.cfg.FloorMinPrice,
 	})
 }
 

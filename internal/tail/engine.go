@@ -16,9 +16,10 @@ import (
 //	   └─ 不达标 → Await60
 //	Await60   ──首个可判定 tick 且 rem ≤ t60_rem──▶ [判 ⑤]
 //	   ├─ 达标 → 落信号行（下单）→ Done
+//	   ├─ ⑤ 达标但有效价 ≤ floor_min_price（决策 #33）→ 落一行 floor_low 影子行 → Listening
 //	   └─ 不达标 → Listening
-//	Listening ──此后**每秒**: 可判定 tick ∧ ② 达标 ∧ 有效价 > listen_min_price──▶ 落信号行（下单）→ Done
-//	   ├─ ② 达标但有效价 ≤ listen_min_price（决策 #32）→ 落一行 floor_low 影子行, 继续听
+//	Listening ──此后**每秒**: 可判定 tick ∧ ② 达标 ∧ 有效价 > floor_min_price──▶ 落信号行（下单）→ Done
+//	   ├─ ② 达标但有效价 ≤ floor_min_price（决策 #32）→ 落一行 floor_low 影子行, 继续听
 //	   └─ rem == 0 → Done
 //
 // 本包零第三方依赖、无 I/O, 判定输入全部经 Tick / BeginWindow 注入, 可独立测试：
@@ -57,9 +58,10 @@ type Engine struct {
 	// 「整窗只下一单」就靠它, 也是 ProcessTick 唯一的幂等守卫。
 	signal  bool
 	emitted bool // 本窗已产出过任何行 → 锚冻结（UpgradeAnchor 拒收）
-	// floorShadowed 本窗已落过监听段地板的影子行（决策 #32）——每窗至多一条:
-	// 影子行的用途是「不放地板会成交的那一笔」的离线反事实, 无地板时链在首个
-	// ② 达标 tick 就结束, 之后每个廉价 tick 都再落一行只会把反事实读脏。
+	// floorShadowed 本窗已落过价格地板的影子行（决策 #32 的监听段 + #33 的 T=60 段）
+	// ——每窗至多一条, **两段共用这一个闩锁**: 影子行的用途是「不放地板会成交的那一笔」
+	// 的离线反事实, 而无地板世界里链在首个达标的段就结束——T=60 被拦后链继续到监听段,
+	// 若监听段再落一条, 反事实就有两条、读不出来。
 	// ⚠️ 不上 Resume: 崩溃重启重入同一窗时可能重落一条（无害——影子行不进信号/
 	// 结算/熔断, 至多让离线脚本按窗去重）。
 	floorShadowed bool
@@ -182,8 +184,8 @@ func (e *Engine) Config() Config {
 // 三段递进的分支走向见 Engine 类型注释。返回的行**只有三种形态**:
 //   - 判定行（stage = t150/t60）: 成功与否都产出（OK=false 带 RejectReason）;
 //   - 信号行（stage = listen）: 只在 ② 达标（∧ 过价格地板）时产出;
-//   - 影子行（stage = listen, reject_reason = floor_low, 每窗至多一条）: ② 达标
-//     但被价格地板拦下——本会是信号的那一笔, 落盘供离线反事实（决策 #32）。
+//   - 影子行（stage = t60/listen, reject_reason = floor_low, 每窗至多一条）: 该段
+//     达标但被价格地板拦下——本会是信号的那一笔, 落盘供离线反事实（决策 #32/#33）。
 //
 // 无论哪种, **只有 OK=true 的行会被执行编排下单**（cmd/tail 单点 dispatch）。
 func (e *Engine) ProcessTick(t flip.Tick) *Observation {
@@ -247,6 +249,17 @@ func (e *Engine) ProcessTick(t flip.Tick) *Observation {
 		e.state = stateListening
 		e.listenEntered = true
 		o = e.decision(t, side, px, src, StageT60, e.cfg.T60Rem)
+		// 价格地板（决策 #33, 下延到本段）: ⑤ 达标但有效价 ≤ floor_min_price
+		//（默认 0.83）⇒ 本 tick 本会是一笔信号, 被廉价角拦下——落一行**影子行**
+		//（ok=false, reject_reason=floor_low）供离线反事实, 且**链继续**（上面两行
+		// 已转入监听段, 不是整窗弃单）。⚠️ 影子行每窗至多一条, 闩锁与监听段共用;
+		// Shares 归零（影子行没有目标股数, 与监听段那条同形——它也没设过 Shares）。
+		if o.OK && !FloorLeg(e.cfg, StageT60, px) {
+			o.OK = false
+			o.Shares = 0
+			o.RejectReason = RejectFloorLow
+			e.floorShadowed = true
+		}
 		advance = true
 	case stateListening:
 		// 监听段: 每秒判 ②, **只在达标时落行**（被拒的 tick 不落盘——每窗约 60 个
@@ -255,12 +268,12 @@ func (e *Engine) ProcessTick(t flip.Tick) *Observation {
 		if !cand.Rules.Rule2() {
 			return nil
 		}
-		// 价格地板（决策 #32）: ② 达标但有效价 ≤ listen_min_price（默认 0.83）⇒
+		// 价格地板（决策 #32）: ② 达标但有效价 ≤ floor_min_price（默认 0.83）⇒
 		// 本 tick 本会是一笔信号, 被廉价角拦下——落一行**影子行**（ok=false,
 		// reject_reason=floor_low）供离线反事实, 且**链继续**（继续监听更贵的 tick）。
 		// 影子行每窗至多一条: 反事实只认「无地板时成交的那一笔」（即首个 ② 达标
 		// tick）; 之后的廉价 tick 在无地板世界里根本不会成为信号。
-		if !ListenFloorLeg(e.cfg, StageListen, px) {
+		if !FloorLeg(e.cfg, StageListen, px) {
 			if e.floorShadowed {
 				return nil
 			}

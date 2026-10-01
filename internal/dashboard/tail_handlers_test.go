@@ -436,7 +436,7 @@ func TestTailConfigKeys(t *testing.T) {
 	s, _, _ := newTailState(t, tail.LiveSnapshot{}, SourceLimits{})
 	var got map[string]float64
 	getJSON(t, s.handleConfig, "/api/config", &got)
-	want := []string{"t150_rem", "t60_rem", "price_min", "dev_min_usd", "sigma_min_usd", "walk_min_usd", "listen_min_price", "stake", "max_book_lat_ms"}
+	want := []string{"t150_rem", "t60_rem", "price_min", "dev_min_usd", "sigma_min_usd", "walk_min_usd", "floor_min_price", "stake", "max_book_lat_ms"}
 	for _, k := range want {
 		if _, ok := got[k]; !ok {
 			t.Fatalf("/api/config 缺键 %q（得到 %v）", k, got)
@@ -446,7 +446,7 @@ func TestTailConfigKeys(t *testing.T) {
 	if got["t150_rem"] != float64(cfg.T150Rem) || got["t60_rem"] != float64(cfg.T60Rem) ||
 		got["price_min"] != cfg.PriceMin || got["dev_min_usd"] != cfg.DevMinUSD ||
 		got["sigma_min_usd"] != cfg.SigmaMinUSD || got["walk_min_usd"] != cfg.WalkMinUSD ||
-		got["listen_min_price"] != cfg.ListenMinPrice ||
+		got["floor_min_price"] != cfg.FloorMinPrice ||
 		got["stake"] != cfg.Stake {
 		t.Fatalf("/api/config 取值与 DefaultConfig 不符: %v vs %+v", got, cfg)
 	}
