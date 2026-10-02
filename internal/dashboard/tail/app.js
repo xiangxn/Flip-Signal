@@ -119,50 +119,56 @@
   // 该行是否有真实仓位（服务端已按 HasPosition 判过, 这里只读）
   function hasPosition(r) { return !!r.has_position; }
 
-  // 状态列: 成交信息（含未成交/被闸）
+  // 状态列: 成交信息（含未成交/被闸）+ 止损标记（决策 #34）
   function statusCell(r) {
+    var base;
     if (r.gate_reason) {
-      return tag('warn', GATE_SHORT[r.gate_reason] || r.gate_reason,
+      base = tag('warn', GATE_SHORT[r.gate_reason] || r.gate_reason,
         '被风控闸拦下（未成交）: ' + (GATE_CN[r.gate_reason] || r.gate_reason) + (r.exec_note ? ' | ' + r.exec_note : ''));
-    }
-    if (r.exec_note && r.exec_note.indexOf(NOTE_UNKNOWN) === 0) {
-      return tag('warn', '成交未知', r.exec_note + '（无仓位, 按 order_id 去 data-api 核对）');
-    }
-    var cn = EXEC_CN[r.exec_status];
-    if (cn) {
+    } else if (r.exec_note && r.exec_note.indexOf(NOTE_UNKNOWN) === 0) {
+      base = tag('warn', '成交未知', r.exec_note + '（无仓位, 按 order_id 去 data-api 核对）');
+    } else if (EXEC_CN[r.exec_status]) {
       var warn = (r.exec_status === 'unfilled' || r.exec_status === 'rejected') ? 'warn' : '';
       var title = r.exec_note || '';
       if (r.hot_src === 'bid') title += (title ? ' | ' : '') + '该侧 ask 为空, 按 bid 挂单（成交概率低）';
-      return tag(warn, cn, title);
+      base = tag(warn, EXEC_CN[r.exec_status], title);
+    } else {
+      base = '<span class="muted">纸面成交</span>';
     }
-    return '<span class="muted">纸面成交</span>';
+    return base + stopBadge(r);
+  }
+
+  // 止损标记（决策 #34）: 归属是**执行侧**（卖没卖出去/冻没冻结）, 与「被闸/未成交」
+  // 同族 ⇒ 放状态列; 结果列只放官方口径的赢/输（用户 2026-10-03 决定：
+  // 「止损信息放结果列不太正确」）。卖出成交 = 灰标签; 冻结（拒单/结果未知/残仓不足
+  // 最小单量）= 红标签——两者都可能与「成交」并存（卖了一部分之后冻结）;
+  // 冻结优先显示（那才是要人工处理的状态）, 悬停明细里卖出与冻结说明都会带上。
+  function stopBadge(r) {
+    if (!r.exit_note && !(r.exit_shares > 0)) return '';
+    var title = stopTip(r);
+    var attr = title ? ' title="' + esc(title) + '"' : '';
+    if (r.exit_note) return ' <span class="tag warn"' + attr + '>止损冻结</span>';
+    return ' <span class="tag"' + attr + '>止损卖出</span>';
   }
 
   // 结果列: 官方结果（未成交行照显; 未结算的未成交行显示「—」而不是「待结算」——
-  // 它永远不会变成持仓）。
-  // 止损卖出的行（exit_shares > 0, 决策 #34）加「(止损)」后缀: **结果仍是官方口径的
-  // 赢/输**（结算照常回填 won——止损卖的是一部分仓位时, 最终赢家照判）, 但钱按实际
-  // 卖出价记（pnl 由服务端 recomputePnL 算好, 前端只显示）。悬停给卖出明细。
+  // 它永远不会变成持仓）。**只放官方口径的赢/输**——止损卖出的钱按实际落袋记
+  // （pnl 由服务端 recomputePnL 算好, 前端只显示）, 但那是执行侧的事, 见状态列的
+  // stopBadge。
   function resultCell(r) {
     if (!r.ok) return '<span class="muted">—</span>';
-    var stopped = (r.exit_shares || 0) > 0;
-    var title = stopTitle(r);
-    var attr = title ? ' title="' + esc(title) + '"' : '';
     if (r.won == null) {
       if (!hasPosition(r)) return '<span class="muted">—</span>';
-      return stopped
-        ? '<span class="muted"' + attr + '>待结算(止损)</span>'
-        : '<span class="muted">待结算</span>';
+      return '<span class="muted">待结算</span>';
     }
-    var txt = (r.won ? '赢' : '输') + (stopped ? '(止损)' : '');
     var cls = r.won ? 'won' : 'lost';
-    return '<span class="' + cls + '"' + attr + '>' + txt + '</span>';
+    return '<span class="' + cls + '">' + (r.won ? '赢' : '输') + '</span>';
   }
 
-  // 结果列的止损悬停文本（无止损信息的行返回空串 = 不挂 title）。
+  // 止损标记的悬停文本（无止损信息的行返回空串 = 不挂 title）。
   // 两种形态都覆盖: 已卖出（exit_shares > 0, 可能只卖了一部分）与**冻结未卖出**
   // （exit_note 非空而 exit_shares 为 0——拒单/结果未知/残仓不足最小单量, 等人工）。
-  function stopTitle(r) {
+  function stopTip(r) {
     var parts = [];
     if ((r.exit_shares || 0) > 0) {
       parts.push('止损卖出 ' + (r.exit_shares).toFixed(2) + ' 股 @' + (r.exit_price || 0).toFixed(3) +

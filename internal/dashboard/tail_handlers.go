@@ -160,9 +160,11 @@ type tailRecordResponse struct {
 	ExecNote   string  `json:"exec_note,omitempty"`
 
 	// ── 止损卖出（决策 #34; 只对**有仓位**的行可能非零）──
-	// ExitShares > 0 = 发生过止损卖出（部分或全部, 累计加权均价 ExitPrice）;
-	// 信号表结果列据此显示「输(止损)」/「赢(止损)」。⚠️ P&L 仍走 PnL 字段
-	// （recomputePnL 已改为「卖出所得 + 剩余兑付 − cost」）, 前端不必自己算。
+	// ExitShares > 0 = 发生过止损卖出（部分或全部, 累计加权均价 ExitPrice）。
+	// 信号表**状态列**据 ExitShares/ExitNote 显示「止损卖出」/「止损冻结」标签;
+	// 结果列只放官方赢/输（用户 2026-10-03 决定：止损信息放结果列不太正确）。
+	// ⚠️ P&L 仍走 PnL 字段（recomputePnL 已改为「卖出所得 + 剩余兑付 − cost」）,
+	// 前端不必自己算。
 	ExitShares float64 `json:"exit_shares,omitempty"`
 	ExitPrice  float64 `json:"exit_price,omitempty"`
 	ExitRem    int     `json:"exit_rem,omitempty"`
