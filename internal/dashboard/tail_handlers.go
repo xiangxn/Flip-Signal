@@ -152,6 +152,15 @@ type tailRecordResponse struct {
 	FillPrice  float64 `json:"avg_fill_price,omitempty"`
 	Cost       float64 `json:"cost,omitempty"`
 	ExecNote   string  `json:"exec_note,omitempty"`
+
+	// ── 止损卖出（决策 #34; 只对**有仓位**的行可能非零）──
+	// ExitShares > 0 = 发生过止损卖出（部分或全部, 累计加权均价 ExitPrice）;
+	// 信号表结果列据此显示「输(止损)」/「赢(止损)」。⚠️ P&L 仍走 PnL 字段
+	// （recomputePnL 已改为「卖出所得 + 剩余兑付 − cost」）, 前端不必自己算。
+	ExitShares float64 `json:"exit_shares,omitempty"`
+	ExitPrice  float64 `json:"exit_price,omitempty"`
+	ExitRem    int     `json:"exit_rem,omitempty"`
+	ExitNote   string  `json:"exit_note,omitempty"`
 }
 
 // tailDailyRow 是 tail /api/daily 的一行（= 共用骨架 + 本族的段/未成交细分列）。
@@ -312,6 +321,10 @@ func (s *TailState) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// floor_min_price 价格地板（决策 #32 监听段 + #33 T=60 段; 严格大于,
 		// 被拦落 floor_low 影子行）
 		"floor_min_price": s.cfg.FloorMinPrice,
+		// 止损（决策 #34; 持仓侧 bid 严格小于 stoploss_bid 触发 FAK 卖出——
+		// 开关 + 阈值两键, 行的 exit_* 字段即卖出流水）
+		"stoploss_enabled": s.cfg.StopLossEnabled,
+		"stoploss_bid":     s.cfg.StopLossBid,
 	})
 }
 
@@ -377,6 +390,10 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 		FillPrice:    rec.FillPrice,
 		Cost:         rec.Cost,
 		ExecNote:     rec.ExecNote,
+		ExitShares:   rec.ExitShares,
+		ExitPrice:    rec.ExitPrice,
+		ExitRem:      rec.ExitRem,
+		ExitNote:     rec.ExitNote,
 	}
 }
 

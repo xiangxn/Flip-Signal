@@ -432,11 +432,78 @@ func (r *Recorder) CompleteRestingFill(f flip.FillFinal) (*Record, error) {
 	return rec, nil
 }
 
+// RecordExit 记一笔**止损卖出成交**（2026-10-03 决策 #34）并立即原子重写当日文件。
+//
+// 一笔仓位可以被多次部分卖出 ⇒ 股数**累计**、价格**加权平均**; ExitRem/ExitTs 只记
+// **首次**成交那一 tick。**每次都落盘**（不是等结算时一起写）: 进程若在成交后崩溃,
+// 磁盘上的行必须已经反映「这批股已经卖了」——否则重启后行还是全额持有, 结算会按
+// 持有到期记 P&L, 与真实仓位（已卖了）对不上。
+//
+// 返回更新后的记录; 未找到行/无仓位/参数非法 → error（调用方记日志, 不静默）。
+// shares 超过剩余股数时截到剩余（防浮点毛刺记出负数持仓——真正的超卖是记账 bug,
+// 由调用方按 Share 数检查, 这里只做最后一道钳制）。
+func (r *Recorder) RecordExit(conditionID string, shares, price float64, rem int, ts int64) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if !(shares > 0) || !(price > 0) {
+		return nil, fmt.Errorf("RecordExit: %s 参数非法（shares=%.4f price=%.4f）", conditionID, shares, price)
+	}
+	rec := r.findSnapLocked(conditionID)
+	if rec == nil {
+		return nil, fmt.Errorf("RecordExit: %s 无落盘行", conditionID)
+	}
+	if !rec.HasPosition() {
+		return nil, fmt.Errorf("RecordExit: %s 行无仓位（exec=%q kind=%q）", conditionID, rec.ExecStatus, rec.Kind)
+	}
+	remaining := rec.RemainingShares()
+	if remaining <= 0 {
+		return nil, fmt.Errorf("RecordExit: %s 已全部卖出（%.2f/%.2f 股）", conditionID, rec.ExitShares, rec.Shares)
+	}
+	if shares > remaining {
+		shares = remaining
+	}
+	total := rec.ExitShares + shares
+	rec.ExitPrice = (rec.ExitShares*rec.ExitPrice + shares*price) / total
+	rec.ExitShares = total
+	if rec.ExitRem == 0 {
+		rec.ExitRem, rec.ExitTs = rem, ts
+	}
+	recomputePnL(rec) // 已结算过的行（先结算后卖出的竞态）按实际落袋补算
+	if err := r.rewriteDayLocked(rec.Date); err != nil {
+		log.Printf("⚠️ [Tail] 止损卖出落盘失败: %v", err)
+	}
+	return rec, nil
+}
+
+// RecordExitNote 把一条持仓行的止损**冻结点位**（写一次 ExitNote 即永久停试）:
+// 卖出被交易所拒绝 / 结果未知（需人工核对）/ 剩余不足最小单量——三种形态都不该
+// 反复重试（后两者重试还可能卖两次）。同样立即落盘。
+//
+// 幂等: 已有 note 再写只覆盖 note（调用方在冻结后不再调用, 这里是防线）。
+func (r *Recorder) RecordExitNote(conditionID, note string) (*Record, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	rec := r.findSnapLocked(conditionID)
+	if rec == nil {
+		return nil, fmt.Errorf("RecordExitNote: %s 无落盘行", conditionID)
+	}
+	rec.ExitNote = note
+	if err := r.rewriteDayLocked(rec.Date); err != nil {
+		log.Printf("⚠️ [Tail] 止损冻结落盘失败: %v", err)
+	}
+	return rec, nil
+}
+
 // Resolve 结算一个 ok 信号: 按官方 outcome 判定所押侧输赢并回填记录, 原子重写该日
 // 文件。命中返回 true。
 //
 // ⚠️ tail 的结算口径与回测一致: 赢 = 押注侧即官方赢家（不是「价格」, 是 outcome）;
 // 每股兑 1 USDC ⇒ 赢 shares−cost / 输 −cost（cost 缺省回退 Stake, paper 行即如此）。
+// 🆕 被止损卖出的行（ExitShares > 0, 决策 #34）改按**实际落袋**算: P&L 由
+// recomputePnL 统一为 `卖出所得 + 剩余兑付 − cost`——won 照常按官方 outcome 回填
+// （页面照显赢/输 + 止损标记）, 但钱按真实成交记。
 //
 // 2026-09-24 起**所有 ok 行都注册结算**（含被闸/0 成交/下单被拒——a.md 第 3 条要求
 // 页面上能看见每一笔的官方结果）, 故这里必须区分「有没有仓位」: 无仓位的行照常写
@@ -465,16 +532,20 @@ func (r *Recorder) Resolve(conditionID string, outcome int, at time.Time, src st
 	return true
 }
 
-// recomputePnL 按**当前**的成交字段重算一条已结算记录的 P&L。三个调用点共用
-// （Resolve / CompleteExecution / CompleteRestingFill）, 堵的是同一个竞态:
-// resting 行可能在 FillTracker 定稿**之前**就被结算编排（闭市 +10s）定案——
-// 若无条件只在 Resolve 里算一次, 定稿后成交了却永远留着 P&L=0。
+// recomputePnL 按**当前**的成交字段重算一条已结算记录的 P&L。调用点共用
+// （Resolve / CompleteExecution / CompleteRestingFill / RecordExit）, 堵的是同一个
+// 竞态: resting 行可能在 FillTracker 定稿**之前**就被结算编排（闭市 +10s）定案,
+// 止损卖出也可能发生在结算回填之后——若无条件只在 Resolve 里算一次, 后到的成交
+// 就永远不体现在 P&L 里。
 //
 // 口径:
 //   - 未结算（Won == nil）→ 不动（P&L 由 Resolve 写）;
 //   - 无仓位（HasPosition 假: 被闸/0 成交/下单被拒/legacy 对账行）→ **P&L 恒 0**
 //     （a.md: 未成交不计算 P&L）;
-//   - 有仓位 → 赢 shares−cost / 输 −cost; cost 缺省回退 Stake（paper 行不写 Cost）。
+//   - 有仓位 → `卖出所得 + 剩余兑付 − cost`:
+//     已卖部分按**实际落袋**（ExitShares·ExitPrice）, 剩余部分赢则每股兑 1U、输归零。
+//     无止损卖出的行（ExitShares == 0）退化成旧式 赢 shares−cost / 输 −cost;
+//     cost 缺省回退 Stake（paper 行不写 Cost）。
 func recomputePnL(rec *Record) {
 	if rec.Won == nil {
 		return
@@ -487,11 +558,10 @@ func recomputePnL(rec *Record) {
 	if cost <= 0 {
 		cost = rec.Stake // paper 行无 Cost（模拟成交不写）, 用投入兜底
 	}
+	rec.PnL = rec.ExitShares*rec.ExitPrice - cost // 止损卖出部分: 实际卖出所得
 	if *rec.Won {
-		rec.PnL = rec.Shares - cost // 每股兑 1U（Shares = 实际成交股数）
-		return
+		rec.PnL += rec.RemainingShares() // 剩余股数到期兑付（每股 1U）
 	}
-	rec.PnL = -cost
 }
 
 // findSnapLocked 按 conditionID 找**本次执行对应的**那一行（调用方已持锁）。

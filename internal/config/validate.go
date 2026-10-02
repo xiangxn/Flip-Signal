@@ -91,6 +91,15 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 		return nil, fmt.Errorf("tail.floor_min_price 必须在 [0,1) 内（现值 %.3f）——≥1 会让 T=60/监听段信号永远为空（地板是严格大于）",
 			cfg.Tail.FloorMinPrice)
 	}
+	// 持仓止损触发价（2026-10-03）: 触发口径是**严格小于**且**必须 > 0** 才有意义
+	// （bid == 0 = 整侧撤空、卖不掉, 口径上不算触发）。故 ≤0 让止损静默归零、
+	// ≥1 让整窗任意报价都触发（买入即卖出）——两个方向都不该由配置写出来。
+	// 同样只做**结构性**校验: 「值是否是该标的的合理解」是标定问题（BTC = 0.30,
+	// 用户 2026-10-03 决定, 换标的必须重标定）。
+	if cfg.Tail.StopLossBid <= 0 || cfg.Tail.StopLossBid >= 1 {
+		return nil, fmt.Errorf("tail.stoploss_bid 必须在 (0,1) 内（现值 %.3f）——≤0 止损静默归零（bid==0 口径上不算触发）, ≥1 会让任意报价都触发",
+			cfg.Tail.StopLossBid)
+	}
 
 	return warnings, nil
 }

@@ -139,13 +139,39 @@
   }
 
   // 结果列: 官方结果（未成交行照显; 未结算的未成交行显示「—」而不是「待结算」——
-  // 它永远不会变成持仓）
+  // 它永远不会变成持仓）。
+  // 止损卖出的行（exit_shares > 0, 决策 #34）加「(止损)」后缀: **结果仍是官方口径的
+  // 赢/输**（结算照常回填 won——止损卖的是一部分仓位时, 最终赢家照判）, 但钱按实际
+  // 卖出价记（pnl 由服务端 recomputePnL 算好, 前端只显示）。悬停给卖出明细。
   function resultCell(r) {
     if (!r.ok) return '<span class="muted">—</span>';
+    var stopped = (r.exit_shares || 0) > 0;
+    var title = stopTitle(r);
+    var attr = title ? ' title="' + esc(title) + '"' : '';
     if (r.won == null) {
-      return hasPosition(r) ? '<span class="muted">待结算</span>' : '<span class="muted">—</span>';
+      if (!hasPosition(r)) return '<span class="muted">—</span>';
+      return stopped
+        ? '<span class="muted"' + attr + '>待结算(止损)</span>'
+        : '<span class="muted">待结算</span>';
     }
-    return r.won ? '<span class="won">赢</span>' : '<span class="lost">输</span>';
+    var txt = (r.won ? '赢' : '输') + (stopped ? '(止损)' : '');
+    var cls = r.won ? 'won' : 'lost';
+    return '<span class="' + cls + '"' + attr + '>' + txt + '</span>';
+  }
+
+  // 结果列的止损悬停文本（无止损信息的行返回空串 = 不挂 title）。
+  // 两种形态都覆盖: 已卖出（exit_shares > 0, 可能只卖了一部分）与**冻结未卖出**
+  // （exit_note 非空而 exit_shares 为 0——拒单/结果未知/残仓不足最小单量, 等人工）。
+  function stopTitle(r) {
+    var parts = [];
+    if ((r.exit_shares || 0) > 0) {
+      parts.push('止损卖出 ' + (r.exit_shares).toFixed(2) + ' 股 @' + (r.exit_price || 0).toFixed(3) +
+        (r.exit_rem ? '（rem=' + r.exit_rem + 's）' : ''));
+      var left = (r.shares || 0) - (r.exit_shares || 0);
+      if (left > 0.005) parts.push('剩余 ' + left.toFixed(2) + ' 股持有到期');
+    }
+    if (r.exit_note) parts.push('止损说明: ' + r.exit_note);
+    return parts.join(' | ');
   }
 
   function pnlCell(r) {

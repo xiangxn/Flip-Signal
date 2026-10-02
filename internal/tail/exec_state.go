@@ -34,10 +34,11 @@ import (
 type ExecState struct {
 	Rec          *Recorder               // 观测/执行记录器（构造后不变）
 	Ex           flip.Executor           // 唯一成交入口: PaperExecutor / LiveExecutor（构造后不变）
+	Sell         flip.SellExecutor       // **止损卖出**入口: PaperSellExecutor / trading.LiveSellExecutor（决策 #34; 构造后不变, live 时不得为空）
 	Live         bool                    // Ex 为真实下单实现（= 构造时模式 live）
 	Stake        float64                 // 每信号投入（构造后不变）
 	MaxDailyLoss float64                 // 日亏熔断线（构造后不变; 两模式同判据, 见 gate）
-	Tokens       func() (string, string) // 窗口 UP/DOWN token（live 下单取热门侧 tokenID; paper 忽略）
+	Tokens       func() (string, string) // 窗口 UP/DOWN token（live 下单/卖出取对应侧 tokenID; paper 忽略）
 }
 
 // execObs 把本包的快照观测折叠成 flip.Executor 契约所需的最小观测
@@ -168,6 +169,123 @@ func (x *ExecState) ApplyFillFinal(f flip.FillFinal) *Record {
 		log.Printf("[Tail] ⚠️ 挂单成交未确认（order=%s）—— 请去 data-api 按 order_id 核对该窗实际成交, 勿重复下单", rec.OrderID)
 	}
 	return rec
+}
+
+// ── 止损卖出编排（2026-10-03 决策 #34）──
+
+// StopOutcome 一次止损尝试的结果形态（调用方据此决定日志节流与后续动作）。
+type StopOutcome int
+
+const (
+	// StopNone 未发生任何动作（未建仓/已冻结/已卖完——调用方已做过触发判定,
+	// 这里是防线）。
+	StopNone StopOutcome = iota
+	// StopSold 本次卖出委托成交（可能只是部分）——已落盘。剩余仓位若还低于阈值,
+	// 下一 tick 会自然再卖（调用方无需额外动作）。
+	StopSold
+	// StopRetry 本次 FAK 委托未成交（吃不到对手方）——**不落盘不冻结**, 下一 tick
+	// 重试（触发条件仍满足时）。
+	StopRetry
+	// StopFrozen 已冻结点位（下单被拒/结果未知/剩余不足最小单量/落盘失败）——
+	// 不再重试, ExitNote 已写（以 flip.ExecNoteUnknown 开头者需人工核对）。
+	StopFrozen
+)
+
+// StopSell 执行一次止损卖出尝试（**开仓之外唯一的真钱出口**, 决策 #34）。
+//
+// 调用契约（cmd/tail 主循环）: 只在「本窗有已确认仓位 ∧ 本 tick 过 StopArmed 门控 ∧
+// StopTrigger(cfg, 持仓侧 bid) 为真」时调用——本函数不重复做触发判定（唯一口径在
+// stop.go 的纯函数里）, 只负责编排「下单 → 落盘 → 冻结」。
+//
+// 各分支:
+//   - 已冻结（ExitNote 非空）/ 已卖完 / 无仓位 → StopNone（静默防线）;
+//   - live 且剩余 < MinSellShares（CLOB 最小单量）→ **冻结**（卖不掉的残仓只能等
+//     到期兑付, 反复尝试只会被交易所拒——写一次 note 交人工; paper 不套这条:
+//     纸面本就不模拟交易所微观约束, 且默认 stake=2 时整仓都不足 5 股,
+//     套用它会让纸面止损永远不成交、丧失观测价值）;
+//   - filled/partial → Recorder.RecordExit 立即落盘（加权平均累计）→ StopSold;
+//   - unfilled → StopRetry（FAK 吃不到就下一 tick 再来, 不写任何盘）;
+//   - rejected（含 ExecNoteUnknown 前缀的**结果未知**）→ 冻结 + note → StopFrozen。
+//     未知结果绝不重试（可能已成交, 重试 = 卖两次）; 已知拒单（4xx/规格错）重试
+//     也不会成功, 同样是冻结。
+//
+// ⚠️ 卖出落盘失败（磁盘错）时**冻结而不重试**: 交易所那笔可能已成交, 再次下单
+// 就是双卖——宁可留一条 note 交人工。内存行的 ExitShares 通常已更新（RecordExit
+// 先改内存后重写磁盘）, 且结算时的 Resolve 重写会把它补落盘。
+func (x *ExecState) StopSell(rec *Record, bid float64, rem int, ts int64) StopOutcome {
+	if rec == nil || !rec.HasPosition() || rec.ExitNote != "" {
+		return StopNone
+	}
+	remaining := rec.RemainingShares()
+	if remaining <= 0 {
+		return StopNone
+	}
+	if x.Sell == nil {
+		// 构造点漏注入的 wiring bug: 大声报但不臆造成交（每 tick 一条, 一眼可见）
+		log.Printf("⚠️ [Tail] ExecState.Sell 未注入——止损无法执行（%s 剩余 %.2f 股, bid=%.3f）",
+			rec.ConditionID, remaining, bid)
+		return StopNone
+	}
+	if x.Live && remaining < MinSellShares {
+		note := fmt.Sprintf("止损剩余 %.2f 股 < CLOB 最小单量 %.0f 股, 无法卖出（买回/对冲请人工处理）",
+			remaining, MinSellShares)
+		x.freezeExit(rec, note)
+		log.Printf("[Tail] ⚠️ 止损冻结: %s %s", rec.ConditionID, note)
+		return StopFrozen
+	}
+
+	tokenID := ""
+	if x.Live {
+		upTok, downTok := x.Tokens()
+		tokenID = downTok
+		if rec.Side == flip.SideYes {
+			tokenID = upTok // 卖出**所押侧** token（与买入同一条腿）
+		}
+	}
+	start := time.Now()
+	res := x.Sell.Sell(tokenID, remaining, bid)
+	if res == nil {
+		// 执行器契约是永不返回 nil——真返回了按结果未知处理（绝不重试）
+		note := flip.ExecNoteUnknown + ": SellExecutor 返回 nil（无任何结果描述）"
+		x.freezeExit(rec, note)
+		log.Printf("⚠️ [Tail] 止损卖出结果未知: %s %s", rec.ConditionID, note)
+		return StopFrozen
+	}
+
+	switch res.Status {
+	case flip.ExecStatusFilled, flip.ExecStatusPartial:
+		rec2, err := x.Rec.RecordExit(rec.ConditionID, res.Shares, res.Price, rem, ts)
+		if err != nil {
+			note := fmt.Sprintf("%s: 止损成交 %.2f 股 @%.4f 落盘失败（%v）——该笔已在交易所成交, 请人工核对",
+				flip.ExecNoteUnknown, res.Shares, res.Price, err)
+			log.Printf("⚠️ [Tail] 止损卖出落盘失败: %v（已成交 %.2f 股 @%.4f——请人工核对）", err, res.Shares, res.Price)
+			x.freezeExit(rec, note)
+			return StopFrozen
+		}
+		log.Printf("[Tail] 🛑 止损卖出 %s: %.2f 股 @%.4f（剩余 %.2f 股）rem=%ds side=%s bid=%.3f（%dms）",
+			rec.ConditionID, res.Shares, res.Price, rec2.RemainingShares(), rem, rec.Side, bid, time.Since(start).Milliseconds())
+		return StopSold
+
+	case flip.ExecStatusUnfilled:
+		return StopRetry
+
+	default: // rejected（含未知结果）——一切非成交终态都冻结, 细节在 note 里
+		note := res.Note
+		if note == "" {
+			note = fmt.Sprintf("止损卖出未成交终态 %q（无 note）", res.Status)
+		}
+		x.freezeExit(rec, note)
+		log.Printf("[Tail] ⚠️ 止损冻结: %s %s", rec.ConditionID, note)
+		return StopFrozen
+	}
+}
+
+// freezeExit 写一次止损冻结说明并落盘（best effort——落盘失败只告警, 内存中的
+// ExitNote 已置位 ⇒ 本进程内不会重试; 磁盘行由结算时的 Resolve 重写补上）。
+func (x *ExecState) freezeExit(rec *Record, note string) {
+	if _, err := x.Rec.RecordExitNote(rec.ConditionID, note); err != nil {
+		log.Printf("⚠️ [Tail] 止损冻结落盘失败: %v（内存已冻结, 结算重写时会补）", err)
+	}
 }
 
 // gate 风控闸: 只剩日亏熔断一条（两模式同源同后果——都落 rejected 行, 都不下单）。

@@ -359,7 +359,9 @@ func main() {
 	}
 
 	// ── 成交执行器 + live 分流 ──
-	effMode, executor := resolveLiveMode(cfg.Runtime.Mode, cfgSDK, readOnly, client)
+	// executor = 买入开仓（GTC 限价挂单）; sellExecutor = 止损卖出（FAK 一次 POST,
+	// 决策 #34）——两个契约分开注入, 见 internal/flip/sell.go 的拆接口理由。
+	effMode, executor, sellExecutor := resolveLiveMode(cfg.Runtime.Mode, cfgSDK, readOnly, client)
 
 	// ── PM 订单簿订阅（SDK MarketMonitor）──
 	monitor := sdk.NewMarketMonitor(cfgSDK.Polymarket.ClobWSBaseURL, false, client, false)
@@ -536,6 +538,7 @@ func main() {
 	exec := &tail.ExecState{
 		Rec:          recorder,
 		Ex:           executor,
+		Sell:         sellExecutor, // 止损卖出（决策 #34; paper/live 与买入同模式成对注入）
 		Live:         effMode == "live",
 		Stake:        cfg.Tail.Stake,
 		MaxDailyLoss: cfg.Risk.MaxDailyLoss,
@@ -572,11 +575,24 @@ func main() {
 	// 就撤等于白挂（且会把「热门侧走弱」的那批位置全部让出）。挂到闭市由 CLOB 自动
 	// 结清, 我们在 rem ≤ 0 时主动撤掉余量并查 size_matched 定稿——闭市后 +60s 硬截止兜底。
 	// ⚠️ cancelLead 必须是**微小正数**: ≤0 会被 NewFillTracker 当成"未配置"回退 180s。
+	//
+	// fillFinalCh（决策 #34 的副产物）: GTC 挂单**在窗内**定稿（累计成交达下单量,
+	// fill_tracker 的「累计成交达下单量」终态, 实测约占实盘成交的 1/6）时, 主循环的
+	// 下单分支早已走过——没有这个通道, 这类仓位既不进持仓监察也开不了止损（止损要
+	// 「有仓位」这个事实, 而定稿回调是它唯一的通知点）。缓冲 8 只为兜住跨窗陈条;
+	// 满则丢弃（丢弃 = 少一次开闸, 绝不阻塞 FillTracker 轮询）。
+	fillFinalCh := make(chan *tail.Record, 8)
 	fillTracker := trading.NewFillTracker(&trading.SdkClient{Client: client},
 		trading.CancelAtClose, func(f flip.FillFinal) {
 			// 定稿后行即进 recorder.pending → 结算编排（resolver）下轮自动接管;
 			// 这里不再注册 gamma——注册点已收敛到 settle.Resolver 的 GiveUp。
-			exec.ApplyFillFinal(f)
+			rec := exec.ApplyFillFinal(f)
+			if rec != nil && rec.HasPosition() {
+				select {
+				case fillFinalCh <- rec:
+				default:
+				}
+			}
 		})
 	go fillTracker.Run(ctx)
 	// 重启接管: 进程死在挂单期间 → 磁盘上的 resting 行交回跟踪
@@ -624,6 +640,12 @@ func main() {
 		cfg.Tail.WalkMinUSD)
 	log.Printf(" 价格地板: T=60 段与监听段 有效价>%.2f（tail.floor_min_price; BTC 标定值, 换标的须重标定; 被拦落 floor_low 影子行且链继续）",
 		cfg.Tail.FloorMinPrice)
+	if cfg.Tail.StopLossEnabled {
+		log.Printf(" 止损: 持仓侧 bid<%.2f 触发 FAK 卖出（按当时快照 bid; 卖不完/未吃到 → 下一 tick 重试; 落 exit_shares/exit_price/exit_rem 供页面对账; 卖不掉则冻结等人工, 决策 #34）",
+			cfg.Tail.StopLossBid)
+	} else {
+		log.Printf(" 止损: ⚠️ 已关闭（tail.stoploss_enabled=false）——持仓一律持有到期")
+	}
 	log.Printf(" 新鲜度闸: book_lat≤%dms + spot_age≤%dms + twap_age≤%dms（tail.max_book_lat_ms / feed.*）",
 		cfg.Tail.MaxBookLatMs, cfg.Feed.MaxSpotAgeMs, cfg.Feed.MaxTwapAgeMs)
 	log.Println(" 数据源: [PM CLOB books 1s] + [Chainlink TWAP-60 锚/σ] + [Binance spot 位移]")
@@ -861,6 +883,10 @@ func main() {
 		// 持仓监察（只记录, 见 internal/tail/hold.go）: 本窗出信号且**有仓位**
 		// 之后开始逐 tick 记持仓侧盘口, 直到闭市。nil = 本窗尚未（或不会）建仓。
 		var holdID *tail.HoldIdent
+		// 止损腿的本窗载体（决策 #34）: 同上, 有仓位才开始逐 tick 查触发。
+		// stopRetryLog: 未成交重试的日志节流计数（每个触发 tick 都打会淹日志）。
+		var stopRec *tail.Record
+		stopRetryLog := 0
 
 	collectLoop:
 		for {
@@ -868,6 +894,21 @@ func main() {
 			case <-ctx.Done():
 				ticker.Stop()
 				return
+			case rec := <-fillFinalCh:
+				// 挂单**窗内定稿**（FillTracker 累计成交达下单量）: 主循环的下单分支
+				// 早已走过（那时行还是 resting/无仓位）, 仓位从这里补开闸。
+				// ⚠️ 必须比对 conditionID: 通道可能残留上一窗的陈条（定稿发生在窗末、
+				// 主循环已出去）, 拿它给本窗开闸会让止损对着不存在的仓位下单。
+				if rec.ConditionID == conditionID && rec.HasPosition() {
+					if stopRec == nil {
+						stopRec = rec
+					}
+					if holdID == nil {
+						holdID = holdIdentOf(rec)
+					}
+					log.Printf("[Tail] 📌 挂单窗内定稿 → 仓位就位 event=%s exec=%s shares=%.2f cost=%.2f（持仓监察 + 止损开闸）",
+						conditionID, rec.ExecStatus, rec.Shares, rec.Cost)
+				}
 			case tickTime := <-ticker.C:
 				rem := int(endTime.Sub(tickTime).Seconds())
 				rem = max(rem, 0)
@@ -892,12 +933,11 @@ func main() {
 					}
 					// 持仓监察起点: 用 HasPosition（= 非 legacy scan ∧ 已成交）而非
 					// IsFilled——被闸/被拒/挂单未定稿的行没有仓位可监察。
+					// ⚠️ live 的 GTC 行此刻多为 resting（无仓位）⇒ 在这里开不了闸,
+					// 由 fillFinalCh 那条路在定稿时补开（见上）。
 					if rec.HasPosition() {
-						holdID = &tail.HoldIdent{
-							ConditionID: conditionID, Slug: slug, Stage: rec.Stage,
-							Side: rec.Side, EntryFill: rec.HotAsk, EntryRem: rec.Rem,
-							Anchor: rec.Anchor, HistBps: rec.HistBps,
-						}
+						holdID = holdIdentOf(rec)
+						stopRec = rec // 止损腿开闸（决策 #34; HasPosition 判据与监察同源）
 						log.Printf("[Tail] 🔍 持仓监察开启 event=%s side=%s stage=%s "+
 							"fill=%.2f anchor=%.2f", conditionID, rec.Side, rec.Stage,
 							rec.HotAsk, rec.Anchor)
@@ -916,6 +956,28 @@ func main() {
 						}
 						if err := recorder.LogHoldTick(*h); err != nil {
 							log.Printf("[Tail] ⚠️ 持仓监察落盘失败 event=%s: %v", conditionID, err)
+						}
+					}
+				}
+				// ── 止损腿（决策 #34, **旁路**: 不碰引擎状态机、不进 parity 红线）──
+				// 与持仓监察同一批读数但门控独立（见 tail.StopArmed）: 本 tick 盘口新鲜
+				// 且未闭市, 持仓侧 bid 跌破阈值 ⇒ 按当时快照 bid 发 FAK 卖单。
+				// 三条终局: 成交（可能部分, 剩余下一 tick 自然再接）; 未吃到 ⇒ 下一 tick
+				// 重试（限流日志）; 冻结（拒单/未知/残仓 <5 股）⇒ 本窗不再尝试, 等结算。
+				if stopRec != nil && tail.StopArmed(cfg.Tail.MaxBookLatMs, lastTick) {
+					bid := tail.HoldBidOf(stopRec.Side, lastTick)
+					if tail.StopTrigger(cfg.Tail, bid) {
+						switch out := exec.StopSell(stopRec, bid, rem, lastTick.Ts); out {
+						case tail.StopSold:
+							stopRetryLog = 0
+						case tail.StopRetry:
+							stopRetryLog++
+							if stopRetryLog == 1 || stopRetryLog%15 == 0 {
+								log.Printf("[Tail] ⏳ 止损卖出未吃到对手方（第 %d 次, bid=%.3f rem=%ds）——下一 tick 重试",
+									stopRetryLog, bid, rem)
+							}
+						case tail.StopFrozen:
+							stopRec = nil // 已冻结（ExitNote 已写）——本窗不再尝试
 						}
 					}
 				}
@@ -1025,6 +1087,17 @@ func waitTo(t time.Time, ctx context.Context) {
 	}
 }
 
+// holdIdentOf 把一条 tail.Record 折成持仓监察载体（hold.go 的 HoldIdent）。
+// 两个调用点: 下单分支的即时开闸（paper 恒有仓位; live 即时成交时）与
+// fillFinalCh 的窗内定稿补开闸（live 的 resting 行, 见决策 #34 的接线）。
+func holdIdentOf(rec *tail.Record) *tail.HoldIdent {
+	return &tail.HoldIdent{
+		ConditionID: rec.ConditionID, Slug: rec.Slug, Stage: rec.Stage,
+		Side: rec.Side, EntryFill: rec.HotAsk, EntryRem: rec.Rem,
+		Anchor: rec.Anchor, HistBps: rec.HistBps,
+	}
+}
+
 // fillOrderOf 把一条 tail.Record 折成 FillTracker 的登记参数。
 // 限价取 HotAsk（= 快照时的热门侧 ask，即挂单限价）; 投入取 Stake（目标股数
 // = floor2(Stake/HotAsk), 由 FillTracker 自己算）。
@@ -1071,9 +1144,12 @@ func bookTop5(book *sdk.OrderBook) (bid5, ask5 float64) {
 // resolveLiveMode 决定成交模式与执行器（默认纸面; -mode live 且凭证齐 → 真实下单）。
 // 与 cmd/flip 同源（同一批凭证判据），只是撤单点语义由 FillTracker 的 cancelLead 决定
 // （本族传 trading.CancelAtClose = 挂到闭市）。
-func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.PolymarketClient) (string, flip.Executor) {
+//
+// 返回两个执行器: 买入（GTC 挂单）与止损卖出（FAK 一次 POST）——两者必须同模式
+// 成对返回, 否则会出现「买得进卖不出」的半实盘态。
+func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.PolymarketClient) (string, flip.Executor, flip.SellExecutor) {
 	if mode != "live" {
-		return "paper", flip.NewExecutor("paper")
+		return "paper", flip.NewExecutor("paper"), flip.PaperSellExecutor{}
 	}
 	creds := cfgSDK.Polymarket.CLOBCreds
 	var missing []string
@@ -1088,14 +1164,15 @@ func resolveLiveMode(mode string, cfgSDK sdk.Config, readOnly bool, client *sdk.
 	}
 	if len(missing) > 0 {
 		log.Printf("[Trading] ⚠️ -mode live 但凭证缺失（%s）—— 降级纸面执行", strings.Join(missing, ", "))
-		return "paper", flip.NewExecutor("paper")
+		return "paper", flip.NewExecutor("paper"), flip.PaperSellExecutor{}
 	}
 	addr := cfgSDK.Polymarket.FunderAddress
 	if len(addr) > 12 {
 		addr = addr[:6] + "…" + addr[len(addr)-4:]
 	}
-	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 热门侧有效价, 挂到闭市才撤余量; 重启后首窗即可下单——重启用「先杀旧、再起新」, 勿两实例并跑, 见决策 #28）", addr)
-	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client})
+	log.Printf("[Trading] 🔒 live 就绪: maker=%s（GTC 限价挂单 @ 热门侧有效价, 挂到闭市才撤余量; 止损 = FAK 卖出; 重启后首窗即可下单——重启用「先杀旧、再起新」, 勿两实例并跑, 见决策 #28）", addr)
+	sell := trading.NewLiveSellExecutor(&trading.SdkClient{Client: client})
+	return "live", trading.NewLiveExecutor(&trading.SdkClient{Client: client}), sell
 }
 
 // pendingResting 挑出磁盘上未决的 GTC 挂单行（resting = 订单仍在 CLOB 簿上、成交量

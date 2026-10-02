@@ -82,6 +82,33 @@ type Config struct {
 	// 标定值（0.83 是 BTC 的标定量, 用户 2026-10-01 决定）；**在 BTC 上不该调**。
 	//（原名 listen_min_price——同日下延到 T=60 段后改名, 因为地板不再只管监听段。）
 	FloorMinPrice float64 `mapstructure:"floor_min_price"`
+
+	// StopLossEnabled 持仓止损总开关（true, 2026-10-03 用户决定「马上执行添加止损」）。
+	// 开 = 持仓期间持仓侧 bid < StopLossBid 即按该 bid 卖出（FAK），停损行照常结算、
+	// P&L 记实际卖出所得。
+	//
+	// ⚠️ 这一条的落地依据是**实盘**不是回测: `data/tail-live/` 09-25~10-02 八天 10U/注
+	// 纯价格腿 bid<0.30 = 25 次触发（23/23 输单全中 + 2/445 误杀）、Δ +45.51U
+	// 日级配对 95% [+22.62,+70.44]；而同一形态在 14 天回测上 ≈ 中性（+0.83U
+	// [−24.84,+19.21]；触发人群胜率 实盘 8.0% vs 回测 23.2%）。用户判定「实盘优先」——
+	// 理由见 docs/tail_stoploss_live_2026-10-03.md（实盘挂单成交被逆向选择）。
+	// 复算脚本 = python/v4/44_tail_stoploss_live.py。
+	// 关掉 = 退回「持有到期」旧口径（影子登记仍可离线算反事实）。
+	StopLossEnabled bool `mapstructure:"stoploss_enabled"`
+	// StopLossBid 止损触发价（0.30）: 持仓侧**有效买价**（bid）严格小于此值即触发卖出。
+	//
+	// 四条口径（写死在 stop.go，改这里只挪阈值）:
+	//   - 严格小于; bid == 0（整侧撤空 = 没有人买）**不是触发**而是「卖不掉」，跳过;
+	//   - 触发价与卖单限价都是**当时快照的 bid**（FAK, 吃不到就下一 tick 重来）;
+	//   - 只用价格腿，**不带 dev**（实盘证据: dev 腿 `bid<0.30 ∧ dev<−20` 只触发 9 次、
+	//     只捞到 9/23 输单、出场价中位 0.101、Δ +12.60U; 纯价格腿 25 次、23/23、
+	//     中位 0.260、Δ +45.51U——dev 是**结算线**位移，触发秒它还没塌，等它 = 等报价崩完）;
+	//   - 阈值 0.15~0.50 在实盘上全为正（0.20/0.25/0.35/0.50 → +30.1/+43.9/+61.5/+55.5U），
+	//     0.30 是用户决定值、不是扫描 argmax。
+	//
+	// ⚠️ 与 walk_min_usd / floor_min_price 同性质: 键存在的理由是跨标的各带一份
+	// 标定值；**在 BTC 上不该调**。
+	StopLossBid float64 `mapstructure:"stoploss_bid"`
 }
 
 // DefaultConfig 返回文档 §1.4 定稿的默认参数（全部不可调, 见 Config 注释）。
@@ -111,5 +138,8 @@ func DefaultConfig() Config {
 		WalkMinUSD:   43,   // T=150 段入场闸（决策 #29; BTC 标定量——别在 BTC 上调）
 
 		FloorMinPrice: 0.83, // 价格地板: T=60 + 监听段（决策 #32/#33; BTC 标定量——别在 BTC 上调）
+
+		StopLossEnabled: true, // 持仓止损（2026-10-03 用户决定; 实盘依据——回测是负的）
+		StopLossBid:     0.30, // 触发价: 持仓侧 bid < 0.30 即按快照 bid 卖出（用户决定值）
 	}
 }

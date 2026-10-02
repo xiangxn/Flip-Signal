@@ -297,6 +297,27 @@ type Record struct {
 	FillPrice  float64 `json:"avg_fill_price,omitempty"` // 实际成交均价（≤ 观测 hot_ask; 吃单可价格改善）
 	Cost       float64 `json:"cost,omitempty"`           // 实际花费 USDC（paper 无 → 结算用 Stake 兜底）
 	ExecNote   string  `json:"exec_note,omitempty"`      // rejected/unknown 原因
+
+	// ── 止损出场回填（2026-10-03 决策 #34; 未卖出行恒空）──
+	//
+	// 口径 = 「这笔仓位里有多少股已被**主动卖出**」: 触发条件与卖出口径见 stop.go
+	// （持仓侧 bid < cfg.StopLossBid 即按快照 bid 挂 FAK 卖单）。部分成交可累计
+	// （每笔卖出成交由 Recorder.RecordExit 加权平均进 ExitPrice）。
+	//
+	// 结算口径（recorder.recomputePnL）: 剩余股数按官方 outcome 兑付
+	// （`(Shares−ExitShares)·(won?1:0)`），已卖股数按实际卖出所得
+	// （`ExitShares·ExitPrice`）计入 ⇒ `pnl = 卖出所得 + 剩余兑付 − cost`。
+	// ⚠️ 被止损的行 `won` 照常回填官方结果（列里仍显示赢/输, 前端加注「止损」）,
+	// 但 P&L 是**实际落袋**——止损卖在 <StopLossBid 而成本 ≥0.80（地板），
+	// 故几乎恒为负; 罕见「杀赢」（卖完价格又涨回去、官方 outcome 是赢）同样按
+	// 落袋记, 与实盘证据分析的口径一致（docs/tail_stoploss_live_2026-10-03.md）。
+	ExitShares float64 `json:"exit_shares,omitempty"` // 已卖出股数（0 = 未卖/空）
+	ExitPrice  float64 `json:"exit_price,omitempty"`  // 卖出成交均价（加权, USDC/股）
+	ExitRem    int     `json:"exit_rem,omitempty"`    // **首次**卖出成交那一 tick 的 rem（0 = 未卖）
+	ExitTs     int64   `json:"exit_ts,omitempty"`     // 首次卖出成交的 tick 采样时刻（unix 毫秒）
+	// ExitNote 止损冻结说明（卖出被拒/结果未知/剩余不足最小单量——写一次即冻结点位,
+	// 此后不再重试; 空 = 未冻结）。以 flip.ExecNoteUnknown 开头 = 需人工核对的形态。
+	ExitNote string `json:"exit_note,omitempty"`
 }
 
 // IsFilled 判断记录是否实际成交: paper 行（ExecStatus 空 = 恒模拟全额成交）与 live
@@ -320,6 +341,24 @@ func (r *Record) IsFilled() bool {
 // 兜住, 现在这条纪律收敛到一个方法里, 免得每个消费点各写一遍）。
 func (r *Record) HasPosition() bool {
 	return r.Kind != KindScan && r.IsFilled()
+}
+
+// IsStopped 判断记录是否发生过渡止损卖出（至少有一笔出场成交）。
+// ⚠️ 它**不改变** HasPosition / 胜负分类 / 胜率分母（止损行照常按官方 outcome
+// 记赢或输）——只是给页面与离线分析一个「这笔被止损过」的标记。
+func (r *Record) IsStopped() bool {
+	return r.ExitShares > 0
+}
+
+// RemainingShares 返回止损卖出后**剩余未平仓**的股数（到期按官方 outcome 兑付）。
+// 下限 0（防浮点毛刺把残余 1e-9 股当成仓位）; 小于半个最小步长（0.005 股）
+// 一律归零——CLOB 最小步长 0.01 股, 比它更小的残余既卖不掉也不该再兑付进 P&L。
+func (r *Record) RemainingShares() float64 {
+	rem := r.Shares - r.ExitShares
+	if rem < 0.005 {
+		return 0
+	}
+	return rem
 }
 
 // ── 窗口健康度 ──

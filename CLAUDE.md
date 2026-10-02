@@ -72,34 +72,50 @@
   再往前（决策 #26 之后）为 T=150 1208/94.04%/+15.02U、T=60 577/99.13%/+16.15U、
   监听 348/97.99%/+3.92U ⇒ 合计 **n=2133 / 96.06% / +35.09U**（行 6412）——三次 Δ 见
   决策 #29 / #32 / #33（⚠️ #33 的 Δ 是**显著为负**的 −2.26U，见其条目）。
-- ⚠️ **9 个配置键，BTC 上一律不可调**（`t150_rem 150` / `t60_rem 60` / `price_min 0.80` /
+- ⚠️ **11 个配置键，BTC 上一律不可调**（`t150_rem 150` / `t60_rem 60` / `price_min 0.80` /
   `dev_min_usd 63` / `sigma_min_usd 40` / `stake 2` / `max_book_lat_ms 300` /
-  `walk_min_usd 43` / `floor_min_price 0.83`）——配置键的意义是「能读能对账」不是「该调」；
+  `walk_min_usd 43` / `floor_min_price 0.83` / `stoploss_enabled true` /
+  `stoploss_bid 0.30`）——配置键的意义是「能读能对账」不是「该调」；
   `40` 在 2000 次重采样里一次都没成为最优。🆕 `walk_min_usd`（决策 #29）与
   `floor_min_price`（决策 #32/#33，原名 `listen_min_price`）**存在理由与其他键不同一档**：
   它们是**给其他标的各带一份自己的标定值**用的（43 / 0.83 是 BTC 上的标定量，决策 #25）——
   **在 BTC 上照样不可调**。比较符**故意不做成配置键**（算子由段决定，见
-  `internal/tail.PriceLeg` 与 `FloorLeg`）。
+  `internal/tail.PriceLeg` 与 `FloorLeg`）。🆕 止损两键（决策 #34）里
+  `stoploss_enabled` 是**真正的开关**（用户要求「默认开启」，关掉 = 退回持有到期）；
+  `stoploss_bid` 是用户决定值（实盘扫描 0.15~0.50 全正、0.35 更高也不选极值）。
 - **状态**：🟡 纸面登记中。`data/tail-live/` 09-24~10-01 已是**真实 GTC 挂单成交样本**
   （stake 10U，550 笔成交；其中 **≤0.83 的 34 笔 22 赢 12 输 −68.76U**、>0.83 的 516 笔
   +98.87U——整族净剩约 +30.1U。这个廉价口袋是决策 #32/#33 的全部实盘依据）。
+  🆕 **持仓止损已落引擎并上 live（决策 #34，2026-10-03）**：持仓侧 bid 严格小于 0.30 即按
+  快照 bid FAK 卖出——实盘回看（09-25~10-02 八天, 10U/注, 468 笔可评估）25 次触发、
+  23/23 输单全中 + 2 笔误杀、Δ **+45.51U** [+22.62,+70.44]；同一形态 14 天回测 ≈ 中性
+  （+0.83U, 触发人群胜率实盘 8.0% vs 回测 23.2%）⇒ 以实盘为准（详见决策 #34）。
 - 🔴 **上 live 前的硬阻塞**：CLOB `minimum_order_size = 5 股`，而 `tail.stake=2U` 在 ≥0.80
   只有 2.0~2.5 股 ⇒ **低于交易所下限**（flip 侧 2U@0.20 = 10 股不受影响）。
   必须先定 stake ≥ 5U（每笔风险 2.5 倍，用户决定）+ 拿 1 笔小单验证下限；
   纸面 WR 量级不能直接外推到 live（live 是挂单等成交，成交样本天然偏向「热门侧走弱」，
-  与回测「快照瞬间即成交」**不是同一个估计量**）。
+  与回测「快照瞬间即成交」**不是同一个估计量**）。⚠️ 止损卖出（决策 #34）另有同一约束：
+  live 残仓 < 5 股会**冻结**（10U/注下 ≈ 10~12 股，安全；stake 若降到 <5U 则止损失效）。
+- 🔴 **止损上 live 的一条未验证前置（决策 #34）**：卖出是 CTF **ERC1155** 转让 ⇒ 需要
+  `setApprovalForAll`（与买方 USDC allowance 是两回事）；SDK v0.7.2 **没有这个方法**、
+  本仓库从未用过 relayer ⇒ 未授权时卖单被拒 ⇒ 按冻结处理（留 `exit_note`，钱不会错，
+  但**止损静默失效**）。上 live 前必须链上验证授权 + 一笔最小卖单验 `parseSellFill`
+  字段语义（该解析是本实现唯一需真盘验证的点）。
 - **兼作数据采集器**：本进程默认把每秒原始采样按**数据格式 v2** 落 `runtime.events_dir`
   （默认 `data/events`，与 `cmd/collect` 同构；留空串 = 关闭）——BTC 的 `cmd/collect`
   已停，离线研究靠它续料。见决策 #27 与 `docs/tail_events_2026-09-27.md`。
 - **待办**：① 纸面判决改离线脚本（判决卡已随整合改造整删，脚本**未写**）；
   ② 两族合并熔断未实现（flip/tail 各一条独立 −24U 线，等效 48U）；
-  ③ 止损腿未落引擎（见决策 #24）；
+  ③ ~~止损腿未落引擎~~ ⇒ **已落引擎并上 live（决策 #34）**；
   ④ **#29 入场闸的前向复验**（三条预设判据写死在 `docs/tail_walk_gate_2026-09-29.md` §5：
   被闸组输率 ≥ 保留组 +20pp / 日级配对 Δ 下界 > 0 / 净 Δ ≥ +10U per 14 天——三条同时满足才扩实盘）；
   ⑤ **#32 监听段地板的前向复验**（判据写死在 `docs/tail_listen_floor_2026-10-01.md` §5，
   触发 = ≥14 完整日或 ≥10 条 `floor_low` 影子行；⚠️ 影子行**不带 outcome**，复验要离线 join）；
   ⑥ **#33 地板下延到 T=60 段的前向复验**（判据写死在 `docs/tail_floor_from_t60_2026-10-01.md` §5，
-  触发 = ≥14 完整日或 ≥10 条 **t60 段** `floor_low` 影子行；⚠️ 同 #32，影子行离线 join）。
+  触发 = ≥14 完整日或 ≥10 条 **t60 段** `floor_low` 影子行；⚠️ 同 #32，影子行离线 join）；
+  ⑦ **#34 止损的前向复验**（五条判据写死在 `docs/tail_stoploss_live_2026-10-03.md` §9，
+  触发 = ≥30 次触发或 ≥14 完整日；⚠️ 成交面两条（成交价/全额率）只能实盘读，
+  不满足即撤——那是「快照 bid 全额成交」假设的证伪）。
 - ⚠️ **「入场闸」与「价格地板」都不是「提前/更严入场」那一族**：下面那族挪的是**检查点
   位置/阈值**（无条件推后），#29 的闸加的是**市场结构量条件**（结算线已走多远）⇒ 是该族
   **唯一过完整稳健性检验**的改动；#32/#33 的地板则是在**原检查点**上加一条**价格条件**
@@ -150,7 +166,7 @@ FlipSignal/
 ├── cmd/flip/                         # 狗@0.2 引擎主入口（纸面/实盘同源, -mode 切换）
 │   └── main.go                       # 窗口循环/数据源接线/anchor σ/执行编排注入（唯一文件; 4 个引擎 flag + -encrypt 工具 flag, 配置见 internal/config）
 ├── cmd/tail/                         # 扫尾盘 ⑤ 引擎主入口（独立进程, 自带 Dashboard; -config/-mode/-stake/-dashboard 四 flag）
-│   ├── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市 + 窗口运行时载体（采集器 4 处接线 + 曲线采样 1 处）
+│   ├── main.go                       # 同上接线, 但三段判定链/尾盘闸/GTC 挂到闭市 + 窗口运行时载体（采集器 4 处接线 + 曲线采样 1 处 + 持仓监察 1 处 + **止损腿 1 处**, 决策 #34）
 │   ├── events.go                     # **兼作数据采集器**: 每秒原始采样落 events_*（数据格式 v2, 决策 #27）+ events_test.go
 │   └── curve.go                      # **页面曲线缓冲**: 本窗 anchor/twap/spot 逐秒点 + 两条派生阈值线（rem≤60 的临界价 / rem∈[60,150] 的外推临界价; 旁路, 决策 #30）——两个公式本体已搬到 internal/tail, 这里只剩缓冲与换窗 + curve_test.go
 ├── cmd/collect/                      # 数据格式 v2 高频采集器（**任意标的**）
@@ -170,6 +186,7 @@ FlipSignal/
 │   │   ├── types.go                  # Config + Tick/Observation/Record + 状态枚举 + 闸原因常量
 │   │   ├── engine.go                 # 状态机: Watching → Done（触底观测/四腿判定 + 本窗 tick 健康度计数）
 │   │   ├── exec.go                   # Executor 接口 + PaperExecutor（live 实现由 trading 注入）
+│   │   ├── sell.go                   # SellExecutor 接口 + PaperSellExecutor（止损卖出原语, 决策 #34; live 实现由 trading 注入）
 │   │   ├── exec_state.go             # ExecState 编排: 风控闸（两模式共用）→ paper 单步 / live submitting 两阶段 → 统一 Execute
 │   │   ├── recorder.go               # JSONL 观测记录 + windows_* 窗口振幅日志 + winstats_* 健康度（按日切分）+ P&L 回填
 │   │   ├── risk.go                   # CanTrade 日亏熔断判定（纯函数; 锁存在 exec_state.breakerTripped）
@@ -206,19 +223,21 @@ FlipSignal/
 │   │   ├── settle.go                 # Outcome/Anchors（按边界秒存推送）+ Resolver 三层回退
 │   │   └── settle_test.go            # 判定词表钉在 flip 常量上 + 三层时点/次数/幂等/剪枝
 │   ├── tail/                         # 扫尾盘 ⑤ 引擎核心层（零外部依赖; 只复用 flip 的原语, 反向不依赖）
-│   │   ├── config.go                 # Config + DefaultConfig()（9 个键; BTC 上全部不可调）
-│   │   ├── types.go                  # Observation/Rules/Record/WindowStats + stage/kind/闸原因常量 + 状态机 + IsFilled/HasPosition
+│   │   ├── config.go                 # Config + DefaultConfig()（11 个键; BTC 上全部不可调）
+│   │   ├── types.go                  # Observation/Rules/Record/WindowStats + stage/kind/闸原因常量 + 状态机 + IsFilled/HasPosition + exit_* 卖出字段
 │   │   ├── decide.go                 # 纯函数 HotBook（ask 优先/bid 兜底）/ SgnFor / DevUSD / SigmaUSD / EvalRules + 三条段相关腿（PriceLeg 比较符 / WalkLeg / FloorLeg）+ Rule1()…Rule5()
 │   │   ├── engine.go                 # 三段递进判定链（Watching→Await60→Listening→Done）+ Resume 崩溃续跑, ProcessTick 返回 0~1 行
-│   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* / tailhold_* 四前缀（独立于 flip 三前缀, 决策 #9 红线）+ recomputePnL
+│   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* / tailhold_* 四前缀（独立于 flip 三前缀, 决策 #9 红线）+ recomputePnL（含 exit_* 卖出落袋）+ RecordExit
 │   │   │                             # ⚠️ 另有第五路输出 events_*（cmd/tail/events.go 的采集器, 走 internal/collect, 与本层无关）
 │   │   ├── hold.go                   # 持仓监察（纯函数 HoldWatchRow + HoldRow）: 信号成交后逐 tick 记持仓侧盘口, **只记录不判定**
-│   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像; HandleDecision 单入口）
+│   │   ├── stop.go                   # 持仓止损纯函数（决策 #34）: StopTrigger（bid 严格<0.30, 0 不触发）/ StopArmed（rem>0 ∧ 延迟闸, 不要 spot）/ HoldBidOf / MinSellShares=5
+│   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像; HandleDecision 单入口）+ StopSell 止损卖出编排（FAK 三终局）
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
 │   │   ├── curve.go                  # 曲线派生量的**唯一公式来源**: RequiredPrice/ExtrapPrice/TieAt + WindowSec/TwapLookbackSeconds（实况与「点行看曲线」的重建共用, 决策 #31）
 │   │   └── *_test.go                 # decide（含 HotBook/PriceLeg）/engine/recorder/exec_state/hold/curve/parity（opt-in, 钉 23 的 oracle）
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 与 cmd/tail 各自构造注入）
 │       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
+│       ├── live_sell.go              # LiveSellExecutor 止损 FAK 卖单（实现 flip.SellExecutor, 决策 #34; 429/无对价→unfilled 可重试）
 │       ├── fill_tracker.go           # GTC 挂单跟踪: rem≤RemMin（flip）/ 闭市（tail）撤单 + 查 size_matched 定稿回调
 │       ├── prefetch.go               # 每窗预热 tickSize/negRisk/feeRate（下单路径零额外网调）
 │       └── resolution_poller.go      # gamma 结算轮询（umaResolutionStatus; 结算第三层）
@@ -261,6 +280,7 @@ FlipSignal/
 | `tail_listen_floor_2026-10-01.md` | **监听段价格地板 `> 0.83`**（决策 #32）：实盘廉价口袋证据、阈值扫描（+8.55U 区间含零）、细账（4 个整窗死亡撑起全部）、安慰剂 p=0.0002、**前向判据**与影子行离线复算口径 |
 | `tail_floor_from_t60_2026-10-01.md` | **地板下延到 T=60 段**（决策 #33）：⚠️ 回测显著变差（Δ −2.26U [−4.73,−0.29]）、实盘依据（三段 ≤0.83 口袋 34 笔 −68.76U vs 516 笔 +98.87U）、改道税细账、配置键改名 `floor_min_price`、**前向判据**与离线 join |
 | `tail_checkpoint_t100_2026-10-02.md` | **T=100 追加判定点全否**（用户 2026-10-02 提案）：新基线复测 Δ **−21.18U [−38.16,−6.79] 显著为负**、改道 349 笔 +2.82U vs 新增 43 笔 −24.00U、位置曲线 T70~135 八格全负、**价格腿 0.80~0.99 四十格无一转正**（波峰假设被否：更便宜 167/相同 173/更贵仅 52；亏损集中 0.85~0.95 中价带）⇒ 不落引擎，链语义与旧曲线族可比 |
+| `tail_stoploss_live_2026-10-03.md` | **持仓止损落引擎（决策 #34）**：实盘 8 天 25 触发、23/23 输单全中 + 2 误杀、Δ **+45.51U** [+22.62,+70.44]、25/25 触发秒有对手方（bid5 min 33 股 > 最大持仓 12.5 股）；回测同形态 ≈ 中性（+0.83U，触发人群胜率实盘 8.0% vs 回测 23.2% = 挂单成交逆向选择）；纯价格腿 vs dev 腿（9/23）对照；**🔴 CTF ERC1155 卖出授权未验证**；五条前向判据 |
 | `Price_required.md` | 「外推临界价」（曲线第 5 条）的**用户口径与推导**：假设现货保持当前速度，进入最后 60s 时得站上哪儿 |
 
 ### 脚本地图（`python/v4/`）
@@ -287,6 +307,7 @@ FlipSignal/
 | `41_tail_listen_floor.py` | **监听段价格地板落地依据**（§0 三把 pin 自检 / §1 廉价口袋 / §2 阈值扫描 / §3 细账与分半 / §4 安慰剂 `--nperm`（400 秒级、4000 约 9 分钟）/ §5 前向判据）——`docs/tail_listen_floor_2026-10-01.md` |
 | `42_tail_floor_from_t60.py` | **地板下延到 T=60 段的落地依据**（§0 三把 pin 自检 = C43/#32/#33 / §1 廉价口袋 / §2 阈值扫描与负 Δ 警告 / §3 细账：整窗死亡 × 改道税 / §4 实盘对照 09-24~10-01 / §5 前向判据）——`docs/tail_floor_from_t60_2026-10-01.md`；⚠️ 41 号脚本的链**冻结在「只拦监听段」的历史形态**，现行口径看 42 号 |
 | `43_tail_checkpoint_t100.py` | **T=100 追加判定点否证**（§0 三把 pin 自检 + `chain(cks=())` 与 #33 链逐位一致 + 丢失信号 0 / §1~§3 主体与分解 / §4 来路（walk_low 回收 −1.17U）/ §5 敏感性与位置曲线 / §6 价格腿扫描 0.80~0.99 × `>`/`>=` 40 格 + 波峰检验 + 分桶）——`docs/tail_checkpoint_t100_2026-10-02.md`；链语义沿用 31 号（每个检查点消费上一个被消费 tick 之后首个 `rem ≤ 阈值` 的 tick） |
+| `44_tail_stoploss_live.py` | **止损实盘验证**（决策 #34 落地依据；`tail_*.jsonl` × `tailhold_*.jsonl` join）：§0 基线自检（644/468/+15.67U）/ §1 纯价格腿 X=0.30（25 触发、23/23、Δ +45.51U、日级配对 `boot_delta` n=2000 seed=44）/ §2 阈值扫描 0.15~0.50 / §3 可成交性（bid5）/ §4 出场价与 rem / §5 dev 腿对照（9/23、出场 0.101）——`docs/tail_stoploss_live_2026-10-03.md`；回测对照用 25 号（`sim(sigs, p_max=0.30)` = +0.83U ≈ 中性） |
 
 ---
 
@@ -419,6 +440,16 @@ Listening ──此后**每秒**: 有效 tick ∧ ② 达标 ∧ 有效价 > flo
   `anchor_exact=false`）；首行落盘即冻结，`UpgradeAnchor` 此后拒收（三段同锚）。
 - **崩溃重启续跑**：`Engine.Resume(t150Done, t60Done)` 按磁盘真相回填已完成段；
   重入判据 = 该窗**是否已有 OK 行**（`HasSignal`，有则整窗跳过，防同窗双单）。
+- 🆕 **持仓止损（决策 #34，旁路）**：**有仓位之后**（决策即成交，或挂单窗内定稿经
+  `fillFinalCh` 补开闸）逐 tick 检查——`StopArmed`（`rem > 0` ∧ 盘口延迟 ≤ 300，**不要求
+  spot/anchor**）∧ 持仓侧 bid **严格小于** `tail.stoploss_bid`(0.30) ∧ bid > 0 ⇒ 按当时
+  快照 bid 发 **FAK 卖单**（`trading.LiveSellExecutor`；paper 用 `PaperSellExecutor` 照跑）。
+  三条终局：成交/部分成交 ⇒ `RecordExit` 立即落盘（加权均价，`exit_rem/exit_ts` 只记首次）；
+  **unfilled ⇒ 下一 tick 重试**（不落盘不冻结）；rejected/结果未知/live 残仓 < 5 股 ⇒
+  **冻结**（写一次 `exit_note`，本窗不再尝试——未知结果绝不重试，卖两次比不卖更糟）。
+  **bid == 0 不是触发**（整侧撤空 = 卖不掉）。止损行**照常结算**（`won` 照官方回填），
+  `pnl` 按实际落袋 `exit_shares·exit_price − cost (+ 剩余股数 若赢)`；parity 红线不碰
+  （实盘依据 + 上线前置见决策 #34）。
 - σ 未就绪（`hist.Count() < 3`）⇒ 整窗跳过 `skip=no_sigma`；`tailwin_*` 是 tail
   自己的 σ 预热源（独立于 `windows_*`，不交叉读写）。
 - **结算 = 所有信号**（决策 #22）：`isSettlable` 只排除未定稿的 `submitting`/`resting`，
@@ -1208,6 +1239,55 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
       从 `{listen}` 变成 `{t60, listen}`）。
     - ✅ **flip 侧不动**。
 
+34. **持仓止损：纯价格腿 `持仓侧 bid < 0.30` → 按快照 bid 发 FAK 卖单**（2026-10-03 用户决定
+    「我的经验与结论，实盘必须添加止损。就用 bid<0.3 来止损」+「止损你最好用实盘数据来验证」）。
+    依据 `docs/tail_stoploss_live_2026-10-03.md`，脚本 `python/v4/44_tail_stoploss_live.py`
+    （实盘）/ `python/v4/25_tail_stoploss.py`（回测对照）。
+    - **实盘（09-25~10-02 八天, 10U/注, 468 笔可评估 = 644 成交已结算 − 110 挂单终态
+      − 66 监察上线前）**：纯价格腿 = **25 次触发**（5.3%）、**23/23 输单全中** +
+      2/445 误杀、Δ **+45.51U**（+15.67 → +61.18）、日级配对 95%
+      **[+22.62,+70.44]**、8 天 7 天为正；构成 = 救 23 笔 +62.83U − 误杀 2 笔 −17.32U。
+      **25/25 触发秒有对手方**（bid5 最小 33 股 > 最大持仓 12.5 股）；出场价中位 0.260。
+    - **回测对照 ≈ 中性**（14 天 112 触发、杀赢 26/救输 86、Δ +0.83U [−24.84,+19.21]）——
+      **触发人群胜率 实盘 8.0% vs 回测 23.2%**：实盘挂单成交被逆向选择（「0.99 近半不成交」
+      的同一件事）。⇒ 与 #33 同性质：**以实盘口径为准**（#33 是回测为负仍落地；本条是
+      回测中性、实盘显著正）。⚠️ **#24 的 dev 双腿是回测结论，未落地**——实盘上
+      `bid<0.30 ∧ dev<−20` 只触发 9 次、只捞到 9/23 输单、出场价中位 0.101（dev 是
+      **结算线**位移，触发秒它还没塌：中位 +14.82 美元、76% ≥ 0）⇒ **落地用纯价格腿**。
+    - **形态**：严格小于（bid == 0 = 整侧撤空**不是触发**，卖不掉）；出场 = 触发 tick 的
+      快照 bid 全额 FAK；门控 `StopArmed` = `rem > 0` ∧ 盘口延迟 ≤ 300、**不要求
+      spot/anchor**（止损不看结算线）。三终局：成交落盘 / **unfilled 下一 tick 重试** /
+      rejected·未知·live 残仓 < 5 股 **冻结**（写一次 `exit_note`，本窗不再尝试——
+      未知结果绝不重试）。触发后每 tick 重查（价格继续塌 ⇒ 剩余自然再卖）。
+    - **记录与结算**：行内新增 `exit_shares/exit_price(加权)/exit_rem(首次)/exit_ts/exit_note`；
+      止损行**照常结算**（`won` 照官方回填、页面结果列显示「赢(止损)」/「输(止损)」），
+      `pnl = exit_shares·exit_price − cost (+ 剩余股数 若赢)`——钱按实际落袋。
+    - **配置**：`tail.stoploss_enabled`（默认 **true**，用户要求「默认开启」；关 = 退回持有
+      到期）/ `tail.stoploss_bid`（0.30，用户决定值——实盘扫描 0.15~0.50 全正、0.35 更高
+      但 25 个触发的样本上不拿扫描极值当依据）。校验 `(0,1)`。
+    - **实现面**：纯函数 `internal/tail/stop.go`（`StopTrigger`/`StopArmed`/`HoldBidOf`/
+      `MinSellShares=5`）；编排 `ExecState.StopSell`（四终局 + 落盘失败也冻结）；
+      主循环两处开闸（决策即成交 / 挂单**窗内定稿**经 `fillFinalCh`——挂单终态在闭市才定稿
+      的那批**结构上无法止损**，14 天实盘里就是那 110 笔）；`flip.SellExecutor` 接口
+      （`internal/flip/sell.go`）+ `trading.LiveSellExecutor`（FAK 单次 POST 即终态）。
+    - **parity 免疫**：判定链一字未动、止损是**旁路**（不进 Engine 状态机、不碰 oracle）——
+      pin 不变（6704/2074/3640/3/250/24/97.830280%/+70.314372U）。
+    - 🔴 **上线前置（未验证）**：卖出是 CTF **ERC1155** 转让 ⇒ 需要 `setApprovalForAll`
+      （与买方 USDC allowance 两回事）；SDK v0.7.2 **无此方法**、本仓库从未用过 relayer
+      ⇒ 未授权时卖单被拒 ⇒ 冻结（钱不会错但**止损静默失效**）。上 live 前必须链上验证授权
+      + 一笔最小卖单验 `parseSellFill` 的 making/taking 字段语义（本实现唯一需真盘验证点）。
+    - **前向判据（先写死再跑）**：触发 = ≥30 次触发或 ≥14 完整日（先到为准）。① 未冻结占比
+      ≥ 85%；② 实际成交价中位 ≥ 快照 bid − 0.03 且请求股数全额成交占比 ≥ 90%；
+      ③ 成交价中位 ≥ 0.15；④ 误杀率 ≤ 15%；⑤ 日级配对 Δ 95% 下界 > 0（@10U/注）。
+      **②/③ 不满足 ⇒ 撤回**（「快照 bid 全额成交」假设被证伪）；④/⑤ 不满足 ⇒ 撤回或
+      把阈值降到 0.20 重议（用户决定）。
+    - ⚠️ **风险**：① 8 天 25 触发，Δ 的 54% 来自两天（09-28/09-30）；② 出场价是快照口径
+      （bid5 深度只是上界证据，实际滑点/部分成交待实盘）；③ 25 次触发里 2 次
+      （t60@0.81 / 监听@0.82）在 #33 地板后根本不会建仓 ⇒ 现行宇宙等价增量 ≈ +41.09U/23 次；
+      ④ 与已否家族（#24 dev 腿 / #39 下穿停留 / 速度投影族）不冲突——那些否的是
+      「找更好的条件」，本条是用户基线条件的实盘验证，条件一字未动。
+    - ✅ **flip 侧不动**（flip 无持仓监察、无对应出场语义；要动单独立项）。
+
 ---
 
 ## 运行方式
@@ -1266,11 +1346,14 @@ go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
 | `runtime.events_dir` | `data/events` | **cmd/tail 的原始采集目录**（数据格式 v2，与 `cmd/collect` 同构）。留空串 = 关闭；一标的一目录（见决策 #27） |
 | `tail.walk_min_usd` | 43 | **T=150 段入场闸**阈值：`walk = sgn·(twap − anchor) ≥ 此值`（决策 #29）。⚠️ **BTC 标定量**——键是为 ETH 等标的重标定而存在，不是让你在 BTC 上调（见项目概述）|
 | `tail.floor_min_price` | 0.83 | **价格地板**：**T=60 段与监听段**的有效价**严格大于**此值才成交（决策 #32 + #33；原名 `listen_min_price`）。⚠️ **BTC 标定量**，同上一行同理 |
+| `tail.stoploss_enabled` | `true` | **持仓止损总开关**（决策 #34，2026-10-03 用户要求默认开启）：持仓侧 bid 严格小于 `stoploss_bid` 即按快照 bid FAK 卖出；关掉 = 退回持有到期 |
+| `tail.stoploss_bid` | 0.30 | 止损触发价（决策 #34，用户决定值）：严格小于才触发；`bid == 0` 不算触发（整侧撤空 = 卖不掉）。实盘依据见 `docs/tail_stoploss_live_2026-10-03.md` |
 | `tail.*`（其余 6 键）| — | 扫尾盘 6 键——⚠️ **BTC 上全部不可调**（见项目概述）|
 
 启动校验（`internal/config/validate.go`，判**最终生效值**）：三阈值必须 > 0、
 `risk.max_daily_loss` 必须 < 0、`runtime.mode ∈ {paper, live}`、`flip.stake > 0`、
-`runtime.output_dir` 非空、`tail.floor_min_price ∈ [0,1)` —— 任一不满足即启动失败；
+`runtime.output_dir` 非空、`tail.floor_min_price ∈ [0,1)`、`tail.stoploss_bid ∈ (0,1)`
+—— 任一不满足即启动失败；
 `flip.max_book_lat_ms < 100` 只告警。
 配置文件里拼错的键（`UnmarshalExact`）也是启动失败，不静默回落默认值。
 
