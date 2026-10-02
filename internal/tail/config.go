@@ -109,6 +109,19 @@ type Config struct {
 	// ⚠️ 与 walk_min_usd / floor_min_price 同性质: 键存在的理由是跨标的各带一份
 	// 标定值；**在 BTC 上不该调**。
 	StopLossBid float64 `mapstructure:"stoploss_bid"`
+
+	// FeeRate taker 手续费率（0.07, 2026-10-03 决策 #35）: 官方公式
+	// `fee = C × rate × p × (1−p)`（5 位小数）的 rate。Polymarket **只有 taker 付
+	// 手续费、maker 恒 0** ⇒ 本族计费只发生在两类成交上: GTC 挂单的 POST 即时撮合
+	// 部分（taker）、止损卖出的 FAK 成交（恒 taker）; 此后挂单在簿被吃到的部分是
+	// maker、0 费。
+	//
+	// 0.07 = 官方 Crypto 类（btc-updown-5m 属之）taker 费率, 与实盘市场详情接口的
+	// feeSchedule {rate: 0.07, takerOnly: true} 实测一致。**0 = 关闭计费**（老数据/
+	// 测试用; 也是唯一的结构性边界, 校验限 [0,1)）。
+	// ⚠️ 改它只影响**此后**的成交与老行回填——已落盘的 Fee 是存量数字, 不会整体重算
+	// （见 recorder: recomputePnL 只读 Fee, 不现算）。
+	FeeRate float64 `mapstructure:"fee_rate"`
 }
 
 // DefaultConfig 返回文档 §1.4 定稿的默认参数（全部不可调, 见 Config 注释）。
@@ -141,5 +154,7 @@ func DefaultConfig() Config {
 
 		StopLossEnabled: true, // 持仓止损（2026-10-03 用户决定; 实盘依据——回测是负的）
 		StopLossBid:     0.30, // 触发价: 持仓侧 bid < 0.30 即按快照 bid 卖出（用户决定值）
+
+		FeeRate: 0.07, // taker 手续费率（决策 #35; 官方 Crypto 档——别按行情调）
 	}
 }

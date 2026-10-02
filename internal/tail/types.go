@@ -20,8 +20,8 @@
 //
 // ⚠️ 2026-10-01 起 **T=60 段与监听段另有一道价格地板**（决策 #32; 同日 #33 下延到
 // T=60 段）: 这两段除各自规则外还要热门侧有效价 `> cfg.FloorMinPrice`
-//（默认 0.83, 见 decide.FloorLeg）。被拦的 tick 落一行**影子行**
-//（reject_reason = floor_low）且**链继续**（T=60 被拦 ⇒ 走到监听段; 监听段被拦 ⇒
+// （默认 0.83, 见 decide.FloorLeg）。被拦的 tick 落一行**影子行**
+// （reject_reason = floor_low）且**链继续**（T=60 被拦 ⇒ 走到监听段; 监听段被拦 ⇒
 // 同段等下一个更贵的 tick）; T=150 段一字不动。
 //
 // 以上三道是**全部**的段相关腿（价格腿 PriceLeg 的比较符 + 入场闸 walk + 价格地板）,
@@ -318,6 +318,26 @@ type Record struct {
 	// ExitNote 止损冻结说明（卖出被拒/结果未知/剩余不足最小单量——写一次即冻结点位,
 	// 此后不再重试; 空 = 未冻结）。以 flip.ExecNoteUnknown 开头 = 需人工核对的形态。
 	ExitNote string `json:"exit_note,omitempty"`
+
+	// ── 手续费（2026-10-03 决策 #35; Polymarket 官方公式）──
+	//
+	// `fee = C × rate × p × (1−p)`（5 位小数, 见 fee.go 的 Fee 与官方文档引文）。
+	// CLOB **只有 taker 付费、maker 恒 0** ⇒ 本族只有两类成交计费:
+	//   - 买入: GTC 挂单里 POST 响应就带着的那部分成交量（穿过价差即时撮合 = taker,
+	//     见 trading.parseFill）; 此后挂在簿上被吃到的部分是 maker、0 费;
+	//   - 止损卖出: 按快照 bid 挂的 FAK 立即卖出 = 恒 taker。
+	// paper 行（ExecStatus 空）与 legacy 行没有真实订单 ⇒ 恒 0。
+	//
+	// 记账: TakerShares/TakerPrice 在成交落盘时定死（CompleteExecution 买 / RecordExit
+	// 卖）, Fee 随后由同函数立即求出——**不让 recomputePnL 现场用费率重算**, 因为
+	// 费率是可配置项, 改一次配置会把历史行的手续费整体改写。老行（本决策之前落的
+	// 实盘行）没有这两个字段: Recorder 载入时按限制性启发式回填（只认 filled ∧
+	// exec_note 空 = 即时全额 taker, 见 backfillFee），偏低估、不回写磁盘。
+	TakerShares float64 `json:"taker_shares,omitempty"` // taker 成交股数（买 + 卖合计）
+	TakerPrice  float64 `json:"taker_price,omitempty"`  // 买入侧 taker 成交均价（卖侧价见 ExitPrice）
+	// Fee 已发生的 taker 手续费合计（USDC, ≥0; 0 = 无 taker 成交/费率关）。
+	// recomputePnL 把它从 P&L 里扣除（`pnl = 卖出所得 + 剩余兑付 − cost − fee`）。
+	Fee float64 `json:"fee,omitempty"`
 }
 
 // IsFilled 判断记录是否实际成交: paper 行（ExecStatus 空 = 恒模拟全额成交）与 live

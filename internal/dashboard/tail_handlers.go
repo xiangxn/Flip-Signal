@@ -81,6 +81,12 @@ type tailStateResponse struct {
 	DayTotal      int     `json:"day_total"`
 	MaxDrawdown   float64 `json:"max_drawdown"`
 
+	// 手续费累计（决策 #35）: Polymarket 官方公式 fee = C×rate×p×(1−p)（taker only,
+	// maker 恒 0; paper 行无真实订单恒 0）。该金额**已经扣在** cum/daily 的 P&L 里
+	// （recomputePnL 扣减）——这是「被扣了多少」的单独读数。
+	FeeTotal      float64 `json:"fee_total"`
+	FeeTakerFills int     `json:"fee_taker_fills"` // 发生过 taker 成交的行数（买的即时部分或止损卖出）
+
 	// 今日健康度（辅助闸门: 读当日 tailstats_*.jsonl）
 	TodayStatsDay string         `json:"today_stats_day,omitempty"` // 读的是哪个 UTC 日的文件
 	TodayWindows  int            `json:"today_windows"`             // 本日实际采集窗数（Skip 为空）
@@ -161,6 +167,11 @@ type tailRecordResponse struct {
 	ExitPrice  float64 `json:"exit_price,omitempty"`
 	ExitRem    int     `json:"exit_rem,omitempty"`
 	ExitNote   string  `json:"exit_note,omitempty"`
+
+	// ── 手续费（决策 #35; 已扣在本行 PnL 里）──
+	TakerShares float64 `json:"taker_shares,omitempty"` // taker 成交股数（买 + 卖）
+	TakerPrice  float64 `json:"taker_price,omitempty"`  // 买入侧 taker 成交均价
+	Fee         float64 `json:"fee,omitempty"`          // 本行手续费（USDC; 前端在 P&L 上加注）
 }
 
 // tailDailyRow 是 tail /api/daily 的一行（= 共用骨架 + 本族的段/未成交细分列）。
@@ -222,6 +233,8 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	feeTotal, feeFills := s.feeStats()
+
 	writeJSON(w, tailStateResponse{
 		TS:              s.nowFn().UTC().Format(time.RFC3339),
 		Mode:            s.mode,
@@ -267,6 +280,8 @@ func (s *TailState) handleState(w http.ResponseWriter, r *http.Request) {
 		DayPnlPos:       dayPos,
 		DayTotal:        len(daily),
 		MaxDrawdown:     s.recorder.MaxDrawdown(),
+		FeeTotal:        feeTotal,
+		FeeTakerFills:   feeFills,
 		TodayStatsDay:   today,
 		TodayWindows:    todayWindows,
 		TodayRows:       todayRows,
@@ -325,6 +340,8 @@ func (s *TailState) handleConfig(w http.ResponseWriter, r *http.Request) {
 		// 开关 + 阈值两键, 行的 exit_* 字段即卖出流水）
 		"stoploss_enabled": s.cfg.StopLossEnabled,
 		"stoploss_bid":     s.cfg.StopLossBid,
+		// taker 手续费率（决策 #35; fee = C×rate×p×(1−p), 0 = 关闭计费）
+		"fee_rate": s.cfg.FeeRate,
 	})
 }
 
@@ -394,6 +411,9 @@ func mapTailRecord(rec *tail.Record) tailRecordResponse {
 		ExitPrice:    rec.ExitPrice,
 		ExitRem:      rec.ExitRem,
 		ExitNote:     rec.ExitNote,
+		TakerShares:  rec.TakerShares,
+		TakerPrice:   rec.TakerPrice,
+		Fee:          rec.Fee,
 	}
 }
 
@@ -453,6 +473,22 @@ func (s *TailState) decisionCount() int {
 		}
 	}
 	return n
+}
+
+// feeStats 汇总手续费（决策 #35）: 全量累计金额 + 发生过 taker 成交的行数
+// （买的 POST 即时撮合部分或止损卖出; 数字用来解释金额的来路）。
+//
+// 逐行扫内存、不缓存——行数是千级, 与 tally/decisionCount 同一次量级,
+// /api/state 每 5s 一次。
+func (s *TailState) feeStats() (float64, int) {
+	total, fills := 0.0, 0
+	for _, rec := range s.recorder.Observations() {
+		total += rec.Fee
+		if rec.TakerShares > 0 {
+			fills++
+		}
+	}
+	return total, fills
 }
 
 // collectDaily 按记录 date 字段（UTC 日）聚合逐日统计（任意序输入，输出时间正序）。

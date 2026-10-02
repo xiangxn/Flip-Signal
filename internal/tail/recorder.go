@@ -67,6 +67,12 @@ type Recorder struct {
 	recs    []*Record          // 全部观测行（时间正序: 载入序 + 追加序）
 	pending map[string]*Record // 未结算 ok 信号，key = conditionID
 
+	// feeRate taker 手续费率（决策 #35; 官方 Crypto 档 0.07, 0 = 关闭计费）。
+	// 只在**成交落盘那一刻**用于算 Fee（买 = CompleteExecution / 卖 = RecordExit）
+	// 与**载入时**给老行回填——recomputePnL 只读已存下的 Fee 值、不现算,
+	// 免得改费率把历史行的 P&L 整体改写。
+	feeRate float64
+
 	day  string // 当前打开文件的 UTC 日
 	file *os.File
 	buf  *bufio.Writer
@@ -128,11 +134,14 @@ type StatsRow struct {
 // NewRecorder 打开（必要时创建）输出目录并载入既有记录。
 // 载入校验行 schema（event_type == "tail"）: 指错目录时旧格式不会静默污染统计。
 // 窗口振幅日志一并载入内存（σ 本地预热数据源）。
-func NewRecorder(dir string) (*Recorder, error) {
+//
+// feeRate = taker 手续费率（决策 #35）: 实时成交落盘用它算 Fee, 载入老行（本决策
+// 之前落的实盘行没有 fee 键）用它回填——0 = 关闭计费（历史/测试用）。
+func NewRecorder(dir string, feeRate float64) (*Recorder, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("NewRecorder: 创建目录: %w", err)
 	}
-	r := &Recorder{dir: dir, pending: map[string]*Record{}}
+	r := &Recorder{dir: dir, pending: map[string]*Record{}, feeRate: feeRate}
 
 	matches, err := filepath.Glob(filepath.Join(dir, recordPrefix+"*.jsonl"))
 	if err != nil {
@@ -242,6 +251,10 @@ func (r *Recorder) loadFileLocked(path string) (int, int, error) {
 			skipped++
 			continue
 		}
+		// 老行手续费回填（决策 #35）: 本决策之前的实盘行没有 fee 键, 按限制性
+		// 启发式补算（只写内存, 见 backfillFee）。
+		backfillFee(&rec, r.feeRate)
+		recomputePnL(&rec) // 补过 fee 的行同步内存 P&L（磁盘回写留给下一次重写）
 		r.recs = append(r.recs, &rec)
 		// 崩溃恢复: pending 收**所有未结算的 ok 行**（isSettlable = 未被官方 outcome 定案、
 		// 且不是未定稿的 submitting/resting）——2026-09-24 起含被闸/0 成交行:
@@ -375,6 +388,15 @@ func (r *Recorder) CompleteExecution(conditionID string, res flip.ExecResult) (*
 		rec.Shares = res.Shares // 目标股数 → 实际成交股数
 		rec.Cost = res.Cost
 	}
+	// 手续费（决策 #35）: POST 响应带成交量的那部分 = 即时撮合 = **taker** ⇒ 当场
+	// 计费。**放在状态分支之外**是有意的——resting 行（即时部分成交、余量挂单在簿）
+	// 不写 Shares/Cost, 但那部分 taker 成交**已经发生**、费用当场产生（余量后来
+	// 被吃到的部分是 maker、恒 0 费, 由 CompleteRestingFill 补, 见那里的注释）。
+	if res.TakerShares > 0 {
+		rec.TakerShares += res.TakerShares
+		rec.TakerPrice = res.TakerPrice // 同一行只回填一次（状态机守卫）, 直接赋值
+		rec.Fee += Fee(r.feeRate, res.TakerShares, res.TakerPrice)
+	}
 	recomputePnL(rec) // 已结算过的行（先结算后定稿的竞态）按真实成交补算 P&L
 	filled := rec.IsFilled()
 	if isSettlable(rec) {
@@ -422,6 +444,10 @@ func (r *Recorder) CompleteRestingFill(f flip.FillFinal) (*Record, error) {
 		rec.Cost = f.Cost
 		rec.FillPrice = f.Cost / f.Shares
 	}
+	// ⚠️ **不碰** TakerShares/TakerPrice/Fee（决策 #35）: 这里定稿的是挂单在簿期间
+	// 与 POST 即时成交的**累计**成交量, 而其中只有 POST 即时那部分是 taker——它已在
+	// CompleteExecution 记过费; 余量在簿被吃到的部分是 maker、恒 0 费。若拿 f.Shares
+	// 计费 = 对同一批股重复收费, 还会把 maker 成交错记成 taker。
 	recomputePnL(rec) // 已结算过的行（先结算后定稿的竞态）按真实成交补算 P&L
 	if isSettlable(rec) {
 		r.pending[f.ConditionID] = rec
@@ -468,6 +494,13 @@ func (r *Recorder) RecordExit(conditionID string, shares, price float64, rem int
 	rec.ExitShares = total
 	if rec.ExitRem == 0 {
 		rec.ExitRem, rec.ExitTs = rem, ts
+	}
+	// 手续费（决策 #35）: 止损卖出是 FAK 立即成交 = **恒 taker** ⇒ 按本笔（钳制后的
+	// 股数 × 实际成交价）计费。⚠️ paper 行（ExecStatus 空）走的是模拟卖出, 没有真实
+	// 订单 ⇒ 不计费——与买入侧 CompleteExecution 只在 live 分支被调用同一条口径。
+	if rec.ExecStatus != "" {
+		rec.TakerShares += shares
+		rec.Fee += Fee(r.feeRate, shares, price)
 	}
 	recomputePnL(rec) // 已结算过的行（先结算后卖出的竞态）按实际落袋补算
 	if err := r.rewriteDayLocked(rec.Date); err != nil {
@@ -561,6 +594,45 @@ func recomputePnL(rec *Record) {
 	rec.PnL = rec.ExitShares*rec.ExitPrice - cost // 止损卖出部分: 实际卖出所得
 	if *rec.Won {
 		rec.PnL += rec.RemainingShares() // 剩余股数到期兑付（每股 1U）
+	}
+	rec.PnL -= rec.Fee // taker 手续费从 P&L 里扣除（决策 #35）
+}
+
+// backfillFee 给**决策 #35 之前落的实盘行**补算手续费（只写内存, 由调用方在
+// 载入时调用一次; 磁盘随下一次结算/成交重写自然带上）。
+//
+// 老行没有 taker_shares/taker_price/fee 三个键, 且 FillTracker 定稿会覆写
+// exec_note ⇒「POST 即时成交了多少股」在磁盘上已不可精确恢复。可用的判别只剩
+// 一条**限制性启发式**（在 data/tail-live 09-24~10-02 上逐行验证过）:
+//
+//	exec_status == "filled" ∧ exec_note == "" ⇔ POST 即时全额成交 = taker
+//
+// 依据: LiveExecutor 的 filled 分支不写 note, 而任何走过 FillTracker 定稿的行都被
+// CompleteRestingFill 写入非空 note ⇒ 两边精确互斥。**代价**: resting 行（即时
+// 部分成交 + 余量挂单）的即时部分恢复不出来 ⇒ 老行费用**系统性低估**（同批样本
+// 实测低估口径 22.49U vs 全 taker 口径 27.27U, 少 ≈18%）——方向选低估不选高估,
+// 且只影响老行（新行 fee 直接随成交落盘）。
+//
+// 卖出侧可以直接反推: exit_shares/exit_price 是累计值, FAK 卖出恒 taker
+// ⇒ `fee += Fee(rate, ExitShares, ExitPrice)`。
+//
+// 幂等: 已有 fee（新格式行）或费率 ≤0 或 paper 行（ExecStatus 空, 没有真实订单）
+// 直接返回——重复载入不叠加。
+func backfillFee(rec *Record, rate float64) {
+	if rec.Fee > 0 || rate <= 0 || rec.ExecStatus == "" {
+		return
+	}
+	// 买入: 只认「即时全额 taker」这一种可恢复形态（见 doc 的启发式）。
+	if rec.ExecStatus == flip.ExecStatusFilled && rec.ExecNote == "" &&
+		rec.TakerShares == 0 && rec.FillPrice > 0 && rec.Shares > 0 {
+		rec.TakerShares = rec.Shares
+		rec.TakerPrice = rec.FillPrice
+		rec.Fee += Fee(rate, rec.TakerShares, rec.TakerPrice)
+	}
+	// 卖出: 累计值直接反推（恒 taker）。
+	if rec.ExitShares > 0 && rec.ExitPrice > 0 {
+		rec.TakerShares += rec.ExitShares
+		rec.Fee += Fee(rate, rec.ExitShares, rec.ExitPrice)
 	}
 }
 

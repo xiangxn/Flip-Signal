@@ -28,7 +28,7 @@ func okSnap(ts int64, side string) *Observation {
 func newTestRecorder(t *testing.T) (*Recorder, string) {
 	t.Helper()
 	dir := t.TempDir()
-	r, err := NewRecorder(dir)
+	r, err := NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -198,7 +198,7 @@ func TestRecorderSettleSrcPersisted(t *testing.T) {
 
 	// 重启（磁盘载入）不得丢字段
 	r.Close()
-	r2, err := NewRecorder(dir)
+	r2, err := NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -263,7 +263,7 @@ func TestRecorderReload(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	r2, err := NewRecorder(dir)
+	r2, err := NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -328,7 +328,7 @@ func TestRecorderPrefixIsolation(t *testing.T) {
 		readLines(t, filepath.Join(dir, "tailwin_"+date+".jsonl"))[0]+"\n"+extra), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	r2, err := NewRecorder(dir)
+	r2, err := NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -808,7 +808,7 @@ func TestRecorderLegacyScanRowIsolation(t *testing.T) {
 	}
 
 	// 4: 重启载入——已结算的不再进 pending。
-	r2, err := NewRecorder(dir)
+	r2, err := NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -822,7 +822,7 @@ func TestRecorderLegacyScanRowIsolation(t *testing.T) {
 
 	// 未结算的 scan 行: 重开一个目录单独验证。
 	dir3 := t.TempDir()
-	r3, err := NewRecorder(dir3)
+	r3, err := NewRecorder(dir3, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -832,7 +832,7 @@ func TestRecorderLegacyScanRowIsolation(t *testing.T) {
 		t.Fatal(err)
 	}
 	r3.Close()
-	r4, err := NewRecorder(dir3)
+	r4, err := NewRecorder(dir3, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

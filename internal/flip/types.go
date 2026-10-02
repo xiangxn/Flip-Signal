@@ -137,6 +137,23 @@ type ExecResult struct {
 	Shares    float64 // 实际成交股数（0 = 未成交）
 	Cost      float64 // 实际花费 USDC（0 = 未成交/拒绝）
 	Note      string  // 拒绝原因; ExecNoteUnknown 开头 = POST 结果不明
+
+	// TakerShares / TakerPrice 是这次 POST **即时撮合**的那部分成交（手续费口径,
+	// 2026-10-03 决策 #35）: CLOB 只有 taker 付手续费, 而 GTC 挂单里「POST 响应
+	// 就带着成交量」的那部分 = 穿过价差立即成交 = **taker**; 此后挂在簿上被对手方
+	// 吃到的部分是 maker、恒 0 费。故计费只认这一对字段（fee = C×rate×p×(1−p),
+	// 见 internal/tail.Fee）。
+	//
+	// ⚠️ 只在「响应确实带成交量」的分支里填（全额/部分即时成交）; 解析异常
+	// （unknown）与 0 成交挂单留 0 = 不计费——宁可少记不可错记, 与 sanity
+	// 校验「宁缺勿错」同一条纪律。
+	//
+	// ⚠️ 落盘后**不可从 JSONL 反推全部 taker 量**: FillTracker 定稿会覆写
+	// ExecNote（即时成交的 Note 被终态说明盖掉）, 老行的即时部分只能靠
+	// `filled ∧ exec_note == ""` 识别（见 Recorder.backfillFee）。新行起 Fee 直接
+	// 随 CompleteExecution 落盘, 不再依赖这条启发式。
+	TakerShares float64 // 即时（taker）成交股数
+	TakerPrice  float64 // 即时成交均价 = 即时 cost / 即时 shares
 }
 
 // FillFinal 是一笔 GTC 挂单的**终态成交**（trading.FillTracker 在闭市前查询

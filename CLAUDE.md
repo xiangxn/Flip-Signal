@@ -72,10 +72,10 @@
   再往前（决策 #26 之后）为 T=150 1208/94.04%/+15.02U、T=60 577/99.13%/+16.15U、
   监听 348/97.99%/+3.92U ⇒ 合计 **n=2133 / 96.06% / +35.09U**（行 6412）——三次 Δ 见
   决策 #29 / #32 / #33（⚠️ #33 的 Δ 是**显著为负**的 −2.26U，见其条目）。
-- ⚠️ **11 个配置键，BTC 上一律不可调**（`t150_rem 150` / `t60_rem 60` / `price_min 0.80` /
+- ⚠️ **12 个配置键，BTC 上一律不可调**（`t150_rem 150` / `t60_rem 60` / `price_min 0.80` /
   `dev_min_usd 63` / `sigma_min_usd 40` / `stake 2` / `max_book_lat_ms 300` /
   `walk_min_usd 43` / `floor_min_price 0.83` / `stoploss_enabled true` /
-  `stoploss_bid 0.30`）——配置键的意义是「能读能对账」不是「该调」；
+  `stoploss_bid 0.30` / `fee_rate 0.07`）——配置键的意义是「能读能对账」不是「该调」；
   `40` 在 2000 次重采样里一次都没成为最优。🆕 `walk_min_usd`（决策 #29）与
   `floor_min_price`（决策 #32/#33，原名 `listen_min_price`）**存在理由与其他键不同一档**：
   它们是**给其他标的各带一份自己的标定值**用的（43 / 0.83 是 BTC 上的标定量，决策 #25）——
@@ -83,9 +83,14 @@
   `internal/tail.PriceLeg` 与 `FloorLeg`）。🆕 止损两键（决策 #34）里
   `stoploss_enabled` 是**真正的开关**（用户要求「默认开启」，关掉 = 退回持有到期）；
   `stoploss_bid` 是用户决定值（实盘扫描 0.15~0.50 全正、0.35 更高也不选极值）。
+  🆕 `fee_rate`（决策 #35）又不同一档：它是**交易成本的事实值**（官方 Crypto 档
+  0.07 / 市场 `feeSchedule` 实测），**0 = 关闭计费**是给调试用的，不是调参旋钮。
 - **状态**：🟡 纸面登记中。`data/tail-live/` 09-24~10-01 已是**真实 GTC 挂单成交样本**
   （stake 10U，550 笔成交；其中 **≤0.83 的 34 笔 22 赢 12 输 −68.76U**、>0.83 的 516 笔
   +98.87U——整族净剩约 +30.1U。这个廉价口袋是决策 #32/#33 的全部实盘依据）。
+  🆕 **上面的 −68.76U / +98.87U 是未扣费口径**：多了一笔**手续费**（决策 #35，2026-10-03）——
+  按官方公式核算 09-24~10-02 九天 taker 费 **22.49U（可恢复下界）~27.27U（全 taker 上界）**，
+  扣费后整族 **+68.37U → +45.89U**（费吃掉 33%）⇒ 此后 P&L 一律是**已扣费**口径。
   🆕 **持仓止损已落引擎并上 live（决策 #34，2026-10-03）**：持仓侧 bid 严格小于 0.30 即按
   快照 bid FAK 卖出——实盘回看（09-25~10-02 八天, 10U/注, 468 笔可评估）25 次触发、
   23/23 输单全中 + 2 笔误杀、Δ **+45.51U** [+22.62,+70.44]；同一形态 14 天回测 ≈ 中性
@@ -224,17 +229,18 @@ FlipSignal/
 │   │   └── settle_test.go            # 判定词表钉在 flip 常量上 + 三层时点/次数/幂等/剪枝
 │   ├── tail/                         # 扫尾盘 ⑤ 引擎核心层（零外部依赖; 只复用 flip 的原语, 反向不依赖）
 │   │   ├── config.go                 # Config + DefaultConfig()（11 个键; BTC 上全部不可调）
-│   │   ├── types.go                  # Observation/Rules/Record/WindowStats + stage/kind/闸原因常量 + 状态机 + IsFilled/HasPosition + exit_* 卖出字段
+│   │   ├── types.go                  # Observation/Rules/Record/WindowStats + stage/kind/闸原因常量 + 状态机 + IsFilled/HasPosition + exit_* 卖出字段 + fee/taker_* 手续费字段（决策 #35）
 │   │   ├── decide.go                 # 纯函数 HotBook（ask 优先/bid 兜底）/ SgnFor / DevUSD / SigmaUSD / EvalRules + 三条段相关腿（PriceLeg 比较符 / WalkLeg / FloorLeg）+ Rule1()…Rule5()
 │   │   ├── engine.go                 # 三段递进判定链（Watching→Await60→Listening→Done）+ Resume 崩溃续跑, ProcessTick 返回 0~1 行
-│   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* / tailhold_* 四前缀（独立于 flip 三前缀, 决策 #9 红线）+ recomputePnL（含 exit_* 卖出落袋）+ RecordExit
+│   │   ├── recorder.go               # tail_* / tailwin_* / tailstats_* / tailhold_* 四前缀（独立于 flip 三前缀, 决策 #9 红线）+ recomputePnL（含 exit_* 卖出落袋 − fee）+ RecordExit + backfillFee 老行回填（决策 #35）
 │   │   │                             # ⚠️ 另有第五路输出 events_*（cmd/tail/events.go 的采集器, 走 internal/collect, 与本层无关）
 │   │   ├── hold.go                   # 持仓监察（纯函数 HoldWatchRow + HoldRow）: 信号成交后逐 tick 记持仓侧盘口, **只记录不判定**
 │   │   ├── stop.go                   # 持仓止损纯函数（决策 #34）: StopTrigger（bid 严格<0.30, 0 不触发）/ StopArmed（rem>0 ∧ 延迟闸, 不要 spot）/ HoldBidOf / MinSellShares=5
 │   │   ├── exec_state.go             # 风控闸 + 两模式两阶段下单编排（flip.ExecState 的精简镜像; HandleDecision 单入口）+ StopSell 止损卖出编排（FAK 三终局）
 │   │   ├── snapshot.go               # LiveSnapshot/LiveExec + Snapshotter 接口（dashboard 只读消费）
 │   │   ├── curve.go                  # 曲线派生量的**唯一公式来源**: RequiredPrice/ExtrapPrice/TieAt + WindowSec/TwapLookbackSeconds（实况与「点行看曲线」的重建共用, 决策 #31）
-│   │   └── *_test.go                 # decide（含 HotBook/PriceLeg）/engine/recorder/exec_state/hold/curve/parity（opt-in, 钉 23 的 oracle）
+│   │   ├── fee.go                    # 手续费纯函数 Fee（决策 #35; Polymarket 官方公式 C×rate×p×(1−p), 5 位小数）
+│   │   └── *_test.go                 # decide（含 HotBook/PriceLeg）/engine/recorder/exec_state/hold/curve/fee/parity（opt-in, 钉 23 的 oracle）
 │   └── trading/                      # SDK 依赖层（单向依赖 flip/feed, 由 cmd/flip 与 cmd/tail 各自构造注入）
 │       ├── live_executor.go          # LiveExecutor 真实 GTC 限价挂单（实现 flip.Executor, 唯一 POST 点）
 │       ├── live_sell.go              # LiveSellExecutor 止损 FAK 卖单（实现 flip.SellExecutor, 决策 #34; 429/无对价→unfilled 可重试）
@@ -281,6 +287,7 @@ FlipSignal/
 | `tail_floor_from_t60_2026-10-01.md` | **地板下延到 T=60 段**（决策 #33）：⚠️ 回测显著变差（Δ −2.26U [−4.73,−0.29]）、实盘依据（三段 ≤0.83 口袋 34 笔 −68.76U vs 516 笔 +98.87U）、改道税细账、配置键改名 `floor_min_price`、**前向判据**与离线 join |
 | `tail_checkpoint_t100_2026-10-02.md` | **T=100 追加判定点全否**（用户 2026-10-02 提案）：新基线复测 Δ **−21.18U [−38.16,−6.79] 显著为负**、改道 349 笔 +2.82U vs 新增 43 笔 −24.00U、位置曲线 T70~135 八格全负、**价格腿 0.80~0.99 四十格无一转正**（波峰假设被否：更便宜 167/相同 173/更贵仅 52；亏损集中 0.85~0.95 中价带）⇒ 不落引擎，链语义与旧曲线族可比 |
 | `tail_stoploss_live_2026-10-03.md` | **持仓止损落引擎（决策 #34）**：实盘 8 天 25 触发、23/23 输单全中 + 2 误杀、Δ **+45.51U** [+22.62,+70.44]、25/25 触发秒有对手方（bid5 min 33 股 > 最大持仓 12.5 股）；回测同形态 ≈ 中性（+0.83U，触发人群胜率实盘 8.0% vs 回测 23.2% = 挂单成交逆向选择）；纯价格腿 vs dev 腿（9/23）对照；**🔴 CTF ERC1155 卖出授权未验证**；五条前向判据 |
+| `tail_fee_2026-10-03.md` | **手续费落引擎（决策 #35）**：官方公式 `fee=C×rate×p×(1−p)` 引文与 100 股表、taker/maker 归属（买入即时撮合 + 止损卖出）、Fee 成交时定死 + `recomputePnL` 扣除（熔断自动跟随）、老行回填启发式与实测低估 17.5%（22.49U 下界 vs 27.27U 上界）、实盘费占已实现 P&L 的 33%、Dashboard「待结算」卡 → fee 卡 |
 | `Price_required.md` | 「外推临界价」（曲线第 5 条）的**用户口径与推导**：假设现货保持当前速度，进入最后 60s 时得站上哪儿 |
 
 ### 脚本地图（`python/v4/`）
@@ -308,6 +315,7 @@ FlipSignal/
 | `42_tail_floor_from_t60.py` | **地板下延到 T=60 段的落地依据**（§0 三把 pin 自检 = C43/#32/#33 / §1 廉价口袋 / §2 阈值扫描与负 Δ 警告 / §3 细账：整窗死亡 × 改道税 / §4 实盘对照 09-24~10-01 / §5 前向判据）——`docs/tail_floor_from_t60_2026-10-01.md`；⚠️ 41 号脚本的链**冻结在「只拦监听段」的历史形态**，现行口径看 42 号 |
 | `43_tail_checkpoint_t100.py` | **T=100 追加判定点否证**（§0 三把 pin 自检 + `chain(cks=())` 与 #33 链逐位一致 + 丢失信号 0 / §1~§3 主体与分解 / §4 来路（walk_low 回收 −1.17U）/ §5 敏感性与位置曲线 / §6 价格腿扫描 0.80~0.99 × `>`/`>=` 40 格 + 波峰检验 + 分桶）——`docs/tail_checkpoint_t100_2026-10-02.md`；链语义沿用 31 号（每个检查点消费上一个被消费 tick 之后首个 `rem ≤ 阈值` 的 tick） |
 | `44_tail_stoploss_live.py` | **止损实盘验证**（决策 #34 落地依据；`tail_*.jsonl` × `tailhold_*.jsonl` join）：§0 基线自检（644/468/+15.67U）/ §1 纯价格腿 X=0.30（25 触发、23/23、Δ +45.51U、日级配对 `boot_delta` n=2000 seed=44）/ §2 阈值扫描 0.15~0.50 / §3 可成交性（bid5）/ §4 出场价与 rem / §5 dev 腿对照（9/23、出场 0.101）——`docs/tail_stoploss_live_2026-10-03.md`；回测对照用 25 号（`sim(sigs, p_max=0.30)` = +0.83U ≈ 中性） |
+| `45_tail_fee_live.py` | **手续费实盘核算**（决策 #35 的复核脚本，纯标准库）：自检（官方 100 股表 8 格 + 对称性 + 量子舍入）→ 逐日表（全额成交 / 挂单定稿 / 卖出 行数 + 买费 / 卖费 / 合计 / 全 taker 上界）→ 扣费前后 P&L 与占比 → 低估幅度；与 Go 的 `backfillFee` 同一启发式（22.48591U 下界 vs 27.27035U 上界，低估 17.5%） |
 
 ---
 
@@ -1287,6 +1295,49 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
       ④ 与已否家族（#24 dev 腿 / #39 下穿停留 / 速度投影族）不冲突——那些否的是
       「找更好的条件」，本条是用户基线条件的实盘验证，条件一字未动。
     - ✅ **flip 侧不动**（flip 无持仓监察、无对应出场语义；要动单独立项）。
+35. **手续费按 Polymarket 官方公式落账并显示（2026-10-03 用户需求）**：「严格按 Polymarket
+    的 fee 计算公式**根据订单数据**来计算真实 fee 并显示在 dashboard 中，原顶部小卡
+    『待结算』不要了，改为 fee。并且 fee 要从 P&L 中扣除」。依据
+    `docs/tail_fee_2026-10-03.md`，复核脚本 `python/v4/45_tail_fee_live.py`。
+    - **公式（官方文档 docs.polymarket.com/trading/fees.md，2026-10-03 核对）**：
+      `fee = C × feeRate × p × (1 − p)`（C = 股数, p = 成交价）；**只有 taker 付费、
+      maker 恒 0**（官方原话「Makers are never charged fees.」）；Crypto 档
+      **Taker 0.07 / Maker 0 / rebate 20%**——本市场 gamma `feeSchedule` 实测
+      `{rate:0.07, takerOnly:true, rebateRate:0.2}` 逐项一致；舍到 **5 位小数**
+      （最小 0.00001，更小舍 0）、p↔1−p 对称。官方 100 股表 8 格落成单测
+      （`fee_test.go:TestFeeOfficialTable`）。
+    - **归属 = 每笔成交的吃单身份**（不是按订单）：本族只有两类成交计费——① 买入里
+      **POST 响应就带着的那部分成交量**（穿过价差即时撮合 = taker）；② **止损卖出**
+      （FAK 立即成交 = 恒 taker）。此后挂在簿上被吃到的部分是 maker、**0 费**。
+      paper 行没有真实订单 ⇒ 恒 0。`flip.ExecResult` 新增 `TakerShares/TakerPrice`，
+      由 `live_executor.parseFill` 从 POST 响应填（0 成交挂单与 unknown 分支**不填**——
+      宁缺勿错）；归属落点只此一处。
+    - **记账 = 成交那一刻定死**：`Fee` 在成交落盘时求出写进行里；`recomputePnL`
+      **只读不重算**（费率是可配置项，重算会因改配置而整体改写历史）⇒
+      `pnl = 卖出所得 + 剩余兑付 − cost − **fee**`。**日亏熔断/最大回撤/逐日与累计
+      P&L 全自动跟随**（都读 `rec.PnL`，零新增接线）。落盘三键
+      `taker_shares` / `taker_price` / `fee`（全 omitempty ⇒ 老行天然无键）。
+    - **老行回填（决策 #35 之前的实盘行）**：只认「`filled` ∧ `exec_note` 空」= 即时
+      全额成交这一种可恢复形态；挂单定稿行（note 非空）的即时部分被 FillTracker 覆写
+      **不可恢复 ⇒ 按 0 计**。**只写内存、不回写磁盘、幂等**。实测（09-24~10-02）：
+      可恢复 **22.48591U**（570 行）vs 全 taker 上界 **27.27035U** ⇒ **低估 ≈17.5%**
+      （方向安全：宁可少记，不可凭空扣费）。
+    - **实盘量级**：09-24~10-02 未扣费 P&L **+68.37U** ⇒ 扣费后 **+45.89U**
+      （费占已实现 |P&L| 的 **33%**；上界口径则剩 +41.10U）——**费不是零头**。
+      止损卖出费暂时为 0（#34 当天才上线，样本里还没有卖出成交）。
+    - **配置**：`tail.fee_rate`（默认 **0.07** = 官方 Crypto 档；**0 = 关闭计费**，
+      改它只影响此后成交与老行回填，**不重算历史**）。校验 `[0,1)`。
+      `v4.config.yaml` 已同步；配置表新增该键（BTC 上一律不可调，理由同上——市场
+      `feeSchedule` 是什么就是什么）。
+    - **Dashboard**：顶部小卡「待结算」→「**fee**」（累计 taker 费；`/api/state` 新增
+      `fee_total`/`fee_taker_fills`；tooltip 给公式、费率、taker 成交行数并明说已从
+      P&L 扣除）；信号表 P&L 列悬浮加注行内 `fee`/`taker_shares`；`/api/config` 下发
+      `fee_rate`。逐日弹窗自有的「待结算」列保留不动。
+    - **parity 免疫**：判定链一字未动、回填只在载入内存时发生——pin 不变
+      （6704/2074/3640/3/250/24/97.830280%/+70.314372U）。
+    - ⚠️ **未做/边界**：maker rebate（20%）不在账（按日分发、不在成交行）；
+      历史行不回溯改写；**flip 侧不动**（仍纸面，上 live 时复用同套、本次有意不预埋）；
+      CLOB 实扣金额与本地计算的对账要等第一笔真单（`minimum_order_size=5 股` 阻塞仍在）。
 
 ---
 
@@ -1348,12 +1399,13 @@ go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
 | `tail.floor_min_price` | 0.83 | **价格地板**：**T=60 段与监听段**的有效价**严格大于**此值才成交（决策 #32 + #33；原名 `listen_min_price`）。⚠️ **BTC 标定量**，同上一行同理 |
 | `tail.stoploss_enabled` | `true` | **持仓止损总开关**（决策 #34，2026-10-03 用户要求默认开启）：持仓侧 bid 严格小于 `stoploss_bid` 即按快照 bid FAK 卖出；关掉 = 退回持有到期 |
 | `tail.stoploss_bid` | 0.30 | 止损触发价（决策 #34，用户决定值）：严格小于才触发；`bid == 0` 不算触发（整侧撤空 = 卖不掉）。实盘依据见 `docs/tail_stoploss_live_2026-10-03.md` |
+| `tail.fee_rate` | 0.07 | **taker 手续费率**（决策 #35）：官方公式 `fee = C×rate×p×(1−p)`、5 位小数；Crypto 档 0.07（市场 `feeSchedule` 实测一致）。**0 = 关闭计费**；改它不重算历史行（Fee 成交时定死） |
 | `tail.*`（其余 6 键）| — | 扫尾盘 6 键——⚠️ **BTC 上全部不可调**（见项目概述）|
 
 启动校验（`internal/config/validate.go`，判**最终生效值**）：三阈值必须 > 0、
 `risk.max_daily_loss` 必须 < 0、`runtime.mode ∈ {paper, live}`、`flip.stake > 0`、
-`runtime.output_dir` 非空、`tail.floor_min_price ∈ [0,1)`、`tail.stoploss_bid ∈ (0,1)`
-—— 任一不满足即启动失败；
+`runtime.output_dir` 非空、`tail.floor_min_price ∈ [0,1)`、`tail.stoploss_bid ∈ (0,1)`、
+`tail.fee_rate ∈ [0,1)` —— 任一不满足即启动失败；
 `flip.max_book_lat_ms < 100` 只告警。
 配置文件里拼错的键（`UnmarshalExact`）也是启动失败，不静默回落默认值。
 

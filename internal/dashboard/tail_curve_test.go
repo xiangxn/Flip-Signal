@@ -16,7 +16,7 @@ import (
 // newCurveState 建一个可指定 eventsDir 的 tail 载体（其余同 newTailState）。
 func newCurveState(t *testing.T, curve tail.Curve, eventsDir string) *TailState {
 	t.Helper()
-	rec, err := tail.NewRecorder(t.TempDir())
+	rec, err := tail.NewRecorder(t.TempDir(), 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}

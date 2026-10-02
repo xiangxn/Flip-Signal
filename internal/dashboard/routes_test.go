@@ -27,7 +27,7 @@ func serve(t *testing.T, mux *http.ServeMux, path string) *httptest.ResponseReco
 
 // TestTailRoutes 逐条打 tail 的路由（含静态资源与单页——本族的前端三件套是新增的）。
 func TestTailRoutes(t *testing.T) {
-	rec, err := tail.NewRecorder(t.TempDir())
+	rec, err := tail.NewRecorder(t.TempDir(), 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -95,7 +95,7 @@ func TestNoStoreHeaders(t *testing.T) {
 		t.Fatalf("NewRecorder: %v", err)
 	}
 	defer flipRec.Close()
-	tailRec, err := tail.NewRecorder(t.TempDir())
+	tailRec, err := tail.NewRecorder(t.TempDir(), 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}

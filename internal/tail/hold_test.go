@@ -161,7 +161,7 @@ func TestHoldWatchRowStopCand(t *testing.T) {
 // TestLogHoldTick 钉住落盘: 独立前缀 + kind 双保险 + 行内不带任何引擎/判定字段。
 func TestLogHoldTick(t *testing.T) {
 	dir := t.TempDir()
-	r, err := NewRecorder(dir)
+	r, err := NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -219,7 +219,7 @@ func TestLogHoldTick(t *testing.T) {
 // 看不到「没有对手方」这条关键读数（历史 14 天里它恒为 0 正是被这么构造出来的）。
 func TestLogHoldTickKeepsZeroBid(t *testing.T) {
 	dir := t.TempDir()
-	r, _ := NewRecorder(dir)
+	r, _ := NewRecorder(dir, 0)
 
 	tk := baseHoldTick()
 	tk.DownBid, tk.DownAsk = 0, 0 // 持仓侧整簿空

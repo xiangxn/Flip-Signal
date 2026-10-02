@@ -34,7 +34,7 @@ func (f fakeTailSnap) Curve() tail.Curve           { return f.curve }
 func newTailState(t *testing.T, snap tail.LiveSnapshot, limits SourceLimits) (*TailState, *tail.Recorder, string) {
 	t.Helper()
 	dir := t.TempDir()
-	rec, err := tail.NewRecorder(dir)
+	rec, err := tail.NewRecorder(dir, 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -405,7 +405,7 @@ func TestTailCurvePassthrough(t *testing.T) {
 			{Ts: start*1000 + 240000, Rem: 59, Anchor: 100000, Twap: 100003, Spot: 100020, Tie: 100017.47},
 		},
 	}
-	rec, err := tail.NewRecorder(t.TempDir())
+	rec, err := tail.NewRecorder(t.TempDir(), 0)
 	if err != nil {
 		t.Fatalf("NewRecorder: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestTailConfigKeys(t *testing.T) {
 	// 值按 interface{} 收: 本口既有数值键也有布尔键（stoploss_enabled, 决策 #34）
 	var got map[string]interface{}
 	getJSON(t, s.handleConfig, "/api/config", &got)
-	want := []string{"t150_rem", "t60_rem", "price_min", "dev_min_usd", "sigma_min_usd", "walk_min_usd", "floor_min_price", "stake", "max_book_lat_ms", "stoploss_enabled", "stoploss_bid"}
+	want := []string{"t150_rem", "t60_rem", "price_min", "dev_min_usd", "sigma_min_usd", "walk_min_usd", "floor_min_price", "stake", "max_book_lat_ms", "stoploss_enabled", "stoploss_bid", "fee_rate"}
 	for _, k := range want {
 		if _, ok := got[k]; !ok {
 			t.Fatalf("/api/config 缺键 %q（得到 %v）", k, got)
@@ -450,10 +450,75 @@ func TestTailConfigKeys(t *testing.T) {
 		num("sigma_min_usd") != cfg.SigmaMinUSD || num("walk_min_usd") != cfg.WalkMinUSD ||
 		num("floor_min_price") != cfg.FloorMinPrice ||
 		num("stoploss_bid") != cfg.StopLossBid ||
+		num("fee_rate") != cfg.FeeRate ||
 		num("stake") != cfg.Stake {
 		t.Fatalf("/api/config 取值与 DefaultConfig 不符: %v vs %+v", got, cfg)
 	}
 	if b, _ := got["stoploss_enabled"].(bool); b != cfg.StopLossEnabled {
 		t.Fatalf("/api/config stoploss_enabled = %v, 期望 %v", got["stoploss_enabled"], cfg.StopLossEnabled)
+	}
+}
+
+// ── 手续费（决策 #35）──
+
+// TestTailFeeSurfaced 手续费三处透出: /api/state 的 fee 卡汇总（金额 + 发生过 taker
+// 成交的行数）、/api/signals 行内 fee/taker_shares（前端据此在 P&L 上加注）、
+// /api/config 的 fee_rate。纸面行与被风控拦下的行不计。
+func TestTailFeeSurfaced(t *testing.T) {
+	dir := t.TempDir()
+	rec, err := tail.NewRecorder(dir, 0.07) // 费率 0.07, 与 DefaultConfig 一致
+	if err != nil {
+		t.Fatalf("NewRecorder: %v", err)
+	}
+	t.Cleanup(func() { rec.Close() })
+	s := NewTailState(rec, fakeTailSnap{}, tail.DefaultConfig(), "live", "", SourceLimits{})
+
+	ts := time.Now().UnixMilli()
+	// live 信号行: POST 即时全额 taker 成交（taker 字段由执行器回填）。
+	shares := 2 / 0.92
+	if _, err := rec.SubmitLiveObservation("0xfee", "btc-updown-5m", 1780000000, tailSignal(tail.StageT60, ts), 2); err != nil {
+		t.Fatalf("live 观测: %v", err)
+	}
+	if _, _, err := rec.CompleteExecution("0xfee", flip.ExecResult{
+		Status: flip.ExecStatusFilled, OrderID: "o1",
+		FillPrice: 0.92, Shares: shares, Cost: 2,
+		TakerShares: shares, TakerPrice: 0.92,
+	}); err != nil {
+		t.Fatalf("定稿成交: %v", err)
+	}
+	// paper 信号行: 无真实订单 ⇒ 恒不计费（费率开着也不记）。
+	if _, err := rec.RecordObservation("0xpaper", "btc-updown-5m", 1780000000, tailSignal(tail.StageT150, ts-1000), 2); err != nil {
+		t.Fatalf("paper 观测: %v", err)
+	}
+
+	// /api/state: 累计 = 那一笔的买费, taker 行数 = 1。
+	wantFee := tail.Fee(0.07, shares, 0.92)
+	var st tailStateResponse
+	getJSON(t, s.handleState, "/api/state", &st)
+	if math.Abs(st.FeeTotal-wantFee) > 1e-9 || st.FeeTakerFills != 1 {
+		t.Fatalf("fee 卡汇总 = %.6f/%d 行, 期望 %.6f/1", st.FeeTotal, st.FeeTakerFills, wantFee)
+	}
+
+	// /api/signals: live 行带 fee 与 taker 股数; paper 行为 0（omitempty ⇒ 解出零值）。
+	var sigs listResp[tailRecordResponse]
+	getJSON(t, s.handleSignals, "/api/signals?limit=1000", &sigs)
+	byCond := map[string]tailRecordResponse{}
+	for _, it := range sigs.Items {
+		byCond[it.ConditionID] = it
+	}
+	live := byCond["0xfee"]
+	if math.Abs(live.Fee-wantFee) > 1e-9 || math.Abs(live.TakerShares-shares) > 1e-9 || live.TakerPrice != 0.92 {
+		t.Fatalf("live 行 fee 字段 = %.6f/%.4f@%.4f, 期望 %.6f/%.4f@0.92",
+			live.Fee, live.TakerShares, live.TakerPrice, wantFee, shares)
+	}
+	if p := byCond["0xpaper"]; p.Fee != 0 || p.TakerShares != 0 {
+		t.Fatalf("paper 行不得带 fee: %+v", p)
+	}
+
+	// /api/config: 费率原样下发（前端 tooltip 用它展示公式）。
+	var cfg map[string]interface{}
+	getJSON(t, s.handleConfig, "/api/config", &cfg)
+	if v, _ := cfg["fee_rate"].(float64); v != 0.07 {
+		t.Fatalf("/api/config fee_rate = %v, 期望 0.07", cfg["fee_rate"])
 	}
 }

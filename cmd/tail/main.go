@@ -457,7 +457,8 @@ func main() {
 	}()
 
 	// ── 记录器（tail_ / tailwin_ / tailstats_ 三族，互不干扰）──
-	recorder, err := tail.NewRecorder(cfg.Runtime.OutputDir)
+	// feeRate = taker 手续费率（决策 #35）: 实时成交落盘与老行回填都用它。
+	recorder, err := tail.NewRecorder(cfg.Runtime.OutputDir, cfg.Tail.FeeRate)
 	if err != nil {
 		log.Fatalf("[Tail] 记录器创建失败: %v", err)
 	}

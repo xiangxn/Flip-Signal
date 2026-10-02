@@ -176,7 +176,12 @@
 
   function pnlCell(r) {
     if (!hasPosition(r) || r.won == null) return '<td class="muted">—</td>';
-    return '<td class="' + (r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '')) + '">' + fmtPnl(r.pnl) + '</td>';
+    // 手续费已扣在本行 pnl 里（决策 #35）: 有费的悬停给出被扣了多少——
+    // 数字本身不再重复扣（服务端 recomputePnL 是唯一记账点）。
+    var tip = r.fee > 0
+      ? ' title="本行 P&L 已扣 taker 手续费 ' + r.fee.toFixed(5) + 'U（taker 成交 ' + (r.taker_shares || 0).toFixed(2) + ' 股）"'
+      : '';
+    return '<td class="' + (r.pnl > 0 ? 'pos' : (r.pnl < 0 ? 'neg' : '')) + '"' + tip + '>' + fmtPnl(r.pnl) + '</td>';
   }
 
   // ── 运行状态 ──
@@ -224,7 +229,17 @@
     $('statSignal').textContent = s.signal_count;
     $('statWL').textContent = s.won_count + ' / ' + s.lost_count;
     $('statNoExec').textContent = s.noexec_count;
-    $('statPending').textContent = s.pending_count;
+    // fee 卡（决策 #35; 取代原「待结算」卡）: 累计 taker 手续费, 已扣在 P&L 里。
+    // 显示成负数（与「最大回撤」同约定——支出）; 0 时显「0.00」（不是「—」:
+    // 纸面跑着也可能真的没费, 得能区分「没有费」和「没读数」）。
+    var fee = $('statFee');
+    var feeTotal = s.fee_total || 0;
+    fee.textContent = fmtPnl(-feeTotal);
+    fee.classList.toggle('neg', feeTotal > 0);
+    var feeRate = (CFG && CFG.fee_rate != null) ? CFG.fee_rate : 0.07;
+    $('statFeeCard').title = 'taker 手续费累计 ' + fmtPnl(-feeTotal) + 'U（fee = C×' + feeRate + '×p×(1−p)，5 位小数）' +
+      '；共 ' + (s.fee_taker_fills || 0) + ' 行发生过 taker 成交（买入即时撮合 / 止损卖出）。' +
+      'maker 成交免手续费、纸面行不计。该金额已从累计与逐日 P&L 里扣除。';
     $('statWr').textContent = (s.won_count + s.lost_count) > 0 ? (s.win_rate * 100).toFixed(1) + '%' : '—';
     var pnl = $('statPnl');
     pnl.textContent = fmtPnl(s.cumulative_pnl);

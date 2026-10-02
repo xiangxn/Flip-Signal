@@ -165,6 +165,11 @@ func (t *LiveExecutor) postErr(err error, since time.Duration) *flip.ExecResult 
 //     成交判成响应异常 → 真实挂单从此无人跟踪。语义颠倒的兜底依然成立: 两字段记反
 //     时 cost/shares ≈ 1/price ≈ 5.26, 远超上界 → 不会把「花 1.9U 买 10 股」
 //     错记成「花 10U 买 1.9 股」
+//
+// 手续费归属（2026-10-03 决策 #35）: 响应里带的成交量 = POST 那一刻穿过价差撮合的
+// 部分 = **taker**（CLOB 只有 taker 收费）⇒ 两个带成交量的分支都把这一笔填进
+// TakerShares/TakerPrice 供上层计费; 此后挂单在簿被吃到的部分是 maker、恒 0 费。
+// unknown 分支（解析异常）与 0 成交挂单不填 = 不计费（宁缺勿错）。
 func parseFill(resp *gjson.Result, orderID string, reqShares, price float64) *flip.ExecResult {
 	// unknown: 响应 schema 与假设不符——可能已成交, 也可能根本没上簿。**拿到
 	// order_id 就记 resting**: success=true 时订单多半已在簿, 交 FillTracker
@@ -215,20 +220,24 @@ func parseFill(resp *gjson.Result, orderID string, reqShares, price float64) *fl
 		if shares >= reqShares-0.005 {
 			// 即时全额成交 = 终态, 无需跟踪（部分成交则相反: 余量还在簿上变得更多）
 			return &flip.ExecResult{
-				Status:    flip.ExecStatusFilled,
-				OrderID:   orderID,
-				FillPrice: cost / shares,
-				Shares:    shares,
-				Cost:      cost,
+				Status:      flip.ExecStatusFilled,
+				OrderID:     orderID,
+				FillPrice:   cost / shares,
+				Shares:      shares,
+				Cost:        cost,
+				TakerShares: shares, // 即时撮合部分 = taker（手续费口径, 决策 #35）
+				TakerPrice:  cost / shares,
 			}
 		}
 		if orderID == "" {
 			return unknown(fmt.Sprintf("部分成交但无 orderID 无法跟踪（shares=%.4f/%.4f）", shares, reqShares))
 		}
 		return &flip.ExecResult{
-			Status:  flip.ExecStatusResting,
-			OrderID: orderID,
-			Note:    fmt.Sprintf("GTC 即时成交 %.2f/%.2f 股 @%.4f, 余量挂单在簿（等 FillTracker 撤单时定稿）", shares, reqShares, cost/shares),
+			Status:      flip.ExecStatusResting,
+			OrderID:     orderID,
+			Note:        fmt.Sprintf("GTC 即时成交 %.2f/%.2f 股 @%.4f, 余量挂单在簿（等 FillTracker 撤单时定稿）", shares, reqShares, cost/shares),
+			TakerShares: shares, // 即时部分计费; 此后挂单成交的部分是 maker、0 费
+			TakerPrice:  cost / shares,
 		}
 	}
 	// 金额在但越界: 语义或刻度理解错误 → 交人工（有 order_id 时仍进跟踪, 见 unknown）

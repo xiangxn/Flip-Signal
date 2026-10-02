@@ -100,6 +100,12 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 		return nil, fmt.Errorf("tail.stoploss_bid 必须在 (0,1) 内（现值 %.3f）——≤0 止损静默归零（bid==0 口径上不算触发）, ≥1 会让任意报价都触发",
 			cfg.Tail.StopLossBid)
 	}
+	// taker 费率（决策 #35）: 0 = 关闭计费（合法）; 负值无意义; ≥1 让单笔手续费
+	// 超过 C·p·(1−p) 的理论上界（官方 Crypto 档 = 0.07）。只做结构性校验。
+	if cfg.Tail.FeeRate < 0 || cfg.Tail.FeeRate >= 1 {
+		return nil, fmt.Errorf("tail.fee_rate 必须在 [0,1) 内（现值 %.4f）——0 = 关闭计费, ≥1 超过手续费理论上界",
+			cfg.Tail.FeeRate)
+	}
 
 	return warnings, nil
 }

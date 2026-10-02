@@ -81,21 +81,29 @@ func TestParseFill(t *testing.T) {
 		wantSh   float64
 		wantCost float64
 		unknown  bool // ExecNoteUnknown 前缀（人工核对类）
+
+		// 手续费归属（决策 #35）: 响应带成交量的分支必须填 taker 对, 其余恒 0
+		// （0 成交挂单 = 还没成交; unknown = 解析存疑, 不臆造费用）。
+		wantTakerSh float64
+		wantTakerPx float64
 	}{
 		{
 			name:    "即时全额成交 1e6 基单位 → filled 终态",
 			raw:     `{"success":true,"orderID":"o1","status":"matched","takingAmount":"10520000","makingAmount":"1998800"}`,
 			orderID: "o1", wantSt: flip.ExecStatusFilled, wantSh: 10.52, wantCost: 1.9988,
+			wantTakerSh: 10.52, wantTakerPx: 1.9988 / 10.52,
 		},
 		{
 			name:    "即时部分成交 原始小数 → resting（余量在簿, 不是终态）",
 			raw:     `{"success":true,"orderID":"o2","status":"matched","takingAmount":"5","makingAmount":"0.95"}`,
 			orderID: "o2", wantSt: flip.ExecStatusResting,
+			wantTakerSh: 5, wantTakerPx: 0.95 / 5, // resting 也要记 taker（成交已发生）
 		},
 		{
 			name:    "即时部分成交 1e6 基单位 → resting（旧刻度法在此误判人工核对）",
 			raw:     `{"success":true,"orderID":"o7","status":"live","takingAmount":"5000000","makingAmount":"950000"}`,
 			orderID: "o7", wantSt: flip.ExecStatusResting,
+			wantTakerSh: 5, wantTakerPx: 0.95 / 5,
 		},
 		{
 			name:    "零成交 unmatched → resting（GTC 吃不到就挂着等, 非 FAK 的即撤）",
@@ -111,6 +119,7 @@ func TestParseFill(t *testing.T) {
 			name:    "即时成交价优于限价（价格改善）→ filled（单边上界, 原双边带在此误判人工）",
 			raw:     `{"success":true,"orderID":"o9","status":"matched","takingAmount":"10520000","makingAmount":"1900000"}`,
 			orderID: "o9", wantSt: flip.ExecStatusFilled, wantSh: 10.52, wantCost: 1.9,
+			wantTakerSh: 10.52, wantTakerPx: 1.9 / 10.52, // 计费用实际成交价, 不是限价
 		},
 		{
 			name:    "status 大写 LIVE → resting（大小写不敏感, 原字面比较会落进人工）",
@@ -149,6 +158,14 @@ func TestParseFill(t *testing.T) {
 			}
 			if res.Shares != c.wantSh || res.Cost != c.wantCost {
 				t.Fatalf("shares/cost = %v/%v, 期望 %v/%v", res.Shares, res.Cost, c.wantSh, c.wantCost)
+			}
+			// 手续费归属（决策 #35）: 成交量的分支 taker 对必须精确（同一表达式算出）,
+			// 其余分支恒 0——unknown 分支不臆造费用。
+			if res.TakerShares != c.wantTakerSh {
+				t.Fatalf("taker 股数 = %v, 期望 %v", res.TakerShares, c.wantTakerSh)
+			}
+			if res.TakerPrice != c.wantTakerPx {
+				t.Fatalf("taker 均价 = %v, 期望 %v", res.TakerPrice, c.wantTakerPx)
 			}
 			switch res.Status {
 			case flip.ExecStatusFilled, flip.ExecStatusPartial:
