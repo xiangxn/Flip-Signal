@@ -114,6 +114,7 @@ func (s *TailState) eventCurve(eventStart int64) (tail.Curve, bool, string) {
 			NoAsk:  tk.PM.NoAsk,
 		}
 		p.Extrap = tail.ExtrapPrice(anchor, p.Spot, p.Rem, s.cfg.T150Rem)
+		p.Dev, p.Walk = p.DevWalk() // 与实况路径同一个公式（决策 #31 的一份公式两处调用）
 		pts = append(pts, p)
 	}
 	// 结算线要**本点之前**的序列（tail.TieAt 的契约），故逐点推进: 先算 Tie 再往后走,

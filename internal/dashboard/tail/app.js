@@ -73,6 +73,11 @@
     return (v > 0 ? '+' : '') + v.toFixed(2);
   }
 
+  // 美元读数或「—」: **0 = 读不出来**（该秒没有盘口 / 没有锚 / 缺输入, 见 tail.CurvePoint.DevWalk）
+  // ——与信号表 dev 列同一个约定（那边也是 `r.dev ? … : '—'`）。⚠️ 代价是恰好等于 0 的读数
+  // 也显「—」: 测度上可忽略, 且与全站一致, 比每个派生量都带一个「有没有值」的布尔干净。
+  function usdOrDash(v) { return v ? fmtUsd(v) + ' $' : '—'; }
+
   function esc(s) {
     if (s == null) return '';
     return String(s).replace(/[&<>"']/g, function (c) {
@@ -407,6 +412,10 @@
   // 给出的是同一个量程（步长取整把它们吸到了一起）, 取中段最不易被某一次取整甩出去。
   // 调大 = 临界价在画上留得更久、三线更挤; 调小 = 反过来。
   var TIE_ROOM = 0.5;
+  // dev / walk（悬停读数行里那两个策略派生量）的悬浮说明。两者都是**美元**差值, 符号按
+  // 该秒热门侧定向 —— 与三段链判的是同一对量（dev 判 dev ≥ 63, walk 判 T=150 段的 ≥ 43）。
+  var DEV_HINT = 'dev = 符号·(现货 − 锚)（美元），符号按该秒热门侧取: UP 侧为 +1、DOWN 侧为 −1。三段链的 dev ≥ 63 美元判的就是它';
+  var WALK_HINT = 'walk = 符号·(TWAP − 锚)（美元），即结算线已经写进去的那部分位移（dev = 缺口 + walk）。T=150 段入场闸的 walk ≥ 43 美元判的就是它';
 
   function seriesColors() {
     if (!COLORS) {
@@ -459,6 +468,21 @@
     return head +
       ' <span class="bit">UP ' + q(p.yes_bid) + ' / ' + q(p.yes_ask) + '</span>' +
       ' <span class="bit">DOWN ' + q(p.no_bid) + ' / ' + q(p.no_ask) + '</span>';
+  }
+
+  // devWalkBits 是悬停读数行里 dev / walk 这两项（**策略派生量**, 单位美元）。
+  //
+  // 符号由**服务端**按该秒热门侧定（tail.CurvePoint.DevWalk）, 前端只显示——不在 JS 里
+  // 再算一遍: 定号的规则（有效价 ask 优先 / 平局取 yes）就是引擎判定用的那一套, 复制一份
+  // 到前端迟早会漂。⚠️ 因此市场若在窗内翻边, 这两个读数会跟着**换号**——那是当时看到的量,
+  // 不是事后按最终赢家重算的。
+  //
+  // 只在**光标在图上**时才渲染（调用点在 drawChart 的悬停支里）: 它们不是曲线上的线, 没悬停
+  // 时这一行是操作提示, 不该常驻两个数字。
+  function devWalkBits(p) {
+    if (!p) return '';
+    return '<span class="bit" title="' + esc(DEV_HINT) + '">dev ' + usdOrDash(p.dev) + '</span> ' +
+      '<span class="bit" title="' + esc(WALK_HINT) + '">walk ' + usdOrDash(p.walk) + '</span>';
   }
 
   // lastBooked 是没悬停时的默认点: 往前找**最后一个有报价**的采样点, 一个都没有才退回
@@ -684,17 +708,19 @@
         ctx.restore();
       });
       // 每项包一个 .bit（nowrap: 「现货」不能和它后面那个数分家）: 窄屏放不下时在
-      // **项与项之间**折行——5 项合起来在手机上必然两行。
+      // **项与项之间**折行——加上 dev / walk 共 7 项, 手机上必然两三行。
       // ⚠️ join 的分隔符必须是**一个空格**, 不能是空串: .bit 是 nowrap 的 inline,
       // 相邻两个之间没有空白就**没有断行机会**, 整行会横着溢出视口（实测 597px）。
       // 视觉上的「 · 」分隔由 CSS 的 .bit::before 加, 它跟着后一项走, 不会留在行尾。
+      // dev / walk 排在 t= 之后、五条序列之前: 它们是这一秒的**结论**（策略判的就是这两个
+      // 美元量）, 序列值是它的原料; 两项都无色块——它们不是曲线上的线。
       var bits = SERIES.map(function (s) {
         var v = pts[ch.hover][s.key];
         return '<span class="bit"><i class="sw ' + s.key + '"></i>' + s.cn + ' ' +
           (v > 0 ? v.toFixed(2) : '—') + '</span>';
       });
       ro.innerHTML = '<span class="bit"><b>t=' + Math.round(secs[ch.hover]) + 's</b></span> ' +
-        bits.join(' ');
+        devWalkBits(pts[ch.hover]) + ' ' + bits.join(' ');
     } else {
       ro.textContent = '窗口内秒 0 → ' + winSec + '（0 = 边界）· 点按曲线查看某秒读数';
     }

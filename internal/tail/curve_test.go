@@ -197,3 +197,57 @@ func TestTieAtExcludesCurrentPoint(t *testing.T) {
 		t.Fatalf("本点被算两次却与正确值相同（%v）: 这条用例的前提没了, 换一组能区分的数", wrong)
 	}
 }
+
+// TestDevWalk 钉住悬停读数行那两个派生量的口径: **符号取该秒热门侧**（与引擎判定同源,
+// 所以窗内翻边时读数跟着换号）, 以及三个「读不出来 ⇒ 0」的边界。
+//
+// 顺带钉住有效价的算法: 热门侧由 `ask > 0 ? ask : bid` 定（决策 #21 的空侧兜底）——
+// 若哪天有人把这里改成「只看 ask」, 尾盘那些卖单被整侧撤空的读法会先碎在这里。
+func TestDevWalk(t *testing.T) {
+	// 基准点: 锚 100000 / TWAP 100040 / 现货 100060
+	base := CurvePoint{Anchor: 100000, Twap: 100040, Spot: 100060}
+	// 热门侧 = UP（0.94/0.95 > 0.05/0.06）
+	upHot := base
+	upHot.YesBid, upHot.YesAsk, upHot.NoBid, upHot.NoAsk = 0.94, 0.95, 0.05, 0.06
+	// 热门侧 = DOWN（镜像同一本书）
+	downHot := base
+	downHot.YesBid, downHot.YesAsk, downHot.NoBid, downHot.NoAsk = 0.05, 0.06, 0.94, 0.95
+	// UP 侧 ask 被整侧撤空, 只剩 bid 0.97 ⇒ 仍是热门侧（有效价 ask 优先, 没有才用 bid）
+	bidOnly := base
+	bidOnly.YesBid, bidOnly.YesAsk, bidOnly.NoBid, bidOnly.NoAsk = 0.97, 0, 0.02, 0.03
+
+	noBook := base // 四档全空（窗首首份快照未到 / 采集行的收尾补采 tick）
+	noAnchor := upHot
+	noAnchor.Anchor = 0 // 实况里取锚通道命中前的 ~2s
+	noSpot := upHot
+	noSpot.Spot = 0 // 现货超龄
+	noTwap := upHot
+	noTwap.Twap = 0 // 尚无 TWAP 推送
+
+	cases := []struct {
+		name              string
+		p                 CurvePoint
+		wantDev, wantWalk float64
+	}{
+		{"热门侧 = UP ⇒ 两个都是正的", upHot, 60, 40},
+		{"热门侧 = DOWN ⇒ 符号整个翻过来", downHot, -60, -40},
+		{"UP 侧只剩 bid 也照样是热门侧", bidOnly, 60, 40},
+		{"四档全空 ⇒ 两个都读不出来（不硬取 yes 造一个符号）", noBook, 0, 0},
+		{"没锚 ⇒ 没有基准, 两个都读不出来", noAnchor, 0, 0},
+		{"缺现货 ⇒ **只** dev 读不出来, 结算线的位移照算", noSpot, 0, 40},
+		{"缺 TWAP ⇒ **只** walk 读不出来, 现货的位移照算", noTwap, 60, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			dev, walk := c.p.DevWalk()
+			if dev != c.wantDev || walk != c.wantWalk {
+				t.Fatalf("DevWalk() = (%v, %v), 期望 (%v, %v)", dev, walk, c.wantDev, c.wantWalk)
+			}
+		})
+	}
+
+	// 恒等式（曲线图上读出来的两个数必须自洽）: dev − walk = 缺口 basis = sgn·(spot − twap)
+	if dev, walk := upHot.DevWalk(); dev-walk != 20 {
+		t.Fatalf("dev − walk = %v, 期望 20（= 现货 100060 − TWAP 100040）", dev-walk)
+	}
+}

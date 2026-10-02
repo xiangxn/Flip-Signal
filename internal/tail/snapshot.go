@@ -90,6 +90,9 @@ type LiveSnapshot struct {
 //     才刚好等于 anchor（用户口径, 推导见 docs/Price_required.md 与 internal/tail/curve.go）。
 //     与 Tie 合起来拼满整窗、假设正好相反（运动继续 vs 运动停住）; 它恒是 Spot 与 anchor
 //     的凸组合 ⇒ 必然落在实测线中间, 不像 Tie 那样需要量程照顾。
+//   - Dev/Walk = 该秒的**策略派生量**（美元, 符号按该秒热门侧定向; 0 = 读不出来）——
+//     图上**不画成线**（它们是美元差值, 塞进价格量程会是一堆贴地的小线头）, 只喂悬停
+//     读数行。口径与三个「返 0」的边界见 CurvePoint.DevWalk。
 type CurvePoint struct {
 	Ts     int64   `json:"ts"`  // 采样时刻（unix 毫秒）
 	Rem    int     `json:"rem"` // 窗口剩余秒（ts 缺失时的兜底横坐标）
@@ -107,6 +110,10 @@ type CurvePoint struct {
 	NoAsk  float64 `json:"no_ask"`
 	Tie    float64 `json:"tie"`
 	Extrap float64 `json:"extrap"`
+	// Dev / Walk = 该秒热门侧方向上的两个美元派生量（悬停读数行; 0 = 读不出来 ⇒ 前端
+	// 显「—」——与信号表 dev 列同一个约定）。公式与符号来源见 DevWalk。
+	Dev  float64 `json:"dev"`
+	Walk float64 `json:"walk"`
 }
 
 // Curve 是 /api/curve 的响应体: 当前窗口的逐 tick 采样序列（前端画三线同轴曲线）。

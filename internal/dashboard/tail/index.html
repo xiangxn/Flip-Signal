@@ -98,6 +98,10 @@
           <span class="curve-legend" id="curveLegend"></span>
         </div>
         <div class="curve-wrap"><canvas id="curveCanvas">本窗曲线</canvas></div>
+        <!-- 悬停读数行（**光标在图上才有**）: 那一秒的 t / dev / walk + 五条序列读数。
+             dev / walk 是**策略派生量**（美元, 符号按该秒热门侧定向; 服务端算, 见
+             tail.CurvePoint.DevWalk）——它们不画成线（美元差值塞进价格量程是一堆贴地的
+             小线头）, 所以只在悬停时以数字出现; 没悬停时这行是操作提示。 -->
         <div class="curve-readout" id="curveReadout">窗口内秒 0 → 300（0 = 边界）</div>
         <!-- 盘口读数行（PM 最优价, 不是曲线上的线）: 光标停在哪一秒就看那一秒的
              UP / DOWN 两侧 bid/ask; 没悬停时给最后一个采样点。0 显「—」= 该侧无报价 -->
@@ -217,6 +221,7 @@
             <span class="curve-legend" id="winCurveLegend"></span>
           </div>
           <div class="curve-wrap"><canvas id="winCurveCanvas">窗口曲线</canvas></div>
+          <!-- 悬停读数行: 与主图同一份（t / dev / walk + 五条序列）, 都是**该行所属窗口**的读数 -->
           <div class="curve-readout" id="winCurveReadout">窗口内秒 0 → 300（0 = 边界）</div>
           <!-- 该行所属窗口在光标那一秒的 PM 盘口（与实况路径同字段同口径） -->
           <div class="curve-readout" id="winCurveBook"

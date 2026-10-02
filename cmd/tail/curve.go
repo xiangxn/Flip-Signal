@@ -92,6 +92,7 @@ func (rt *runtimeState) sampleCurve(tick flip.Tick, remMax int) {
 	}
 	p.Tie = rt.curve.tieFor(anchor, tick)
 	p.Extrap = tail.ExtrapPrice(anchor, tick.BinPrice, tick.Rem, remMax)
+	p.Dev, p.Walk = p.DevWalk() // 悬停读数行的两个策略派生量（公式在 internal/tail, 与重建共用）
 	rt.curve.add(start, slug, p)
 }
 

@@ -124,6 +124,35 @@ func TestSampleCurveCarriesBook(t *testing.T) {
 	}
 }
 
+// TestSampleCurveCarriesDevWalk 钉住采样时的两个策略派生量**真的落进了点**（悬停读数行
+// 的数据源）: 符号按该秒热门侧取, 四档全空那一 tick 两个都读不出来（0）。
+//
+// 公式本身的边界在 `internal/tail` 的 TestDevWalk, 这里只要走到量上——但**必须**走到:
+// sampleCurve 少调一次 DevWalk, 页面上那两个数就恒显「—」, 而曲线本身照样画得出来,
+// 除了人眼没人会发现。
+func TestSampleCurveCarriesDevWalk(t *testing.T) {
+	rt := &runtimeState{}
+	eng := tail.NewEngine(tail.DefaultConfig())
+	eng.BeginWindow(100000, 20) // 测试路径直接注入锚（生产走 UpgradeAnchor 精确命中）
+	rt.Engine, rt.EventStart, rt.Slug = eng, 1000, "w1"
+
+	rt.sampleCurve(flip.Tick{ // 锚 100000 / TWAP 100040 / 现货 100060, 热门侧 = UP
+		Ts: 1000*1000 + 1000, Rem: 299, TwapPrice: 100040, BinPrice: 100060,
+		UpBid: 0.94, UpAsk: 0.95, DownBid: 0.05, DownAsk: 0.06,
+	}, 150)
+	rt.sampleCurve(flip.Tick{ // 窗首瞬态式的四档全空 ⇒ 不知道该往哪边谈位移, 两个都 0
+		Ts: 1000*1000 + 2000, Rem: 298, TwapPrice: 100040, BinPrice: 100060,
+	}, 150)
+
+	got := rt.Curve()
+	if p := got.Points[0]; p.Dev != 60 || p.Walk != 40 {
+		t.Fatalf("dev/walk = (%v, %v), 期望 (60, 40)", p.Dev, p.Walk)
+	}
+	if p := got.Points[1]; p.Dev != 0 || p.Walk != 0 {
+		t.Fatalf("四档全空应两个都读不出来: (%v, %v)", p.Dev, p.Walk)
+	}
+}
+
 // TestCurveTieForReadsBuffer 钉住接线: tieFor 把**当前缓冲**喂给 tail.TieAt, 本 tick
 // 不在缓冲里（sampleCurve 是先算 tie 再 add）——缓冲 + 本 tick 各自只算一次。
 // 区间/闸门/补样本的细节在 `internal/tail` 的 TestTieAt, 这里只要走到量上。

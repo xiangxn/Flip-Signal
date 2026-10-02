@@ -84,10 +84,12 @@ func TestTailCurveRebuildFromEvents(t *testing.T) {
 			pm = collect.PMTick{NoBid: 0.01, NoAsk: 0.02}
 		}
 		ev.Ticks = append(ev.Ticks, collect.HFTick{
-			Ts:   (start + int64(i)) * 1000,
-			Rem:  299 - i,
-			Bin:  collect.BinTick{Price: anchor + float64(i)},
-			Twap: collect.TwapTick{Price: anchor},
+			Ts:  (start + int64(i)) * 1000,
+			Rem: 299 - i,
+			Bin: collect.BinTick{Price: anchor + float64(i)},
+			// TWAP 取 anchor+3+i: 只喂 walk（外推/结算线两条都只吃现货, 不受影响）, 让
+			// 「位移」有个非零值可断言——首点 UP 侧整侧无报价, 正好验符号翻转那一侧
+			Twap: collect.TwapTick{Price: anchor + 3 + float64(i)},
 			PM:   pm,
 		})
 	}
@@ -106,7 +108,7 @@ func TestTailCurveRebuildFromEvents(t *testing.T) {
 		t.Fatalf("点数 = %d, 期望 300", len(got.Points))
 	}
 	p0 := got.Points[0]
-	if p0.Ts != start*1000 || p0.Rem != 299 || p0.Anchor != anchor || p0.Twap != anchor || p0.Spot != anchor {
+	if p0.Ts != start*1000 || p0.Rem != 299 || p0.Anchor != anchor || p0.Twap != anchor+3 || p0.Spot != anchor {
 		t.Fatalf("首点 = %+v", p0)
 	}
 	// 盘口四档: 空侧（首点 UP 侧）0 原样保留, 有报价的照抄
@@ -142,6 +144,15 @@ func TestTailCurveRebuildFromEvents(t *testing.T) {
 		t.Fatalf("第 240 点 rem = %d, 期望 59", p.Rem)
 	} else if want := (60*anchor - (anchor + 240)) / 59; p.Tie != want {
 		t.Fatalf("rem=59 结算线 = %v, 期望 %v", p.Tie, want)
+	}
+
+	// dev / walk（悬停读数行）: 符号按**该秒热门侧**定向——第 1 点 UP 侧 .94/.95 >
+	// DOWN 侧 .05/.06 ⇒ yes 为 +1; 首点 UP 侧整侧无报价（决策 #21）⇒ 热门侧是 DOWN ⇒ 反过来
+	if p := got.Points[1]; p.Dev != 1 || p.Walk != 4 {
+		t.Fatalf("第 1 点 dev/walk = (%v, %v), 期望 (1, 4)", p.Dev, p.Walk)
+	}
+	if p := got.Points[0]; p.Dev != 0 || p.Walk != -3 {
+		t.Fatalf("首点（UP 侧空 ⇒ 热门侧 DOWN）dev/walk = (%v, %v), 期望 (0, −3)", p.Dev, p.Walk)
 	}
 }
 
