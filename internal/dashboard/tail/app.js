@@ -809,6 +809,7 @@
   }
 
   // 主图的 1s 轮询回来（永远是「本窗」）——弹窗图不走这里, 它是冻结的历史窗, 不轮询。
+  // ⚠️ 只由 tickCurve 调用, 且**只在响应不比已上屏的更旧时**（过期闩在那个函数里）。
   function onCurve(d) {
     d.points = d.points || [];
     var ch = mainChart;
@@ -1170,9 +1171,22 @@
     if (!document.hidden) tickCurve();
   });
 
+  // 旧响应保护: 服务端同窗内**只追加**（cmd/tail/curve.go 的 add 是纯追加, 缓冲只在换窗
+  // 时整体换装）, 而这里是每秒一拉——网络一抖动, 先到的可能是**更早发出**那次请求的响应
+  // （点数反而少一点）⇒ 上屏就是肉眼可见的「曲线往回退一秒」。给每次请求编号, 只认编号
+  // 最大的那次响应, 迟到的一律丢。
+  // ⚠️ 不能改成「点数只许变多」: 服务端若在窗中途重启, 同一 event_start 会从 1 个点
+  // 重新长起来, 点数闩会把画面**冻住**直到下一窗。
+  var curveSeq = 0;     // 已发出的请求编号
+  var curveApplied = 0; // 已上屏的最大编号
   function tickCurve() {
     if (document.hidden) return;
-    fetchJSON('/api/curve', onCurve);
+    var seq = ++curveSeq;
+    fetchJSON('/api/curve', function (d) {
+      if (seq < curveApplied) return; // 旧响应: 画面上已有更新的数据了
+      curveApplied = seq;
+      onCurve(d);
+    });
   }
 
   setInterval(tick, stateInterval);
