@@ -131,7 +131,7 @@ func withLogging(next http.Handler) http.Handler {
 		next.ServeHTTP(w, r)
 		// 高频轮询与静态资源不打日志（防刷屏）；favicon 404 也无须刷日志
 		p := r.URL.Path
-		if p != "/api/state" && !strings.HasPrefix(p, "/static/") && p != "/favicon.ico" {
+		if p != "/api/curve" && p != "/api/state" && !strings.HasPrefix(p, "/static/") && p != "/favicon.ico" {
 			log.Printf("[Dashboard] %s %s (%s)", r.Method, p, time.Since(start).Round(time.Microsecond))
 		}
 	})

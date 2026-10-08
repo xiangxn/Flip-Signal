@@ -239,6 +239,12 @@ sdk:
   # 调试模式: 打印请求/响应详情
   http_debug: false
 
+  # 强制 HTTP/1.1（关闭 HTTP/2）: clob.polymarket.com 的 Cloudflare 会 403 拦截 Go 的
+  # HTTP/2 客户端指纹（2026-10-08 生产事故；同 IP 同分钟实测 curl-h2 / Go-h1.1 全过、
+  # Go-h2 全拦）⇒ ⚠️ 不要改 false。默认值由 internal/config 的 defaultSDKConfig()
+  # 钉死为 true（防 SDK 默认漂移，理由见该函数注释；本行受漂移守卫逐键比对）。
+  disable_http2: true
+
   # SOCKS5 代理（网络受限地区用），如 "socks5://127.0.0.1:1080"。留空 = 不用代理
   # 注意: 这与 https_proxy/http_proxy 是两回事——后者由 Go 标准库
   # http.ProxyFromEnvironment 消费，走 HTTP 代理拨号 Binance。

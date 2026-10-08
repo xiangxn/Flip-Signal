@@ -164,7 +164,7 @@ func defaults() *AppConfig {
 
 // defaultSDKConfig 构造 SDK 配置的默认值：以 sdk.DefaultConfig() 为基底（端点 URL /
 // http_timeout / signature_type 等常量不手抄，SDK 改一处我们跟着走），
-// 只覆盖两处 v4 有意偏离项。
+// 只覆盖三处 v4 有意偏离/钉死项。
 //
 //  1. **OwnerKey 清空**：SDK 给的是占位私钥 "1111…1111"（64 hex，能过 HexToECDSA），
 //     而 v4 用**空串**表达"未配置"——decrypt.go 判「非空即密文」会拿它去解密，
@@ -173,6 +173,11 @@ func defaults() *AppConfig {
 //     不再降级纸面。
 //  2. **429 退避复位 0**：SDK 的 3 次/500ms 会盖掉它自己的内建兜底 6 次/1000ms
 //     （polymarket.go 的 defaultRateLimit* 常量，只有 ≤0 才走兜底）。
+//  3. **DisableHTTP2 钉死 true**：clob.polymarket.com 的 Cloudflare 会 403 拦 Go 的
+//     HTTP/2 客户端指纹（2026-10-08 生产事故；同 IP 同分钟实测 curl-h2 / Go-h1.1 全过、
+//     Go-h2 全拦）。SDK 默认当前也是 true，这里**钉死**而非吃默认值：部署链路是手工
+//     build.sh/deploy.sh（不跑测试），SDK 哪天翻转默认值，线上会静默退回 h2 重新 403，
+//     漂移守卫要等有人跑测试才发现。配置文件仍可显式覆盖（内网调试想开 h2 写 false）。
 //
 // SignatureType 不再显式赋 POLY_GNOSIS_SAFE（live 签名形态恒为 Gnosis Safe，
 // maker=FunderAddress、签名=OwnerKey EOA）：DefaultConfig 已是该值，且
@@ -182,5 +187,6 @@ func defaultSDKConfig() sdk.Config {
 	cfg.Polymarket.OwnerKey = ""
 	cfg.RateLimitMaxRetries = 0
 	cfg.RateLimitBaseDelay = 0
+	cfg.DisableHTTP2 = true
 	return cfg
 }
