@@ -87,9 +87,18 @@ func WalkUSD(side string, twap, anchor float64) float64 {
 // ⚠️ **twap 缺失（≤0）⇒ 放行**（fail-open）: 数据洞不该变成「静默不下单」, 且与
 // oracle / 分析脚本（`walk is None ⇒ 放行`）同口径。14 天数据里 T=150 判定 tick 的
 // twap 从不缺失（§5 审计: 缺 twap 的 tick 只在判定区外）, 故这一支零命中。
+//
+// ⚠️ **`WalkMinUSD == 0` ⇒ 整条闸关闭**（2026-10-08 用户决定）: 不是「阈值 0 的弱闸」
+//（那仍会拦下 walk 为负的行）, 而是**一段闸都不设**——T=150 段退回 #29 之前的口径,
+// 不会产出任何 `walk_low` 行。语义与 `fee_rate = 0 = 关闭计费`同构; 负值由启动校验
+// 挡下（无意义且会静默退化）。⚠️ 这也意味着：改动后在 BTC 上跑回 #29 的对照只需把
+// 这个键置 0（oracle 23 的恒定 43 口径下 parity pin 不受影响）。
 func WalkLeg(cfg Config, stage, side string, twap, anchor float64) bool {
 	if stage != StageT150 {
 		return true // 段 2/3 一字不动（这一段链的规则差异只有价格腿与本闸）
+	}
+	if !(cfg.WalkMinUSD > 0) {
+		return true // 0 = 关闭入场闸（整条不设）
 	}
 	if !(twap > 0) {
 		return true
@@ -132,9 +141,21 @@ func WalkLeg(cfg Config, stage, side string, twap, anchor float64) bool {
 // 「跳过 fill ≤ X 的 tick」。
 //
 // ⚠️ 调用点在 engine 的两处: stateAwait60 的 t60 判定（#33）与 stateListening（#32）。
+//
+// ⚠️ **`FloorMinPrice == 0` ⇒ 整条地板关闭**（2026-10-08 用户决定）: T=60 段与监听段
+// **回退到只用价格腿**（`PriceLeg` 的 `px ≥ price_min`, 默认 0.80）——不再要求
+// `px > floor`, 也不落任何 `floor_low` 影子行。与 `walk_min_usd = 0`、`fee_rate = 0`
+// 同一套「0 = 关」语义; 负值由启动校验挡下。
+// ⚠️ 注意它与「弱闸」在**本腿上等价**（有效价恒 > 0 ⇒ `px > 0` 恒真, 本腿本来就放行
+// 一切）——区别只在语义与可读性: 显式短路让「关掉地板」不必依赖 HotBook 的 `px > 0`
+// 前置条件（纯函数自身的封闭性）, 且 banner/注释/测试都把 0 读成「关闭」而不是
+// 「阈值 0」。
 func FloorLeg(cfg Config, stage string, px float64) bool {
 	if stage != StageT60 && stage != StageListen {
 		return true // 段 1 一字不动
+	}
+	if !(cfg.FloorMinPrice > 0) {
+		return true // 0 = 关闭地板（回退到价格腿 price_min 本身）
 	}
 	return px > cfg.FloorMinPrice
 }

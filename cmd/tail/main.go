@@ -637,10 +637,19 @@ func main() {
 		cfg.Runtime.OutputDir, cfg.Runtime.SlugPrefix)
 	log.Printf(" 参数: 三段链 rem≤%ds(判⑤)/rem≤%ds(判⑤)/此后每秒判② 热门侧有效价≥%.2f 位移≥%.0f美元 或 (1σ≥%.0f美元 且 位移≥1σ) stake=%.0fUSDC",
 		cfg.Tail.T150Rem, cfg.Tail.T60Rem, cfg.Tail.PriceMin, cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD, cfg.Tail.Stake)
-	log.Printf(" 入场闸: T=150 段 已结算位移 walk≥%.0f美元（tail.walk_min_usd; BTC 标定值, 换标的须重标定）",
-		cfg.Tail.WalkMinUSD)
-	log.Printf(" 价格地板: T=60 段与监听段 有效价>%.2f（tail.floor_min_price; BTC 标定值, 换标的须重标定; 被拦落 floor_low 影子行且链继续）",
-		cfg.Tail.FloorMinPrice)
+	if cfg.Tail.WalkMinUSD > 0 {
+		log.Printf(" 入场闸: T=150 段 已结算位移 walk≥%.0f美元（tail.walk_min_usd; BTC 标定值, 换标的须重标定）",
+			cfg.Tail.WalkMinUSD)
+	} else {
+		log.Printf(" 入场闸: ⚠️ 已关闭（tail.walk_min_usd=0）——T=150 段不设 walk 闸, 不再产出 walk_low 行")
+	}
+	if cfg.Tail.FloorMinPrice > 0 {
+		log.Printf(" 价格地板: T=60 段与监听段 有效价>%.2f（tail.floor_min_price; BTC 标定值, 换标的须重标定; 被拦落 floor_low 影子行且链继续）",
+			cfg.Tail.FloorMinPrice)
+	} else {
+		log.Printf(" 价格地板: ⚠️ 已关闭（tail.floor_min_price=0）——T=60 段与监听段只用价格腿 ≥%.2f, 不落 floor_low 影子行",
+			cfg.Tail.PriceMin)
+	}
 	if cfg.Tail.StopLossEnabled {
 		log.Printf(" 止损: 持仓侧 bid<%.2f 触发 FAK 卖出（按当时快照 bid; 卖不完/未吃到 → 下一 tick 重试; 落 exit_shares/exit_price/exit_rem 供页面对账; 卖不掉则冻结等人工, 决策 #34）",
 			cfg.Tail.StopLossBid)

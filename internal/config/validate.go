@@ -77,18 +77,20 @@ func Validate(cfg *AppConfig) (warnings []string, err error) {
 		return nil, fmt.Errorf("tail.dev_min_usd 必须 > 0、tail.sigma_min_usd 必须 ≥ 0（现值 %.3f / %.3f）",
 			cfg.Tail.DevMinUSD, cfg.Tail.SigmaMinUSD)
 	}
-	// 入场闸阈值为负 = 闸形同虚设（walk 只要不是深负就放行）, 却仍按「有闸」的口径解释
-	// 落盘的 walk_low 行——静默退化, 故挡在启动前。⚠️ 只做**结构性**校验: 「值是否是该
-	// 标的的合理解」是标定问题, 归 python 侧（BTC = 43, 换标的必须重标定, 决策 #25/#29）。
+	// 入场闸阈值: **0 = 关闭整条闸**（2026-10-08 用户决定, 见 decide.WalkLeg——不是
+	// 「阈值 0 的弱闸」而是 T=150 段恒放行）; 负值无意义且会与「有闸」的口径解释打架,
+	// 故挡在启动前。⚠️ 只做**结构性**校验: 「值是否是该标的的合理解」是标定问题,
+	// 归 python 侧（BTC = 43, 换标的必须重标定, 决策 #25/#29）。
 	if cfg.Tail.WalkMinUSD < 0 {
-		return nil, fmt.Errorf("tail.walk_min_usd 必须 ≥ 0（现值 %.3f）——负值会让入场闸形同虚设",
+		return nil, fmt.Errorf("tail.walk_min_usd 必须 ≥ 0（现值 %.3f）——0 = 关闭入场闸, 负值无意义",
 			cfg.Tail.WalkMinUSD)
 	}
 	// 价格地板（决策 #32 监听段 + #33 T=60 段）: 地板是**严格大于**、报价上界 1.00
-	// ⇒ ≥1 时没有任何报价过得去（这两段信号静默归零而不报错）; 负值无意义。0 是合法
-	// 弱闸（地板形同虚设, 退回 2026-10-01 之前的行为）。同样只做**结构性**校验。
+	// ⇒ ≥1 时没有任何报价过得去（这两段信号静默归零而不报错）; 负值无意义。
+	// **0 = 关闭地板**（2026-10-08 用户决定, 见 decide.FloorLeg——这两段回退到只用
+	// 价格腿 price_min, 不落 floor_low 影子行）。同样只做**结构性**校验。
 	if cfg.Tail.FloorMinPrice < 0 || cfg.Tail.FloorMinPrice >= 1 {
-		return nil, fmt.Errorf("tail.floor_min_price 必须在 [0,1) 内（现值 %.3f）——≥1 会让 T=60/监听段信号永远为空（地板是严格大于）",
+		return nil, fmt.Errorf("tail.floor_min_price 必须在 [0,1) 内（现值 %.3f）——0 = 关闭地板（回退到 price_min）, ≥1 会让 T=60/监听段信号永远为空（地板是严格大于）",
 			cfg.Tail.FloorMinPrice)
 	}
 	// 持仓止损触发价（2026-10-03）: 触发口径是**严格小于**且**必须 > 0** 才有意义

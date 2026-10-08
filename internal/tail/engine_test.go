@@ -522,6 +522,35 @@ func TestEngineWalkGateThresholdFromConfig(t *testing.T) {
 	}
 }
 
+// TestEngineWalkGateDisabledWhenZero 钉住「`walk_min_usd = 0` ⇒ **不设入场闸**」
+//（2026-10-08 用户决定, 见 decide.WalkLeg）在**引擎链上**的形态: 同一个「dev 全由
+// 缺口撑起、walk 为负」的 tick, 默认阈值 43 下落 `walk_low`（见
+// TestEngineWalkGateBlocksGapOnlyT150）, 阈值置 0 后**直接出信号**——是整条闸关掉,
+// 不是「阈值 0 的弱闸」（弱闸仍会拦负 walk, 那样本用例会红）。
+func TestEngineWalkGateDisabledWhenZero(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.WalkMinUSD = 0
+	e := NewEngine(cfg)
+	e.BeginWindow(0, 0)
+	if !e.UpgradeAnchor(testAnchor, 10) {
+		t.Fatal("窗口开局注入锚被拒")
+	}
+	// 与 TestEngineWalkGateBlocksGapOnlyT150 同一形态（押 no: dev=+100, walk=−50）。
+	o := row(t, e, 149, func(x *flip.Tick) {
+		x.UpAsk, x.UpBid = 0.10, 0.09
+		x.DownAsk, x.DownBid = 0.92, 0.90
+		x.BinPrice = testAnchor - 100
+		x.TwapPrice = testAnchor + 50
+	})
+	if !o.OK || o.Stage != StageT150 {
+		t.Fatalf("入场闸关闭时同一 tick 该出信号, 得到 stage=%s ok=%v reject=%s",
+			o.Stage, o.OK, o.RejectReason)
+	}
+	if o.RejectReason != "" {
+		t.Fatalf("信号行不该带 reject_reason, 得到 %q", o.RejectReason)
+	}
+}
+
 // TestEngineListenFloorShadowAndContinue 监听段**价格地板**（决策 #32）:
 // ② 达标但有效价 ≤ floor_min_price（默认 0.83）⇒ 落一行**影子行**
 //（ok=false, reject_reason=floor_low）且**链继续**（同段等更贵的 tick）;
@@ -620,6 +649,50 @@ func TestEngineFloorCoversT60AndListen(t *testing.T) {
 	}
 	if sig := row(t, e2, 40, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.96, 0.95 }); !sig.OK {
 		t.Fatalf("阈值 0.95 下 0.96 该出信号, 得到 ok=%v reason=%q", sig.OK, sig.RejectReason)
+	}
+}
+
+// TestEngineFloorDisabledWhenZero 钉住「`floor_min_price = 0` ⇒ **关闭地板、回退到
+// 价格腿 price_min**」（2026-10-08 用户决定, 见 decide.FloorLeg）在**引擎链上**的形态:
+// 同一批「本来会被地板拦成影子行」的廉价 tick, 置 0 后直接出信号——不落 `floor_low`,
+// 也不是把阈值降成「px > 0」的弱闸读法。对照: 默认 0.83 下这两处分别是
+// TestEngineFloorCoversT60AndListen 的 ①/②（影子行 + 零产出）。
+func TestEngineFloorDisabledWhenZero(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.FloorMinPrice = 0
+
+	// ① T=60 段: 0.82（⑤ 达标）在默认地板下是 t60 影子行, 关掉地板后是**信号**。
+	e := NewEngine(cfg)
+	e.BeginWindow(0, 0)
+	if !e.UpgradeAnchor(testAnchor, 10) {
+		t.Fatal("窗口开局注入锚被拒")
+	}
+	o := row(t, e, 59, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.82, 0.81 })
+	if !o.OK || o.Stage != StageT60 || o.RejectReason != "" {
+		t.Fatalf("地板关闭时段 2 的 0.82 该出信号, 得到 ok=%v stage=%s reason=%q",
+			o.OK, o.Stage, o.RejectReason)
+	}
+	noRow(t, e, 58) // 出信号即 Done
+
+	// ② 监听段: ② 达标的 0.81 在默认地板下是监听段影子行, 关掉地板后是**信号**。
+	e2 := NewEngine(cfg)
+	e2.BeginWindow(0, 0)
+	if !e2.UpgradeAnchor(testAnchor, 10) {
+		t.Fatal("窗口开局注入锚被拒")
+	}
+	if o := row(t, e2, 149, quietRow); o.OK {
+		t.Fatalf("段 1 该被拒（quietRow 两条腿都不过）, 得到 %+v", o)
+	}
+	if o := row(t, e2, 59, quietRow); o.OK {
+		t.Fatalf("段 2 该被拒, 得到 %+v", o)
+	}
+	sig := row(t, e2, 41, func(x *flip.Tick) { x.UpAsk, x.UpBid = 0.81, 0.80 })
+	if !sig.OK || sig.Stage != StageListen || sig.RejectReason != "" {
+		t.Fatalf("地板关闭时监听段的 0.81 该出信号, 得到 ok=%v stage=%s reason=%q",
+			sig.OK, sig.Stage, sig.RejectReason)
+	}
+	if !sig.Rules.Rule2() {
+		t.Fatalf("该信号须 ② 达标（价格腿是 price_min=0.80）: %+v", sig.Rules)
 	}
 }
 

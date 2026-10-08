@@ -56,12 +56,16 @@
   不达标 ⇒ 本段落 `reject_reason = walk_low`、**链继续**（多数改道到 T=60/监听，重入价中位
   0.990）。twap 缺失 ⇒ **放行**（fail-open）。阈值 = 配置键 **`tail.walk_min_usd`（默认 43）**
   ——键存在的理由是**跨标的各带一份自己的标定值**（43 是 BTC 价格的标定量，决策 #25），
-  **在 BTC 上仍不可调**（43 是那批数据的 argmax）。
+  **在 BTC 上仍不可调**（43 是那批数据的 argmax）。⚠️ **`0` = 关闭该闸**（2026-10-08 用户
+  决定）：T=150 段整条闸不设（**不是「阈值 0 的弱闸」**，连 walk 为负的行也放行），不再产出
+  `walk_low` 行。
   ⚠️ **价格地板**（决策 #32 + #33，**T=60 段与监听段**）：这两段除各自规则外还要有效价
   **严格大于 `tail.floor_min_price`（默认 0.83）**；不达标 ⇒ 落一行 `reject_reason =
   floor_low` 的**影子行**（`ok=false`，**两段共用闩锁 ⇒ 每窗至多一条** = 无地板世界里
   本该成交的那一笔）且**链继续**（T=60 被拦 ⇒ 走到监听段；监听段被拦 ⇒ 同段等更贵的 tick）。
-  T=150 段一字不动。
+  T=150 段一字不动。⚠️ **`tail.floor_min_price` 配 0 = 关闭该地板**（2026-10-08 用户决定）：
+  T=60 段与监听段**回退到只用价格腿 `price_min`**（`px ≥ 0.80`），不落 `floor_low` 影子行
+  ——与 `walk_min_usd = 0 = 关闭入场闸`同一套「0 = 关」语义，负值仍由启动校验挡下。
 - **回测基准（14 天，2U/注，oracle = `python/v4/23_tail_integrated.py`）**：
   T=150 n=958 WR 96.24% +42.17U / T=60 n=741 WR 99.19% +15.08U / 监听 n=375
   WR 99.20% +13.06U ⇒ **合计 n=2074 WR 97.83% +70.31U**（全部行 6704，参与判定 3640 窗，
@@ -948,8 +952,12 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
       **唯一**理由就是让 ETH 等其他标的各带一份**自己的**标定值（决策 #25），`DefaultConfig()`
       仍是回测标定的单一真相（oracle 23 恒定 43，parity pin 只在默认值下成立）。
       **在 BTC 上它仍不可调**（43 是那批数据的 argmax，见上条风险 ①）。
-      校验只加一条**结构性**的：`walk_min_usd ≥ 0`（负值 = 闸形同虚设却仍按「有闸」落
-      `walk_low` 行 ⇒ 静默退化）；`0` 是合法弱闸。`/api/config` 与启动横幅均已下发该值。
+      校验只加一条**结构性**的：`walk_min_usd ≥ 0`（负值无意义且会与「有闸」的口径解释打架
+      ⇒ 挡在启动前）。`/api/config` 与启动横幅均已下发该值（横幅在 0 时显式打「已关闭」）。
+      🆕 **`0` = 关闭入场闸**（2026-10-08 用户决定）：`WalkLeg` 在 `cfg.WalkMinUSD == 0` 时
+      直接放行——**不是「阈值 0 的弱闸」**（弱闸仍会拦负 walk），T=150 段退回 #29 之前的口径、
+      不再产出任何 `walk_low` 行；语义与 `fee_rate = 0 = 关闭计费`同构。⚠️ **parity 免疫**：
+      判定链在默认值 43 下逐位不变，pin 不动；oracle 23 的恒定 43 口径也不受影响。
     - ⚠️ **拒绝链 `missing_spot → no_hist → price_low → leg_out → walk_low`：`walk_low` 排在
       `leg_out` 之后是有意的**（与本文档早期草稿的顺序相反）——这样它只覆盖「闸是唯一拦路者」
       的行，计数恰好等于被闸的信号数（14 天 **250** 行），离线反事实才干净；排在前面会把
@@ -1181,6 +1189,10 @@ python/venv/bin/python python/v4/24_asset_data_check.py --asset btc --dir data/e
       一条影子行，无害）；阈值 = 配置键 **`tail.floor_min_price`（默认 0.83）**〔原名
       `listen_min_price`，#33 改〕，校验
       只加结构性一条 `[0,1)`（`≥1` 让监听段信号静默归零、`<0` 让地板形同虚设）。
+      🆕 **`0` = 关闭地板**（2026-10-08 用户决定）：`FloorLeg` 在 `cfg.FloorMinPrice == 0`
+      时直接放行——T=60 段与监听段**回退到只用价格腿 `price_min`**（默认 0.80）、不再产出
+      `floor_low` 影子行（与 `walk_min_usd = 0 = 关闭入场闸`同一套语义；行为上与「弱闸」
+      等价——有效价恒 > 0——但显式短路让本腿不依赖 HotBook 的 `px > 0` 前置、语义可读）。
     - ⚠️ **影子行的红线**：`ok=false` ⇒ `HasSignal`（防双单）/ `HasStage`（Resume）/
       `isSettlable`（结算）都不认它 ⇒ 不进信号/仓位/熔断/胜率，**也不带 `won` 与 P&L**。
       **复验靠离线 join**：同窗有信号行（11/15）⇒ 由它的 `won` 反推 outcome；整窗死亡
@@ -1402,8 +1414,8 @@ go run ./cmd/tail -config config.local.yaml -stake 2 -mode paper -dashboard ""
 | `runtime.output_dir` | `data/v4` | 观测 JSONL 输出目录（live 建议独立目录；**flip 与 tail 可共用**——前缀各自不撞） |
 | `runtime.slug_prefix` | `btc-updown-5m` | 市场 slug 前缀 |
 | `runtime.events_dir` | `data/events` | **cmd/tail 的原始采集目录**（数据格式 v2，与 `cmd/collect` 同构）。留空串 = 关闭；一标的一目录（见决策 #27） |
-| `tail.walk_min_usd` | 43 | **T=150 段入场闸**阈值：`walk = sgn·(twap − anchor) ≥ 此值`（决策 #29）。⚠️ **BTC 标定量**——键是为 ETH 等标的重标定而存在，不是让你在 BTC 上调（见项目概述）|
-| `tail.floor_min_price` | 0.83 | **价格地板**：**T=60 段与监听段**的有效价**严格大于**此值才成交（决策 #32 + #33；原名 `listen_min_price`）。⚠️ **BTC 标定量**，同上一行同理 |
+| `tail.walk_min_usd` | 43 | **T=150 段入场闸**阈值：`walk = sgn·(twap − anchor) ≥ 此值`（决策 #29）。⚠️ **BTC 标定量**——键是为 ETH 等标的重标定而存在，不是让你在 BTC 上调（见项目概述）；**`0` = 关闭该闸**（T=150 段整条不设，不是弱闸）|
+| `tail.floor_min_price` | 0.83 | **价格地板**：**T=60 段与监听段**的有效价**严格大于**此值才成交（决策 #32 + #33；原名 `listen_min_price`）。⚠️ **BTC 标定量**，同上一行同理；**`0` = 关闭该地板**（这两段回退到只用价格腿 `price_min`，不落 `floor_low` 影子行）|
 | `tail.stoploss_enabled` | `true` | **持仓止损总开关**（决策 #34，2026-10-03 用户要求默认开启）：持仓侧 bid 严格小于 `stoploss_bid` 即按快照 bid FAK 卖出；关掉 = 退回持有到期 |
 | `tail.stoploss_bid` | 0.30 | 止损触发价（决策 #34，用户决定值）：严格小于才触发；`bid == 0` 不算触发（整侧撤空 = 卖不掉）。实盘依据见 `docs/tail_stoploss_live_2026-10-03.md` |
 | `tail.fee_rate` | 0.07 | **taker 手续费率**（决策 #35）：官方公式 `fee = C×rate×p×(1−p)`、5 位小数；Crypto 档 0.07（市场 `feeSchedule` 实测一致）。**0 = 关闭计费**；改它不重算历史行（Fee 成交时定死） |

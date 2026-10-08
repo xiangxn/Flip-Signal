@@ -212,6 +212,23 @@ func TestWalkLegStageAndFailOpen(t *testing.T) {
 	if WalkLeg(tuned, StageT150, "yes", anchor+43, anchor) {
 		t.Errorf("阈值 500 时 walk=43 该拦下（BTC 默认值下它是放行的）")
 	}
+	// 0 = **关闭入场闸**（2026-10-08 用户决定）: 不是「阈值 0 的弱闸」——连 walk 为负
+	// 的行也放行（弱闸会拦下它们）, T=150 段不再产出任何 walk_low。
+	off := cfg
+	off.WalkMinUSD = 0
+	for _, c := range []struct {
+		name string
+		twap float64
+	}{
+		{"walk=+43（默认阈值下恰好放行）", anchor + 43},
+		{"walk=0（默认阈值 43 下拦下）", anchor},
+		{"walk 深负 −999（默认阈值下拦下）", anchor - 999},
+		{"twap=0（与 fail-open 同向）", 0},
+	} {
+		if !WalkLeg(off, StageT150, "yes", c.twap, anchor) {
+			t.Errorf("入场闸关闭（walk_min_usd=0）时 %s 该放行", c.name)
+		}
+	}
 	// WalkUSD 与 DevUSD 的恒等式: walk + basis(= sgn·(spot−twap)) ≡ dev = sgn·(spot−anchor)。
 	const spot = 100200
 	sgn := SgnFor("no")
@@ -259,9 +276,21 @@ func TestFloorLegStagesAndStrict(t *testing.T) {
 			t.Errorf("%s: 阈值 0.90 时应 0.91 放行、0.90 拦下", st)
 		}
 	}
-	tuned.FloorMinPrice = 0 // 合法弱闸: 价格恒 > 0 ⇒ 形同虚设（退回加地板之前）
-	if !FloorLeg(tuned, StageT60, 0.80) || !FloorLeg(tuned, StageListen, 0.80) {
-		t.Errorf("地板 0 时两段该一字不拦")
+	// 0 = **关闭地板**（2026-10-08 用户决定）: T=60 段与监听段回退到只用价格腿
+	// price_min——本腿对**任何**价都放行, 连 px=0（引擎走不到, 但纯函数自身应封闭）
+	// 也不例外。
+	tuned.FloorMinPrice = 0
+	for _, c := range []struct {
+		name string
+		px   float64
+	}{
+		{"px=0.80（默认地板 0.83 下拦下）", 0.80},
+		{"px=0.01（弱闸也不会放行的深低位）", 0.01},
+		{"px=0（引擎走不到, 纯函数仍应封闭）", 0},
+	} {
+		if !FloorLeg(tuned, StageT60, c.px) || !FloorLeg(tuned, StageListen, c.px) {
+			t.Errorf("地板关闭（floor_min_price=0）时两段该对 %s 放行", c.name)
+		}
 	}
 }
 

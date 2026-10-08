@@ -337,6 +337,8 @@ func (e *Engine) Latches() Latches {
 // walk_low, 而那种行去掉闸也不会是信号（离线反事实会凭空多出一批）。14 天里
 // walk_low = 250 行, 正是「⑤ 达标但 walk < 43」的那 250 个 T150 信号（只闸段 1）。
 // ⚠️ 43 是 `cfg.WalkMinUSD` 的**默认值**（BTC 标定值）——上句的计数只在该默认值下成立。
+// ⚠️ `cfg.WalkMinUSD == 0` = **关闭入场闸**（2026-10-08 用户决定, 见 decide.WalkLeg）:
+// 该段恒放行, 本分支不再产出 `walk_low` 行。
 func (e *Engine) decision(t flip.Tick, side string, px float64, src, stage string, frameT int) Observation {
 	o := e.snapshot(t, side, px, src, stage, frameT)
 	switch {
