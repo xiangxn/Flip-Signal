@@ -53,7 +53,6 @@ CACHE36 = BASE / "data" / "tail36_paths.pkl"     # 36 号的缓存 = **闸前**�
 STAKE = 2.0
 MAX_LAT = 300
 T150, T60 = 150, 60
-FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 
 # oracle 23 现行 pin（决策 #29 之后）: 信号 2080 / P&L +64.026354U / 判定行 6686
 PIN_N, PIN_PNL, PIN_ROWS, PIN_WALK_LOW = 2080, 64.026354, 6686, 250

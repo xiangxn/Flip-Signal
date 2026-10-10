@@ -54,10 +54,12 @@ import (
 //	floor_low 影子行（T=60 的 ⑤ / 监听段的 ② 达标但被地板拦下, 每窗至多一条）⇔ 两段同一分支
 //
 // ⚠️ 需要 audited、但不需断言的已知事实（oracle 第五节实测, 2026-09-24 数据）:
-// rem ≤ 150 的 542800 个 tick 里「**四档部分缺**」= 0（单侧空簿一次都没有）⇒ Go 的
-// 「有效价 ask→bid 兜底」门与 python 的「四档齐全」门在 14 天数据上**完全同源**,
-// 故本对账对空侧放宽零曝光——空侧是纯 live 行为改动（见 docs/tail_integrated_2026-09-24.md §2）。
-// 「整簿全空」（四档齐 0）361 个 tick 两套门都判无效, 也不影响。
+// rem ≤ 150 的 542800 个 tick 里「**四档部分缺**」（单侧空 ask 而 bid 还在）= **0 次**
+// （旧采集丢消息, 空侧形态当时没落盘）⇒ 这份数据上「有效价 ask→bid 兜底」零曝光
+// （bidFallback = 0, 见文件末的断言）。⚠️ 2026-10-11 起 python（oracle 23）与引擎
+// **同一条有效价门**——旧 python 的「四档齐全」门是对旧采集丢消息的补偿口径, 已删
+// （用户决定「回测统一到有效价门」）; 这份旧数据上两门口径逐位同源 ⇒ 本次统一不动
+// 本对账的任何一个数。「整簿全空」（四档齐 0）361 个 tick 两门都判无效, 也不影响。
 var parityStages = []struct {
 	stage string
 	rows  int     // 该段全部行（判定行 + 信号行）
@@ -308,7 +310,7 @@ func TestParityBacktest(t *testing.T) {
 		t.Errorf("三段合计 P&L = %+.6fU, 期望 %+.6fU", allPL, parityAllPL)
 	}
 	if bidFallback > 0 {
-		t.Errorf("有 %d 行的有效价来自 bid —— 与 oracle 的「四档齐全」宇宙分家, 须先对齐口径", bidFallback)
+		t.Errorf("有 %d 行的有效价来自 bid —— 这份旧数据里应为 0（空侧 tick 当时没落盘; 见文件头审计）", bidFallback)
 	}
 	t.Logf("合计: 行 %d / 信号 %d / 窗 %d / σ跳过 %d / WR %.4f%% / P&L %+.4fU",
 		allRows, allSig, windows, noSigma, float64(allWon)/float64(allSig)*100, allPL)

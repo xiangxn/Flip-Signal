@@ -66,8 +66,9 @@ func TestNewPMTick(t *testing.T) {
 //
 // 2026-09-24 实盘探针（cmd/bookprobe 走引擎同一条 SDK WS 通道）实测: 事件趋于确定后
 // 热门侧的卖单被整侧撤空——赢家侧 `n_asks = 0`（对手侧同时 `n_bids = 0`, 镜像同一
-// 事实）, 在闭市前 10~48s 持续到收盘。此时 bestAsk = 0 ⇒ 该 tick 被两族引擎的四档
-// 门控判无效（flip/tail 同判据）, Dashboard 的「—」也由此而来。
+// 事实）, 在闭市前 10~48s 持续到收盘。此时 bestAsk = 0 ⇒ flip 的**双侧报价齐全门**
+// 判该 tick 无效; tail（与 python 分析, 2026-10-11 起同口径）按**有效价门**照收
+// （这一侧走 bid 兜底）。Dashboard 的「—」由此而来。
 // ⚠️ 曾经 cmd/{flip,tail} 的 WS 循环用 `len(Asks)==0 || len(Bids)==0` 把这类消息整个
 // 丢掉, 内存里留下**撤单前那一份旧簿**（常是 0.99）, 于是页面与判定都用了假卖价。
 func TestNewPMTickEmptySide(t *testing.T) {
@@ -82,9 +83,10 @@ func TestNewPMTickEmptySide(t *testing.T) {
 	if pm.DownBid != 0 || pm.DownAsk != 0.02 {
 		t.Fatalf("空 bids: DownBid = %v, 期望 0", pm.DownBid)
 	}
-	// 四档门控 ⇒ 该 tick 无效（两族引擎同判据, 见 internal/{flip,tail}/engine.go）
+	// flip 的双侧齐全门 ⇒ 该 tick 无效（见 internal/flip/engine.go）;
+	// ⚠️ tail 的有效价门（internal/tail/engine.go）会照收这只 tick——不再「两族同判据」。
 	if pm.UpAsk > 0 && pm.DownBid > 0 && pm.UpBid > 0 && pm.DownAsk > 0 {
-		t.Fatal("空侧 tick 不应通过四档门控")
+		t.Fatal("空侧 tick 不应通过 flip 的双侧齐全门")
 	}
 }
 

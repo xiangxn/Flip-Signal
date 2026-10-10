@@ -31,8 +31,8 @@
 | 项 | 定义 |
 |---|---|
 | **尾盘快照** | 每个窗口在 **`rem ≤ 60` 的第一个有效 tick** 上取一次快照，买当时 ask 较高的一侧（**热门侧**）。**不是**"价格首次穿过某价位那一跳" |
-| 有效 tick | `pm` 存在 + `book_latency_ms ≤ 300`（与引擎 `flip.max_book_lat_ms` 同值）+ 四档报价（`yes_bid/yes_ask/no_bid/no_ask`）全 > 0 + `rem > 0` |
-| 热门侧 | `yes_ask ≥ no_ask` → yes，否则 no |
+| 有效 tick | `pm` 存在 + `book_latency_ms ≤ 300`（与引擎 `flip.max_book_lat_ms` 同值）+ **有效价 > 0**（每侧 `ask>0?ask:bid`，四档全 0 才无效；⚠️ 2026-10-11 前的旧 python 写法是「四档报价全 > 0」，两门在 data/btc 上逐位等价）+ `rem > 0` |
+| 热门侧 | **有效价**高的一侧（平局取 yes；旧写法 `yes_ask ≥ no_ask`，同上逐位等价） |
 | 价格腿 | 快照上热门侧 `ask ≥ 0.80`（低于 0.80 不记为该格样本） |
 | **位移 dev** | `sgn × (spot − anchor)`，单位**美元**；`sgn = +1` 押 yes（UP）、`−1` 押 no（DOWN）。**归一化**：永远"朝押注方向为正" |
 | **锚** | 该窗的 TWAP-60 开盘值（`twap_open_price`），即 Chainlink 结算线的起点 |

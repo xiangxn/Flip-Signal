@@ -1366,7 +1366,6 @@ def sec11(fix, ctx):
 # ── §12 机制：σ 小时 dev 的过滤意义为什么会失效 ───────────────────────────
 
 _MAX_LAT = getattr(S23, "MAX_LAT", 300)     # 与 oracle 同源，不另写一份
-_FOUR = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 MECH_SD_BANDS = ((0.0, 20.0), (20.0, 30.0), (30.0, 40.0),
                  (40.0, 63.0), (63.0, 100.0), (100.0, 1e9))
 MECH_R_BANDS = ((0.0, 0.25), (0.25, 0.5), (0.5, 1.0), (1.0, 2.0), (2.0, 1e9))
@@ -1379,7 +1378,7 @@ def _q(xs, f):
 
 
 def _mech_rows(ev, hr):
-    """rem=60 的判定行（四档齐全 ∧ 延迟合规）——机制检验用的**全宇宙**，不是成交行。"""
+    """rem=60 的判定行（有效价门 ∧ 延迟合规）——机制检验用的**全宇宙**，不是成交行。"""
     out = []
     for e in ev:
         oc, anchor, h = e.get("outcome"), e.get("twap_open_price"), hr.get(e["start_time"])
@@ -1389,13 +1388,16 @@ def _mech_rows(ev, hr):
         p = (x or {}).get("pm") or {}
         if (p.get("book_latency_ms") or 0) > _MAX_LAT:
             continue
-        if not all((p.get(k) or 0) > 0 for k in _FOUR):
+        yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+        nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+        eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+        if not (eff_yes > 0 or eff_no > 0):
             continue
         spot, tw = (x.get("bin") or {}).get("price"), (x.get("twap") or {}).get("price")
         if not spot or not tw:
             continue
-        side = "yes" if p["yes_ask"] >= p["no_ask"] else "no"
-        fill = p["yes_ask"] if side == "yes" else p["no_ask"]
+        side = "yes" if eff_yes >= eff_no else "no"
+        fill = eff_yes if side == "yes" else eff_no
         sgn = 1.0 if side == "yes" else -1.0
         close = e.get("twap_close_price")
         out.append(dict(date=datetime.datetime.fromtimestamp(

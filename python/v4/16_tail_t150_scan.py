@@ -13,7 +13,7 @@
       B 监听 T=60    —— 从 rem≤60 起扫到闭市，首个达标 tick 下单
       C 监听 T=150   —— **用户口径**：从 rem≤150 起扫到闭市，首个达标 tick 下单
 
-   「监听」= 每个有效 tick 都重新判一次（热门侧也按当刻两侧 ask 重新确定），
+   「监听」= 每个有效 tick 都重新判一次（热门侧也按当刻两侧**有效价**重新确定），
    命中即下单；不命中就继续等下一个 tick，直到 rem ≤ 0。
 
 2. **空簿**：热门侧订单簿为空在真实市场很常见，必须分清「有 0.99 可以吃」与
@@ -31,13 +31,19 @@
 argmax 都落在 T=60、[30,70] 是平台、T≥80 崩掉 ⇒ 结论是**不动**，不是「改成扫出来的那个」。
 
 判定规则（文档 §1.2/§2，与引擎 tail/rules 同）:
-  价格腿 hot_ask ≥ 0.80
+  价格腿 hot_eff ≥ 0.80
   位移腿 dev ≥ 63 美元  或  (sd ≥ 40 美元 且 dev ≥ sd)
   dev = sgn·(spot − anchor) 美元（sgn: 押 yes +1 / no −1）
   sd  = hist_bps·anchor/1e4 = 该窗 1σ 折美元
 
-成交: fill = 下单 tick 热门侧 ask; shares = STAKE/fill; 赢 → shares−STAKE, 输 → −STAKE
+成交: fill = 下单 tick 热门侧有效价; shares = STAKE/fill; 赢 → shares−STAKE, 输 → −STAKE
 判决: 日级 bootstrap 95%（2000 次, seed 42, 复用 14 的 day_bootstrap/pl）
+
+⚠️ **2026-10-11 门统一**：有效价门（每侧 eff = ask>0?ask:bid, 热门侧 = eff 高者, 平局
+取 yes; 四档全 0 才判无效）= 引擎实盘口径（决策 #21/#22），也是本脚本唯一的口径。
+旧版这里用的「四档齐全」门是对旧采集（丢消息留下冻结簿）的补偿，不是策略口径——已删；
+下面的放宽对照口径（ask 门）一并删除，第五节改为纯数据形态审计。data/btc 上两门
+逐位等价（14 天 542800 个 rem≤150 tick 里单侧空 0 次）⇒ 本脚本历史数字不变。
 
 用法: python/venv/bin/python python/v4/16_tail_t150_scan.py
 """
@@ -75,12 +81,8 @@ s14 = load("s14", BASE / "14_tail_sweep_sigma.py")
 
 # ── 数据提取 ──────────────────────────────────────────────────────────────
 
-def tail_ticks(e, T, gate="quad"):
-    """窗口内 rem ≤ T 的全部有效 tick（时间顺序）。
-
-    gate="quad"  四档报价全须 > 0（现行引擎/13/15 的门, 对齐基线）
-    gate="ask"   只要求至少一侧 ask > 0（可成交性门, 用于空簿审计的放宽对照）
-    """
+def tail_ticks(e, T):
+    """窗口内 rem ≤ T 的全部有效 tick（时间顺序, 有效价门 = 引擎口径）。"""
     out = []
     anchor = e.get("twap_open_price")
     if not anchor:
@@ -92,19 +94,18 @@ def tail_ticks(e, T, gate="quad"):
         rem = x.get("rem")
         if rem is None or rem <= 0 or rem > T:
             continue
-        ya, na = p.get("yes_ask") or 0, p.get("no_ask") or 0
-        if gate == "quad":
-            if not all((p.get(k) or 0) > 0 for k in FIELDS):
-                continue
-        else:
-            if not (ya > 0 or na > 0):
-                continue
+        yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+        nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+        eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+        if not (eff_yes > 0 or eff_no > 0):
+            continue
         spot = (x.get("bin") or {}).get("price")
         if not spot:
             continue
-        side = "yes" if ya >= na else "no"
+        side = "yes" if eff_yes >= eff_no else "no"
         out.append({
-            "rem": rem, "side": side, "fill": (ya if side == "yes" else na),
+            "rem": rem, "side": side,
+            "fill": (eff_yes if side == "yes" else eff_no),
             "ask_yes": ya, "ask_no": na,
             "spot": spot, "twap": (x.get("twap") or {}).get("price"),
         })
@@ -167,7 +168,6 @@ def main():
         return f"[{lo:+.1f}, {hi:+.1f}]"
 
     snap60, snap150, scan150, scan60 = [], [], [], []
-    extra_by_gate = 0            # 放宽为 ask 门后多出来的有效 tick（空簿审计）
     zero_book_ticks = 0
     reasons = collections.Counter()
 
@@ -181,13 +181,8 @@ def main():
         date = datetime.datetime.fromtimestamp(
             e["start_time"], datetime.timezone.utc).strftime("%Y-%m-%d")
 
-        t150 = tail_ticks(e, 150, "quad")
+        t150 = tail_ticks(e, 150)
         t60 = [t for t in t150 if t["rem"] <= 60]
-
-        # 空簿审计: 四档门之下被挡、但至少一侧 ask > 0 的 tick
-        relaxed = tail_ticks(e, 150, "ask")
-        extra_by_gate += len([t for t in relaxed
-                              if t["rem"] <= 150]) - len(t150)
 
         # D 快照 T=150 / A 快照 T=60
         for buf, ticks in ((snap150, t150), (snap60, t60)):
@@ -289,10 +284,10 @@ def main():
                     f for f in FIELDS if not (p.get(f) or 0))] += 1
     for k, v in q.items():
         print(f"  {k:<44} {v}")
-    print(f"\n  放宽为『至少一侧 ask > 0』后多出的有效 tick: {extra_by_gate}")
     print("  ⚠️ 14 天历史里零簿**永远是整簿同时为 0**（book_ts/book_latency 亦为 0 =")
-    print("     该窗根本没有 PM 簿），从未出现单侧 ask=0。")
-    print("     ⇒ **历史数据无法区分**用户问的那两种情形；两者都是 0。")
+    print("     该窗根本没有 PM 簿），从未出现单侧 ask=0（单侧空 tick 当时没落盘）。")
+    print("     ⇒ 这份旧采集上，有效价门与旧四档门**逐位等价**；用户问的那两种情形")
+    print("     在这批数据里无法区分（两者都是 0），须看 2026-09-24 之后的活体取证。")
 
     # ── 六、T 扫描（10s 分辨率）───────────────────────────────────────────
     # 先把每窗 ticks 预算好（含 dev/sig/win），两条曲线共用：
@@ -306,7 +301,7 @@ def main():
         h = hr.get(e["start_time"])
         hist_bps = (h / anchor * 1e4) if h else None
         sd = (hist_bps * anchor / 1e4) if hist_bps else None
-        tk = tail_ticks(e, 150, "quad")
+        tk = tail_ticks(e, 150)
         if not tk:
             continue
         date = datetime.datetime.fromtimestamp(

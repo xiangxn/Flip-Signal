@@ -65,7 +65,6 @@ P_FLOOR = 0.80
 DEV_USD = 63.0
 SD_MIN_USD = 40.0
 T150, T60 = 150, 60
-FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 
 STAGES = ("t150", "t60", "listen")
 
@@ -114,15 +113,19 @@ def win_ticks(e):
         rem = x.get("rem")
         if rem is None or rem <= 0 or rem > T150:
             continue
-        if not all((p.get(k) or 0) > 0 for k in FIELDS):
-            continue                       # 四档门（差集审计见第五节）
+        # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径; 旧「四档门」
+        # = 对旧采集丢消息的补偿口径, 已删）
+        yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+        nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+        eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+        if not (eff_yes > 0 or eff_no > 0):
+            continue                       # 整簿全空（四档齐 0）
         spot = (x.get("bin") or {}).get("price")
         if not spot:
             continue                       # 缺 spot 只跳过, 不推进段
-        ya, na = p.get("yes_ask") or 0, p.get("no_ask") or 0
-        side = "yes" if ya >= na else "no"  # 平局取 yes（与 Go HotBook 同）
+        side = "yes" if eff_yes >= eff_no else "no"  # 平局取 yes（与 Go HotBook 同）
         out.append({"rem": rem, "side": side,
-                    "fill": (ya if side == "yes" else na),
+                    "fill": (eff_yes if side == "yes" else eff_no),
                     "spot": spot, "twap": (x.get("twap") or {}).get("price"),
                     "i": i})
     return out
@@ -414,22 +417,17 @@ def main():
             if rem is None or rem <= 0 or rem > T150:
                 continue
             audit["参与审计的 tick 总数"] += 1
-            quad = all((p.get(k) or 0) > 0 for k in FIELDS)
-            eff = {}
-            for side, (bid_k, ask_k) in (("yes", ("yes_bid", "yes_ask")),
-                                         ("no", ("no_bid", "no_ask"))):
-                bid, ask = p.get(bid_k) or 0, p.get(ask_k) or 0
-                eff[side] = ask if ask > 0 else bid
-            if quad:
+            yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+            nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+            eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+            if not (eff_yes > 0 or eff_no > 0):
+                audit["整簿全空（四档齐 0 = 该窗无 PM 簿, 判无效）"] += 1
+                continue
+            if yb > 0 and ya > 0 and nb > 0 and na > 0:
                 if not (x.get("twap") or {}).get("price"):
                     audit["四档齐但 twap 缺（引擎不用 twap 判, 不影响宇宙）"] += 1
                 continue
-            if not any(eff.values()):
-                audit["整簿全空（四档齐 0 = 该窗无 PM 簿, 两套门一致判无效）"] += 1
-                continue
-            audit["四档部分缺（单侧空 ask 等）"] += 1
-            if eff["yes"] > 0 or eff["no"] > 0:
-                audit["  └ 有效价门放行而四档门拒绝（★ 宇宙分家）"] += 1
+            audit["四档部分缺（有效价门 bid 兜底照收, 旧四档门会丢）"] += 1
 
     allsig = [r for s in STAGES for r in signals[s]]
 
@@ -570,7 +568,7 @@ def main():
     print("  // ⚠️ 本表是 09-25 存档: T=150 价格腿仍是 ≥ 0.80（现行引擎为严格大于, 决策 #26）")
 
     print("\n" + "=" * 100)
-    print("六、审计：空簿 / twap 缺失 / 门控差集 + **持仓侧 bid 缺失**（止损可执行性）")
+    print("六、审计：空簿 / twap 缺失 / 四档部分缺 + **持仓侧 bid 缺失**（止损可执行性）")
     print("=" * 100)
     for k, v in audit.most_common():
         print(f"  {k:<30} {v}")

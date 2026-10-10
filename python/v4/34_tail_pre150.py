@@ -42,7 +42,6 @@ from v2.lib import load_events                                    # noqa: E402
 
 MAX_LAT = 300
 T150 = 150
-FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 
 K_NEW = 2.0            # 题面: dev > 2·sd
 SD_NEW = 63.0          # 题面: sd > 63 美元
@@ -89,15 +88,18 @@ def pre_ticks(e):
         rem = x.get("rem")
         if rem is None or rem <= T150:
             continue
-        if not all((p.get(k) or 0) > 0 for k in FIELDS):
+        # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径）
+        yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+        nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+        eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+        if not (eff_yes > 0 or eff_no > 0):
             continue
         spot = (x.get("bin") or {}).get("price")
         if not spot:
             continue
-        ya, na = p.get("yes_ask") or 0, p.get("no_ask") or 0
-        side = "yes" if ya >= na else "no"        # 平局取 yes（与 Go HotBook 同）
+        side = "yes" if eff_yes >= eff_no else "no"   # 平局取 yes（与 Go HotBook 同）
         out.append({"rem": rem, "side": side,
-                    "fill": (ya if side == "yes" else na),
+                    "fill": (eff_yes if side == "yes" else eff_no),
                     "spot": spot, "twap": (x.get("twap") or {}).get("price")})
     return out
 
@@ -457,7 +459,8 @@ def main():
         n_pre_ticks += len(pre_ticks(e))
         n_ticks150 += len(s23.win_ticks(e))
     print(f"  rem > 150 的可判定 tick: {n_pre_ticks};  rem ≤ 150 的: {n_ticks150}")
-    print("  （两段都在各自的提取器里做了同一套门: 延迟 ≤ 300ms ∧ 四档齐 ∧ spot > 0 ∧ rem > 0）")
+    print("  （两段都在各自的提取器里做了同一套门: 延迟 ≤ 300ms ∧ 有效价 > 0（ask 优先 bid 兜底）"
+          " ∧ spot > 0 ∧ rem > 0）")
 
 
 if __name__ == "__main__":

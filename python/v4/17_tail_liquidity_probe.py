@@ -22,6 +22,11 @@
   （没有更低价的档位可加），而 0.85 的 top5 含 5 档、是「以 0.85 成交的可用量」的**上界**。
   故 0.99 档的测量是精确的，其它价位偏乐观。
 
+⚠️ **2026-10-11 门统一**：全程只有有效价门（每侧 eff = ask>0?ask:bid, 热门侧 = eff
+高者, 平局取 yes; 四档全 0 才判无效; 决策 #21/#22 引擎实盘口径）；旧「四档齐全」门
+已删（旧采集丢消息留下冻结簿的补偿口径，不是策略口径）。data/btc 的 rem ≤ 150 里
+两门逐位等价（单侧空 tick 0 次）⇒ 本脚本历史数字不变。
+
 用法: python/venv/bin/python python/v4/17_tail_liquidity_probe.py
 """
 import sys
@@ -36,7 +41,6 @@ sys.path.insert(0, str(BASE.parent))
 from v2.lib import load_events                                    # noqa: E402
 
 MAX_LAT = 300
-FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 TAIL = 150
 FILLER_PX = 0.99
 STAKE = 2.0
@@ -70,17 +74,21 @@ def main():
             rem = x.get("rem")
             if rem is None or rem <= 0 or rem > TAIL:
                 continue
-            if not all((p.get(k) or 0) > 0 for k in FIELDS):
+            # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径）
+            yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+            nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+            eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+            if not (eff_yes > 0 or eff_no > 0):
                 continue
             # 镜像恒等式核验（只核验, 不做任何过滤）
             mirror_n += 1
             if abs((p.get("yes_ask_top5") or 0) - (p.get("no_bid_top5") or 0)) > 1e-6:
                 mirror_bad += 1
-            ya, na = p["yes_ask"], p["no_ask"]
-            side = "yes" if ya >= na else "no"
+            side = "yes" if eff_yes >= eff_no else "no"
             ticks.append({
                 "date": date, "rem": rem, "side": side,
-                "ask": p[f"{side}_ask"], "sz": p.get(f"{side}_ask_top5") or 0,
+                "ask": (eff_yes if side == "yes" else eff_no),
+                "sz": p.get(f"{side}_ask_top5") or 0,
                 "cold_ask": p[("no" if side == "yes" else "yes") + "_ask"],
                 "win": 1 if ((outcome == 0) if side == "yes" else (outcome == 1)) else 0,
             })
@@ -215,17 +223,21 @@ def main():
             rem = x.get("rem")
             if rem is None or rem <= 0 or rem > 60:
                 continue
-            if not all((p.get(k) or 0) > 0 for k in FIELDS):
+            # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径）
+            yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+            nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+            eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+            if not (eff_yes > 0 or eff_no > 0):
                 continue
-            ya, na = p["yes_ask"], p["no_ask"]
-            side = "yes" if ya >= na else "no"
+            side = "yes" if eff_yes >= eff_no else "no"
             sgn = 1.0 if side == "yes" else -1.0
             spot = (x.get("bin") or {}).get("price")
             if not spot:
                 break
             dev = sgn * (spot - anchor)
             sig = (dev / sd) if sd else None
-            fills, sz = p[f"{side}_ask"], p.get(f"{side}_ask_top5") or 0
+            fills = eff_yes if side == "yes" else eff_no
+            sz = p.get(f"{side}_ask_top5") or 0
             snapline = None
             if fills >= 0.80 and (dev >= 63.0 or (sd is not None and sd >= 40.0
                                                   and sig is not None and sig >= 1.0)):

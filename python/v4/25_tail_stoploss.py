@@ -64,7 +64,6 @@ from v2.lib import load_events                                    # noqa: E402
 STAKE = 2.0
 MAX_LAT = 300
 T150, T60 = 150, 60
-FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 FLIP_LV = 0.50                     # 「市场翻盘」判据：持仓侧 bid 下穿此价位
 GRID_X = (-35, -30, -25, -20, -15, -10, -5, 0)
 GRID_P = (0.40, 0.35, 0.30, 0.25, 0.20, 0.15)
@@ -96,14 +95,18 @@ def win_ticks_idx(e):
         rem = x.get("rem")
         if rem is None or rem <= 0 or rem > T150:
             continue
-        if not all((p.get(k) or 0) > 0 for k in FIELDS):
+        # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径）
+        yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+        nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+        eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+        if not (eff_yes > 0 or eff_no > 0):
             continue
         spot = (x.get("bin") or {}).get("price")
         if not spot:
             continue
-        ya, na = p.get("yes_ask") or 0, p.get("no_ask") or 0
-        side = "yes" if ya >= na else "no"
-        out.append({"rem": rem, "side": side, "fill": (ya if side == "yes" else na),
+        side = "yes" if eff_yes >= eff_no else "no"
+        out.append({"rem": rem, "side": side,
+                    "fill": (eff_yes if side == "yes" else eff_no),
                     "spot": spot, "twap": (x.get("twap") or {}).get("price"), "i": i})
     return out
 

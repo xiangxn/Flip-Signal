@@ -14,8 +14,8 @@
   · 判据与 38/23 同源：**日级配对 bootstrap 区间**；参照系 = **现行 config C43**
     （T150 闸 X=43，n=2080 / +64.026354U）——问题问的是「在现行形态上再加闸」。
 
-口径与 23（oracle）/ 38 逐位一致：宇宙 = `win_ticks` 可判定 tick（延迟 ≤300ms ∧ 四档齐
-∧ spot 在场 ∧ 0 < rem ≤ 150）；σ 按事件索引现算；T=150 价格腿严格大于。
+口径与 23（oracle）/ 38 逐位一致：宇宙 = `win_ticks` 可判定 tick（延迟 ≤300ms ∧ 有效价 > 0
+（ask 优先 bid 兜底）∧ spot 在场 ∧ 0 < rem ≤ 150）；σ 按事件索引现算；T=150 价格腿严格大于。
 闸的语义 = 「该段判定满足价格/dev/σ 腿但 walk < X ⇒ 本段不出信号、链继续（落到下一段）」。
 
 用法: python/venv/bin/python python/v4/40_tail_walk_gate_ext.py

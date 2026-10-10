@@ -65,8 +65,10 @@ if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 { continue }   // �
 
 `book` 事件是**整簿快照**（不是增量），空数组 = 市场真的没有那一侧。照存之后：
 
-- `feed.bestAsk/bestBid` 返回 **0** ⇒ 两族引擎的**四档门控**（`UpBid/UpAsk/DownBid/DownAsk > 0`）
-  把该 tick 判为无效 ⇒ 不会产出基于假卖价的信号（与回测宇宙同口径：回测数据里四档缺一即丢）；
+- `feed.bestAsk/bestBid` 返回 **0** ⇒ 下游门控按各自口径处理（⚠️ **2026-10-11 修订**：
+  flip 侧仍是**四档门控**（`UpBid/UpAsk/DownBid/DownAsk > 0`）判该 tick 无效；tail 侧同日
+  起（实为决策 #22 起）走**有效价门**——空侧照判、四档全 0 才无效，且全仓 python 回测已
+  统一到这条门）⇒ 都不会产出基于假卖价的信号；
 - Dashboard 的 `yes_ask/no_ask` 变 0 ⇒ 前端已有的 `> 0 ? 价 : '—'` 分支生效，显示 **「—」**
   （tail 页的「⑤ 本窗过不过」还会显示「无有效盘口」）。**前端无需改动**——它本来就是对的，
   错的是喂给它的数。
@@ -76,7 +78,7 @@ if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 { continue }   // �
 | 文件 | 改动 |
 |---|---|
 | `cmd/flip/main.go`、`cmd/tail/main.go` | 守卫只留 `book == nil`（含「为什么不能再丢」的中文注释） |
-| `internal/feed/pmtick_test.go` | 新增 `TestNewPMTickEmptySide`：空 asks/空 bids ⇒ 价格 0 且不通过四档门控（钉住前端「—」与引擎无效 tick 的数据契约） |
+| `internal/feed/pmtick_test.go` | 新增 `TestNewPMTickEmptySide`：空 asks/空 bids ⇒ 价格 0 且不通过 flip 的双侧齐全门（钉住前端「—」与「空侧不冒充价格」的数据契约；tail 侧有效价门照收并落 `hot_src=bid`） |
 
 ## 4. 一个与空侧**无关**的第二个陈旧来源：WS 慢消费者断线
 
@@ -158,5 +160,6 @@ if book == nil || len(book.Bids) == 0 || len(book.Asks) == 0 { continue }   // �
      （全 stale）——帧行"首个有效 tick"的语义在坏窗口会明显后移。
 
 修后**快照样本会变少**（今天这类窗一行不产），§5.2 判决的 `n ≥ 800` 闸门会走得慢一些——
-这是口径正确化的代价，不是退化：回测宇宙本来也要求四档齐全。
+这是口径正确化的代价，不是退化：tick 有效性由真实盘口判（⚠️ **2026-10-11 修订**：当时
+各侧还按「四档齐全」记，如今 tail 与全仓 python 统一走有效价门；此段的历史数字不变）。
 

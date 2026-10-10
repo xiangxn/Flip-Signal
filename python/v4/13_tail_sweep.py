@@ -72,19 +72,21 @@ def snapshots(events, hr, T, field="ask"):
             p = x.get("pm") or {}
             if not p or (p.get("book_latency_ms") or 0) > MAX_LAT:
                 continue
-            if not all((p.get(k) or 0) > 0
-                       for k in ("yes_bid", "yes_ask", "no_bid", "no_ask")):
+            # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径）
+            yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+            nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+            eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+            if not (eff_yes > 0 or eff_no > 0):
                 continue
             rem = x.get("rem")
             if rem is None or rem <= 0:
                 continue
             if rem <= T:
-                t, pm = x, p
+                t, pm, eff = x, p, {"yes": eff_yes, "no": eff_no}
                 break
         if t is None:
             continue
-        ya, na = pm["yes_ask"], pm["no_ask"]
-        side = "yes" if ya >= na else "no"
+        side = "yes" if eff["yes"] >= eff["no"] else "no"
         spot = (t.get("bin") or {}).get("price")
         twap = (t.get("twap") or {}).get("price")
         if not spot or not twap:
@@ -95,8 +97,8 @@ def snapshots(events, hr, T, field="ask"):
             "date": datetime.datetime.fromtimestamp(
                 e["start_time"], datetime.timezone.utc).strftime("%Y-%m-%d"),
             "side": side,
-            "fill": pm[f"{side}_{field}"],      # 触发（判定）字段
-            "buy": pm[f"{side}_ask"],           # 实际成交价（吃单）
+            "fill": eff[side] if field == "ask" else pm[f"{side}_{field}"],   # 触发（判定）字段
+            "buy": eff[side],                   # 实际成交价（吃单; ask 优先 bid 兜底）
             "mid": (pm[f"{side}_bid"] + pm[f"{side}_ask"]) / 2,
             "rem": t["rem"],
             "T": T,
@@ -375,20 +377,24 @@ def main():
             p = x.get("pm") or {}
             if not p or (p.get("book_latency_ms") or 0) > MAX_LAT:
                 continue
-            if not all((p.get(k) or 0) > 0
-                       for k in ("yes_bid", "yes_ask", "no_bid", "no_ask")):
+            # 有效价门（决策 #21/#22, 2026-10-11 起全仓 python 与引擎同口径）
+            yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+            nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+            eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+            if not (eff_yes > 0 or eff_no > 0):
                 continue
             rem = x.get("rem")
             if rem is None or rem <= 0:
                 continue
-            if p["yes_ask"] >= P_FLOOR or p["no_ask"] >= P_FLOOR:
-                side = "yes" if p["yes_ask"] >= p["no_ask"] else "no"
+            if eff_yes >= P_FLOOR or eff_no >= P_FLOOR:
+                side = "yes" if eff_yes >= eff_no else "no"
+                eff = eff_yes if side == "yes" else eff_no
                 spot = (x.get("bin") or {}).get("price")
                 twap = (x.get("twap") or {}).get("price")
                 if spot and twap:
                     sgn = 1.0 if side == "yes" else -1.0
                     ft.append({
-                        "side": side, "buy": p[f"{side}_ask"],
+                        "side": side, "buy": eff,
                         "mid": (p[f"{side}_bid"] + p[f"{side}_ask"]) / 2,
                         "rem": rem,
                         "d_spot": sgn * (spot - anchor) / anchor * 1e4,

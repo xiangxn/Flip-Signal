@@ -233,8 +233,9 @@ func main() {
 				// 确定后热门侧的卖单被撤空, 实盘探针（cmd/bookprobe）在闭市前 10~30s
 				// 逐秒读到 `asks = []`。旧守卫把它当噪声丢掉, 内存里留下**撤单前那一份
 				// 旧簿**（常是 0.99）, 于是引擎与 Dashboard 继续报一个早已不存在的卖价。
-				// 现在照存: bestAsk/bestBid 返回 0 ⇒ 该 tick 被四档门控判无效（与回测
-				// 宇宙同口径）, Dashboard 显示「—」——「没人卖」如实呈现。
+				// 现在照存: bestAsk/bestBid 返回 0 ⇒ 该 tick 被 flip 的「UP/DOWN 双侧
+				// 报价齐全」门判无效（本引擎口径）, Dashboard 显示「—」——「没人卖」如实
+				// 呈现。（tail 与 python 分析已改用有效价门, 单侧空照收——两族门不同。）
 				if book == nil {
 					continue
 				}

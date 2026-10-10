@@ -44,9 +44,13 @@ docs/tail_floor_from_t60_2026-10-01.md（结论交前向复验）。见 chain() 
 ⚠️ 与 Go 引擎逐条对齐的口径（parity 断言的就是这些）:
 
   1. **可判定 tick** = 延迟 ≤ 300ms ∧ 热门侧**有效价** > 0 ∧ spot > 0 ∧ rem > 0。
-     有效价 = `ask` 优先、`bid` 兜底（2026-09-24 起, a.md 第 2 条）——**不再是四档齐全**。
-     历史 14 天里没有一次单侧空簿（本脚本第五节实测）, 故这里仍用四档门 +
-     第 5 节的差集审计：一旦审计非 0, 两套宇宙就分家, parity 会立刻报出来。
+     有效价 = `ask` 优先、`bid` 兜底（2026-09-24 决策 #21/#22）; 热门侧 = 有效价高的
+     一侧（平局取 yes）; **四档全空**才判无效。⚠️ 2026-10-11 起 python 侧与引擎**同一
+     条门**——旧代码用的「四档齐全」门是对旧采集「丢消息留下冻结簿」的补偿口径
+     （回测数据本身的洞, 不是策略口径）, 已删除。旧 data/btc 上两门在本链的宇宙内
+     逐位同源（rem ≤ 150 的 tick 里单侧空 = 0 次, 见第五节）⇒ 统一**不动** parity pin;
+     全文件仅 **1 个** tick 两门不一致（rem=298 窗首、NO 侧整簿未到, 落在 tail 宇宙之外）。
+     正确采集（data/events）上二者差 42.9%, 那里只有本门一套口径。
   2. **σ 未就绪（sd is None）整窗跳过**——与 cmd/tail 的前置闸同源（决策 #13:
      `hist.Count() < HistMin` ⇒ 整窗不产出观测）。引擎内另有 no_hist 分支,
      那是纯函数防线（现网到不了）, 故 oracle 不做「σ 缺失仍判 dev 腿」的放行。
@@ -90,7 +94,6 @@ FLOOR_MIN_PRICE = 0.83     # **价格地板**（2026-10-01 决策 #32 落监听�
                            # listen_min_price 改名, 因为地板不再只管监听段）——同 walk, 本脚本
                            # 恒定默认值, 是 parity 的对账口径。
 T150, T60 = 150, 60
-FIELDS = ("yes_bid", "yes_ask", "no_bid", "no_ask")
 
 STAGES = ("t150", "t60", "listen")
 
@@ -125,15 +128,19 @@ def win_ticks(e):
         rem = x.get("rem")
         if rem is None or rem <= 0 or rem > T150:
             continue
-        if not all((p.get(k) or 0) > 0 for k in FIELDS):
-            continue                       # 四档门（差集审计见第五节）
+        # 每侧**有效价** = ask 优先、bid 兜底; 四档全空才无有效价 ⇒ 该 tick 无效
+        #（单侧空 ask 照收——尾盘赢家侧整侧撤空是常态, 决策 #21/#22）。
+        yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+        nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+        eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+        if not (eff_yes > 0 or eff_no > 0):
+            continue                       # 整簿全空（四档齐 0 = 该窗无 PM 簿）
         spot = (x.get("bin") or {}).get("price")
         if not spot:
             continue                       # 缺 spot 只跳过, 不推进段
-        ya, na = p.get("yes_ask") or 0, p.get("no_ask") or 0
-        side = "yes" if ya >= na else "no"  # 平局取 yes（与 Go HotBook 同）
+        side = "yes" if eff_yes >= eff_no else "no"   # 平局取 yes（与 Go HotBook 同）
         out.append({"rem": rem, "side": side,
-                    "fill": (ya if side == "yes" else na),
+                    "fill": (eff_yes if side == "yes" else eff_no),
                     "spot": spot, "twap": (x.get("twap") or {}).get("price")})
     return out
 
@@ -289,7 +296,7 @@ def main():
     floor_low = 0                          # 价格地板拦下的影子行数（段 2/3; 决策 #32/#33）
     skipped_no_sigma = 0                   # σ 未就绪整窗跳过（与 cmd/tail 前置闸同源）
     windows = 0                            # 参与统计的窗数（有可判定 tick 的）
-    audit = collections.Counter()          # 空簿/twap/门控差集审计
+    audit = collections.Counter()          # 空簿/twap/四档部分缺 的数据形态审计
     no_sigma_windows = 0
     margin = float("inf")                  # 判定边界的最小余量（浮点对账的安全垫）
 
@@ -335,8 +342,8 @@ def main():
             if r.get("ok"):
                 signals[r["stage"]].append(r)
 
-        # 审计: 空簿形态 / twap 缺失 / 「四档门 vs 有效价门」差集
-        # （差集非 0 ⇒ 两套宇宙分家, parity 的三段 n 会立刻对不上）
+        # 数据形态审计: 数一数本窗各形态的 tick。python 与引擎已是**同一条有效价门**,
+        # 这里只为「旧采集的差集有多大」留痕（旧 data/btc 上应为 0 ⇒ parity pin 不动）。
         for x in e.get("ticks") or []:
             p = x.get("pm") or {}
             if not p or (p.get("book_latency_ms") or 0) > MAX_LAT:
@@ -345,24 +352,19 @@ def main():
             if rem is None or rem <= 0 or rem > T150:
                 continue
             audit["参与审计的 tick 总数"] += 1
-            quad = all((p.get(k) or 0) > 0 for k in FIELDS)
-            eff = {}
-            for side, (bid_k, ask_k) in (("yes", ("yes_bid", "yes_ask")),
-                                         ("no", ("no_bid", "no_ask"))):
-                bid, ask = p.get(bid_k) or 0, p.get(ask_k) or 0
-                eff[side] = ask if ask > 0 else bid
-            if quad:
+            yb, ya = p.get("yes_bid") or 0, p.get("yes_ask") or 0
+            nb, na = p.get("no_bid") or 0, p.get("no_ask") or 0
+            eff_yes, eff_no = (ya if ya > 0 else yb), (na if na > 0 else nb)
+            if not (eff_yes > 0 or eff_no > 0):
+                audit["整簿全空（四档齐 0 = 该窗无 PM 簿, 判无效）"] += 1
+                continue
+            if yb > 0 and ya > 0 and nb > 0 and na > 0:
                 if not (x.get("twap") or {}).get("price"):
-                    # twap 缺的 tick 上 walk 无值 ⇒ 入场闸 fail-open（两边同口径, 不改变宇宙）
+                    # twap 缺的 tick 上 walk 无值 ⇒ 入场闸 fail-open（不改变宇宙）
                     audit["四档齐但 twap 缺（walk 闸 fail-open, 不影响宇宙）"] += 1
                 continue
-            if not any(eff.values()):
-                audit["整簿全空（四档齐 0 = 该窗无 PM 簿, 两套门一致判无效）"] += 1
-                continue
-            # 单侧/部分缺 —— Go 的有效价门会放行, python 的四档门不会 ⇒ 差集
-            audit["四档部分缺（单侧空 ask 等）"] += 1
-            if eff["yes"] > 0 or eff["no"] > 0:
-                audit["  └ 有效价门放行而四档门拒绝（★ 宇宙分家）"] += 1
+            # 单侧空 ask 而 bid 还在 → 有效价门用 bid 兜底照收（旧四档门会丢这类 tick）
+            audit["四档部分缺（有效价门 bid 兜底照收, 旧四档门会丢）"] += 1
 
     allsig = [r for s in STAGES for r in signals[s]]
 
@@ -437,16 +439,22 @@ def main():
     print(f"  // σ 未就绪整窗跳过 = {skipped_no_sigma} 窗（引擎前置闸同源, 决策 #13）")
     print(f"  // T=150 入场闸拦下 = {walk_low} 行（reject_reason = walk_low, 决策 #29）")
     print(f"  // 价格地板拦下 = {floor_low} 行（reject_reason = floor_low, 段 2/3; 决策 #32/#33; 影子行）")
-    print("  // 兜底零命中: 全部行 HotSrc 恒 ask（14 天里没有一次单侧空簿, 见第五节）")
+    print("  // 有效价兜底零命中: data/btc 的 tail 宇宙（rem ≤ 150）无「单侧空 ask」的 tick（见第五节）⇒ 全部行 fill 恒 ask")
 
     print("\n" + "=" * 100)
-    print("五、审计：空簿 / twap 缺失 / 门控差集（parity 宇宙是否与四档门同源）")
+    print("五、审计：空簿 / twap 缺失 / 四档部分缺（数据形态; python 与引擎同济于有效价门）")
     print("=" * 100)
     if not audit:
-        print("  零命中（rem ≤ 150 的 tick 全部四档齐备、twap 在场）——两套宇宙同源。")
+        print("  零命中。")
     else:
         for k, v in audit.most_common():
             print(f"  {k:<30} {v}")
+    print()
+    print("  ⚠️ 「四档部分缺」= 单侧空 ask 而 bid 还在的 tick —— 有效价门 bid 兜底照收。")
+    print("     旧 python 代码在这里用「四档齐全」门把它们丢掉（对旧采集丢消息的补偿口径）;")
+    print("     本仓 data/btc 的 rem ≤ 150 里它是 0 ⇒ 2026-10-11 的门统一对三组 pin 逐位无影响。")
+    print("     （全文件仅 1 个 tick 两门不一致: rem=298 窗首、NO 侧整簿未到, 在 tail 宇宙之外;")
+    print("       该 tick 落在 flip 侧, 而 flip 用自己那条双侧齐全门, 不受本统一影响。）")
     print(f"\n  σ 未就绪跳过的窗: {no_sigma_windows}")
 
 
